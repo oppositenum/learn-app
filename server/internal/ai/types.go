@@ -1,0 +1,125 @@
+package ai
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
+)
+
+type Purpose string
+
+const (
+	PurposeAnswerAnalysis    Purpose = "ANSWER_ANALYSIS"
+	PurposeSocraticTurn      Purpose = "SOCRATIC_TURN"
+	PurposeExplanation       Purpose = "EXPLANATION"
+	PurposeContentGeneration Purpose = "CONTENT_GENERATION"
+	PurposeContentReview     Purpose = "CONTENT_REVIEW"
+	PurposePlanSummary       Purpose = "PLAN_SUMMARY"
+	PurposeParentGuide       Purpose = "PARENT_GUIDE"
+	PurposeSTTTranscription  Purpose = "STT_TRANSCRIPTION"
+	PurposeTTSExplanation    Purpose = "TTS_EXPLANATION"
+)
+
+type AnalyzeAnswerRequest struct {
+	StudentID     string                      `json:"-"`
+	SessionID     string                      `json:"session_id"`
+	Question      content.QuestionForTeaching `json:"question"`
+	StudentAnswer string                      `json:"student_answer"`
+	PriorTurns    []TutorTurn                 `json:"prior_turns"`
+}
+
+type AbilitySignal struct {
+	AbilityID string `json:"ability_id"`
+	Signal    string `json:"signal"`
+}
+
+type AnalyzeAnswerResult struct {
+	AnswerCorrect            bool            `json:"answer_correct"`
+	ReasoningQuality         string          `json:"reasoning_quality"`
+	Confidence               float64         `json:"confidence"`
+	ErrorType                string          `json:"error_type"`
+	Misconceptions           []string        `json:"misconceptions"`
+	CoreAbilitySignals       []AbilitySignal `json:"core_ability_signals"`
+	EmotionSignal            string          `json:"emotion_signal"`
+	Engagement               string          `json:"engagement"`
+	RecommendedAction        tutor.State     `json:"recommended_action"`
+	SafeToIncreaseDifficulty bool            `json:"safe_to_increase_difficulty"`
+}
+
+type GenerateTurnRequest struct {
+	StudentID          string                      `json:"-"`
+	SessionID          string                      `json:"session_id"`
+	Question           content.QuestionForTeaching `json:"question"`
+	StudentAnswer      string                      `json:"student_answer"`
+	TutorDecision      tutor.Decision              `json:"tutor_decision"`
+	PriorTurns         []TutorTurn                 `json:"prior_turns"`
+	PreviousResponseID string                      `json:"previous_response_id,omitempty"`
+}
+
+type AnalogyRequest GenerateTurnRequest
+type ExampleRequest GenerateTurnRequest
+type ExplainRequest GenerateTurnRequest
+
+type SpeechSegment struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+type TutorTurn struct {
+	Message        string          `json:"message"`
+	Action         tutor.State     `json:"action"`
+	AnswerRevealed bool            `json:"answer_revealed"`
+	Segments       []SpeechSegment `json:"segments"`
+	ResponseID     string          `json:"-"`
+}
+
+type Explanation = TutorTurn
+
+type StructuredRequest struct {
+	RequestID          string
+	StudentID          string
+	SessionID          string
+	Purpose            Purpose
+	Instructions       string
+	Input              json.RawMessage
+	SchemaName         string
+	Schema             json.RawMessage
+	PreviousResponseID string
+}
+
+type StructuredResult struct {
+	ResponseID string
+	OutputJSON json.RawMessage
+	Usage      ModelUsage
+}
+
+type ModelUsage struct {
+	Provider           string
+	Model              string
+	InputTokens        int64
+	CachedInputTokens  int64
+	OutputTokens       int64
+	AudioInputSeconds  string
+	AudioOutputSeconds string
+}
+
+type UsageRecord struct {
+	RequestID string
+	StudentID string
+	SessionID string
+	Purpose   Purpose
+	Usage     ModelUsage
+	Latency   time.Duration
+	CreatedAt time.Time
+}
+
+type UsageRecorder interface {
+	RecordAIUsage(ctx context.Context, record UsageRecord) error
+}
+
+type PriceGuard interface {
+	EnsurePrice(ctx context.Context, provider, model string, at time.Time) error
+}

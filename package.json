@@ -1,0 +1,21 @@
+{
+  "name": "ai-learning-tutor",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22",
+    "npm": ">=10"
+  },
+  "workspaces": [
+    "apps/web"
+  ],
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  },
+  "scripts": {
+    "build": "npm run build --workspace @ai-learning-tutor/web",
+    "dev": "npm run dev --workspace @ai-learning-tutor/web",
+    "lint": "npm run lint --workspace @ai-learning-tutor/web",
+    "test": "npm run test --workspace @ai-learning-tutor/web"
+  }
+}

@@ -1,0 +1,28 @@
+.DS_Store
+.idea/
+.vscode/
+.playwright-mcp/
+
+# Frontend
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+output/playwright/
+
+# Go
+bin/
+*.test
+*.out
+
+# Local configuration
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Runtime data
+tmp/
+*.db
+*.sqlite
+*.sqlite3

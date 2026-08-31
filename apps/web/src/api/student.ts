@@ -1,0 +1,100 @@
+export interface SpeechSegment { id: string; text: string; start_ms: number; end_ms: number }
+export interface SubmitAnswerResult {
+  session_id: string
+  action: 'INTRO' | 'ASK' | 'WAIT' | 'ANALYZE' | 'PROBE' | 'HINT' | 'SCAFFOLD' | 'ANALOGY' | 'BACKTRACK' | 'EXPLAIN' | 'VOICE_EXPLAIN' | 'RETURN' | 'VARIANT' | 'ABSTRACT' | 'VERIFY' | 'REVIEW' | 'BREAK' | 'COMPLETE'
+  socratic_round: number
+  message: string
+  voice_segments?: SpeechSegment[]
+  voice_audio?: string
+  mastery_state?: string
+  energy?: number
+  tomorrow_plan_changed?: boolean
+}
+
+export interface PlanBlock { id: string; sequence: number; subject: string; knowledge_point_id: string; minutes: number; mode: string; reason: string; focus: string; original_task_id?: string }
+export interface TodayPlan { id: string; date: string; target_minutes: number; blocks: PlanBlock[] }
+export interface StudentSessionTurn { sequence: number; actor: 'STUDENT' | 'TUTOR' | 'SYSTEM'; action?: string; message: string; at: string }
+export interface StudentSession {
+  id: string; subject_code: string; subject_name: string; knowledge_point: string; difficulty: string; question_id: string; prompt: string
+  scene: Record<string, unknown>; input_schema: Record<string, unknown>; started_at: string; target_minutes: number; state: string; socratic_round: number; timeline: StudentSessionTurn[]
+  voice_segments?: SpeechSegment[]; voice_audio?: string
+}
+
+export interface StudentGrowth {
+  total_energy: number
+  streak_days: number
+  buildings: {
+    completed_days?: number
+    completed_sessions?: number
+    mastered_knowledge_points?: number
+    mastered_by_subject?: Partial<Record<'MATH' | 'CHINESE' | 'ENGLISH' | 'PHYSICS' | 'CHEMISTRY', number>>
+    corrected_misconceptions?: number
+    cross_subject_insights?: number
+  }
+}
+
+async function studentJSON<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(path, { credentials: 'same-origin', ...options })
+  if (!response.ok) throw new Error(`学习数据暂时不可用（${response.status}）`)
+  return response.json() as Promise<T>
+}
+
+export async function getTodayPlan(): Promise<TodayPlan | null> {
+  return (await studentJSON<{ plans: TodayPlan[] }>('/api/v1/student/today')).plans[0] ?? null
+}
+export async function startStudentSession(planBlockID: string): Promise<StudentSession> {
+  return studentJSON<StudentSession>('/api/v1/student/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan_block_id: planBlockID }) })
+}
+export async function getStudentSession(sessionID: string): Promise<StudentSession> {
+  return studentJSON<StudentSession>(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}`)
+}
+export async function getCurrentStudentSession(): Promise<StudentSession | null> {
+  const response = await fetch('/api/v1/student/sessions/current', { credentials: 'same-origin' })
+  if (response.status === 204) return null
+  if (!response.ok) throw new Error(`课堂状态暂时不可用（${response.status}）`)
+  return response.json() as Promise<StudentSession>
+}
+
+export async function submitStudentAnswer(sessionID: string, answer: string): Promise<SubmitAnswerResult> {
+  const response = await fetch(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/answers`, {
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer }),
+  })
+  if (!response.ok) throw new Error(`课堂暂时无法提交（${response.status}）`)
+  return response.json() as Promise<SubmitAnswerResult>
+}
+
+export async function requestStudentSupport(sessionID: string, type: 'HINT' | 'EXPLAIN'): Promise<SubmitAnswerResult> {
+  return studentJSON<SubmitAnswerResult>(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/support`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type }),
+  })
+}
+
+export async function completeStudentVoiceExplanation(sessionID: string): Promise<SubmitAnswerResult> {
+  return studentJSON<SubmitAnswerResult>(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/voice/complete`, {
+    method: 'POST',
+  })
+}
+
+export async function submitSessionReflection(sessionID: string, willingness: 'CONTINUE_TOMORROW' | 'PAUSE' | 'STOP'): Promise<void> {
+  await studentJSON(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/reflection`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ willingness }),
+  })
+}
+
+export async function getStudentGrowth(): Promise<StudentGrowth> {
+  const response = await fetch('/api/v1/student/growth', { credentials: 'same-origin' })
+  if (!response.ok) throw new Error(`成长数据暂时不可用（${response.status}）`)
+  return response.json() as Promise<StudentGrowth>
+}
+
+export async function transcribeStudentAudio(audio: Blob, durationSeconds: number, sessionID: string): Promise<string> {
+  const body = new FormData()
+  body.set('audio', audio, 'student-answer.webm')
+  body.set('duration_seconds', durationSeconds.toFixed(3))
+  body.set('session_id', sessionID)
+  const response = await fetch('/api/v1/student/speech/transcriptions', { method: 'POST', credentials: 'same-origin', body })
+  if (!response.ok) throw new Error(`语音识别暂时不可用（${response.status}）`)
+  const result = await response.json() as { transcript: string; requires_confirmation: boolean }
+  if (!result.requires_confirmation || !result.transcript.trim()) throw new Error('语音识别没有返回可确认的文字')
+  return result.transcript
+}

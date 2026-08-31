@@ -1,0 +1,44 @@
+# AI Learning Tutor Engineering Rules
+
+## Source Of Truth
+
+Read this file and `docs/product/互动式学习_V1.md` before changing the repository. The product specification is the V1 source of truth. Implement the numbered tasks in order and do not silently broaden a task.
+
+Task 004, Student Answer Non-Disclosure, is the first product safety gate. Do not implement a real Tutor or AI classroom until automated tests prove that Student APIs cannot serialize private answer data.
+
+## Non-Negotiable Constraints
+
+1. Student APIs must never return private answer fields.
+2. The Teaching Agent must not have repository or server administration permissions.
+3. Mastery is decided by the rules engine; an LLM must not write mastery state directly.
+4. Runtime classrooms must not read content in `DRAFT` state.
+5. Only `RELEASED` content may enter a runtime classroom.
+6. Every AI, STT, and TTS request must record usage and the applicable versioned price catalog entry.
+7. Parent and Student realtime DTOs must be separate server-side representations.
+8. A `SendAnswerToStudent` API must not exist for Parent or any other role.
+9. The default Socratic failed-round limit is three effective attempts.
+10. Cross-subject backtracking must preserve and return to the original task context.
+11. Every animation must support `prefers-reduced-motion`.
+12. Student and Parent experiences must remain usable at a 320 px viewport width.
+13. Do not copy third-party commercial question banks without clear licensing.
+14. Core teaching state machines require unit and integration tests.
+
+## Architecture Boundaries
+
+- Keep V1 as a modular monolith: Vue Web, Go API, PostgreSQL, and WebSocket.
+- Support `MATH`, `CHINESE`, `ENGLISH`, `PHYSICS`, and `CHEMISTRY` in shared models. Do not hard-code Math-only flows.
+- Keep public question data and private answer data physically or logically isolated.
+- The Student browser calls the Go API only. It must never call a teaching model provider directly.
+- Teaching model providers are accessible only through the server-side Teaching Agent Gateway and an explicit restricted tool set.
+- Validate all structured AI output against schemas before business logic consumes it.
+- Keep provider prices in a versioned catalog. Do not hard-code model prices in business logic.
+- Preserve content provenance, validation, review, release, quarantine, and audit history.
+
+## Development Workflow
+
+- Keep changes within the active numbered task.
+- Add tests in proportion to the affected security or state boundary.
+- Run `go test ./...`, `npm test`, and `npm run build` before declaring a task complete.
+- Run `npm run lint` for frontend source or configuration changes.
+- Never commit secrets, provider keys, raw child audio, or unnecessary personal data.
+- Use migrations for persistent schema changes and keep PostgreSQL as the production database contract.

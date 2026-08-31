@@ -1,0 +1,129 @@
+name: ai-learning-tutor
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env.production}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env.production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.production}
+      TZ: ${TZ:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    volumes:
+      - learning_tutor_postgres:/var/lib/postgresql/data
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    image: ai-learning-tutor-api:${APP_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: "no"
+    command: ["/app/migrate"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env.production}
+      TZ: ${TZ:-Asia/Shanghai}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  api:
+    image: ai-learning-tutor-api:${APP_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    init: true
+    environment:
+      HTTP_ADDR: :8080
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env.production}
+      TZ: ${TZ:-Asia/Shanghai}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_TUTOR_MODEL: ${OPENAI_TUTOR_MODEL:-}
+      OPENAI_CONTENT_GENERATION_MODEL: ${OPENAI_CONTENT_GENERATION_MODEL:-}
+      OPENAI_CONTENT_REVIEW_MODEL: ${OPENAI_CONTENT_REVIEW_MODEL:-}
+      CONTENT_GENERATOR_IDENTITY: ${CONTENT_GENERATOR_IDENTITY:-codex:content-generator}
+      OPENAI_STT_MODEL: ${OPENAI_STT_MODEL:-}
+      OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-}
+      OPENAI_TTS_VOICE: ${OPENAI_TTS_VOICE:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep -q '\"status\":\"ok\"'"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    networks:
+      - backend
+      - frontend
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 20s
+
+  web:
+    image: ai-learning-tutor-web:${APP_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_BIND_ADDR:-127.0.0.1}:${WEB_PORT:-18000}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/app-health | grep -q '^ok$'"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - frontend
+    user: "101:101"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  backend:
+    internal: true
+  frontend:
+
+volumes:
+  learning_tutor_postgres:

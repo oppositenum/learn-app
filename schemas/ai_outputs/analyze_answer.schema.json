@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "answer_correct",
+    "reasoning_quality",
+    "confidence",
+    "error_type",
+    "misconceptions",
+    "core_ability_signals",
+    "emotion_signal",
+    "engagement",
+    "recommended_action",
+    "safe_to_increase_difficulty"
+  ],
+  "properties": {
+    "answer_correct": { "type": "boolean" },
+    "reasoning_quality": { "enum": ["STRONG", "PARTIAL", "WEAK", "UNKNOWN"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "error_type": { "type": "string" },
+    "misconceptions": { "type": "array", "items": { "type": "string" } },
+    "core_ability_signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ability_id", "signal"],
+        "properties": {
+          "ability_id": { "type": "string" },
+          "signal": { "enum": ["STRONG", "NORMAL", "WEAK"] }
+        }
+      }
+    },
+    "emotion_signal": { "enum": ["NEUTRAL", "FRUSTRATED", "BORED", "ANXIOUS"] },
+    "engagement": { "enum": ["HIGH", "NORMAL", "LOW"] },
+    "recommended_action": {
+      "enum": ["PROBE", "HINT", "SCAFFOLD", "ANALOGY", "BACKTRACK", "EXPLAIN", "VOICE_EXPLAIN", "VARIANT", "BREAK"]
+    },
+    "safe_to_increase_difficulty": { "type": "boolean" }
+  }
+}

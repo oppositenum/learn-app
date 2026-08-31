@@ -1,0 +1,936 @@
+package classroom
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/mastery"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/reward"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/speech"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
+)
+
+var (
+	ErrSessionNotFound     = errors.New("classroom session not found")
+	ErrInvalidSupport      = errors.New("unsupported classroom support type")
+	ErrClassroomChanged    = errors.New("classroom changed while support response was generated")
+	ErrVoiceReturnRequired = errors.New("voice explanation must return to the original question before answering")
+	ErrVoiceNotActive      = errors.New("voice explanation is not active")
+)
+
+type VoiceResult struct {
+	Provider        string
+	Model           string
+	RequestID       string
+	DurationSeconds string
+	Segments        []speech.Segment
+	AudioDataURL    string
+}
+
+type VoiceProvider interface {
+	VoiceUsageIdentity() (provider, model string)
+	Explain(ctx context.Context, message string) (VoiceResult, error)
+}
+
+type Service struct {
+	pool    *pgxpool.Pool
+	hub     *realtime.Hub
+	voice   VoiceProvider
+	usage   ai.UsageRecorder
+	planner *planner.Service
+	agent   ai.TeachingAgent
+	now     func() time.Time
+}
+
+func (service *Service) WithTeachingAgent(agent ai.TeachingAgent) *Service {
+	service.agent = agent
+	return service
+}
+
+func (service *Service) WithClock(now func() time.Time) *Service {
+	if now != nil {
+		service.now = now
+	}
+	return service
+}
+
+func NewService(pool *pgxpool.Pool, hub *realtime.Hub, voice VoiceProvider, usage ai.UsageRecorder, planners ...*planner.Service) *Service {
+	service := &Service{pool: pool, hub: hub, voice: voice, usage: usage, now: time.Now}
+	if len(planners) > 0 {
+		service.planner = planners[0]
+	}
+	return service
+}
+
+type SubmitResult struct {
+	SessionID       string           `json:"session_id"`
+	Action          tutor.State      `json:"action"`
+	SocraticRound   int              `json:"socratic_round"`
+	Message         string           `json:"message"`
+	VoiceSegments   []speech.Segment `json:"voice_segments,omitempty"`
+	VoiceAudio      string           `json:"voice_audio,omitempty"`
+	MasteryState    mastery.State    `json:"mastery_state,omitempty"`
+	Energy          int              `json:"energy,omitempty"`
+	TomorrowChanged bool             `json:"tomorrow_plan_changed,omitempty"`
+}
+
+type SupportType string
+
+const (
+	SupportHint    SupportType = "HINT"
+	SupportExplain SupportType = "EXPLAIN"
+)
+
+type sessionRow struct {
+	studentID, questionID, knowledgePointID, subjectID uuid.UUID
+	state                                              tutor.State
+	fails                                              int
+	answer                                             string
+	misconceptions                                     json.RawMessage
+	version                                            int64
+	responseID                                         string
+	evidenceForm                                       mastery.Form
+	originalTaskID, activeTaskID                       *uuid.UUID
+}
+
+type preparedAgent struct {
+	version  int64
+	analysis ai.AnalyzeAnswerResult
+	decision tutor.Decision
+	turn     ai.TutorTurn
+}
+
+type preparedVoice struct {
+	version int64
+	result  VoiceResult
+}
+
+func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uuid.UUID, answer string) (SubmitResult, error) {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return SubmitResult{}, errors.New("answer is required")
+	}
+	state, err := service.currentState(ctx, studentUserID, sessionID)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if state == tutor.StateVoiceExplain {
+		return SubmitResult{}, ErrVoiceReturnRequired
+	}
+	var prepared *preparedAgent
+	if service.agent != nil {
+		prepared, err = service.prepareAgent(ctx, studentUserID, sessionID, answer)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+	}
+	now := service.now()
+	voice, err := service.prepareVoice(ctx, studentUserID, sessionID, answer, prepared, now)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	var published []realtime.Event
+	var result SubmitResult
+	var planStudentID uuid.UUID
+	err = pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		row, err := loadSession(ctx, tx, studentUserID, sessionID)
+		if err != nil {
+			return err
+		}
+		if prepared != nil && prepared.version != row.version {
+			return errors.New("classroom changed while teaching response was generated")
+		}
+		if voice != nil && voice.version != row.version {
+			return errors.New("classroom changed while voice response was generated")
+		}
+		correct := normalized(answer) == normalized(row.answer)
+		if prepared != nil && prepared.analysis.AnswerCorrect && prepared.analysis.Confidence >= 0.9 {
+			correct = true
+		}
+		answerID := uuid.New()
+		turnSequence, eventSequence, err := nextSequences(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns (id,session_id,sequence,actor,action,message) VALUES ($1,$2,$3,'STUDENT',NULL,$4)`, uuid.New(), sessionID, turnSequence, answer); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO student_answers (id,session_id,question_id,answer_text) VALUES ($1,$2,$3,$4)`, answerID, sessionID, row.questionID, answer); err != nil {
+			return err
+		}
+		errorType := "NONE"
+		reasoningQuality := reasoning(correct)
+		emotionSignal := "NEUTRAL"
+		engagement := "NORMAL"
+		analysisMisconceptions := row.misconceptions
+		recommended := string(tutor.StateVariant)
+		if !correct {
+			errorType, recommended = firstMisconception(row.misconceptions), string(nextDecision(row).NextState)
+		}
+		confidence := 1.0
+		if prepared != nil {
+			reasoningQuality = prepared.analysis.ReasoningQuality
+			emotionSignal = prepared.analysis.EmotionSignal
+			engagement = prepared.analysis.Engagement
+			confidence = prepared.analysis.Confidence
+			if !correct {
+				if prepared.analysis.ErrorType != "" {
+					errorType = prepared.analysis.ErrorType
+				}
+				if len(prepared.analysis.Misconceptions) > 0 {
+					analysisMisconceptions, _ = json.Marshal(prepared.analysis.Misconceptions)
+				}
+				recommended = string(prepared.decision.NextState)
+			}
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO answer_analyses (id,student_answer_id,answer_correct,reasoning_quality,confidence,error_type,misconceptions_private_json,emotion_signal,engagement,recommended_action) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.New(), answerID, correct, reasoningQuality, confidence, errorType, misconceptionPayload(correct, analysisMisconceptions), emotionSignal, engagement, recommended); err != nil {
+			return err
+		}
+		misconceptionCode := firstMisconception(analysisMisconceptions)
+		submittedStudent, _ := json.Marshal(map[string]any{"status": "RECEIVED"})
+		submittedParent, _ := json.Marshal(map[string]any{"student_answer": answer})
+		submittedEvent := makeEvent(row.studentID, sessionID, eventSequence, realtime.EventAnswerSubmitted, submittedStudent, submittedParent, now)
+		if err := insertEvent(ctx, tx, submittedEvent); err != nil {
+			return err
+		}
+		published = append(published, submittedEvent)
+		analyzedStudent, _ := json.Marshal(map[string]any{"answer_correct": correct})
+		analyzedParent, _ := json.Marshal(map[string]any{"student_answer": answer, "correct_answer": row.answer, "answer_correct": correct, "reasoning_quality": reasoningQuality, "confidence": confidence, "error_type": errorType, "misconception": misconceptionCode, "emotion_signal": emotionSignal, "engagement": engagement, "recommended_action": recommended})
+		analyzedEvent := makeEvent(row.studentID, sessionID, eventSequence+1, realtime.EventAnswerAnalyzed, analyzedStudent, analyzedParent, now)
+		if err := insertEvent(ctx, tx, analyzedEvent); err != nil {
+			return err
+		}
+		published = append(published, analyzedEvent)
+		eventSequence += 2
+		if prepared != nil {
+			aiStudent, _ := json.Marshal(map[string]any{"status": "COMPLETED"})
+			aiParent, _ := json.Marshal(map[string]any{"status": "COMPLETED", "purpose": "ANSWER_ANALYSIS"})
+			aiEvent := makeEvent(row.studentID, sessionID, eventSequence, realtime.EventAITurnCompleted, aiStudent, aiParent, now)
+			if err := insertEvent(ctx, tx, aiEvent); err != nil {
+				return err
+			}
+			published = append(published, aiEvent)
+			eventSequence++
+		}
+		if !correct {
+			if err := recordMisconception(ctx, tx, row, now, misconceptionCode); err != nil {
+				return err
+			}
+		}
+
+		if correct {
+			var completedEvents []realtime.Event
+			result, completedEvents, err = service.complete(ctx, tx, row, sessionID, turnSequence+1, eventSequence, now)
+			published = append(published, completedEvents...)
+			if result.Action == tutor.StateComplete {
+				planStudentID = row.studentID
+			}
+			return err
+		}
+		decision := nextDecision(row)
+		message := tutorMessage(decision.NextState)
+		responseID := ""
+		if prepared != nil {
+			decision = prepared.decision
+			message = prepared.turn.Message
+			responseID = prepared.turn.ResponseID
+		}
+		if decision.NextState == tutor.StateBacktrack {
+			backtrackResult, backtrackEvent, found, err := service.beginBacktrack(ctx, tx, row, sessionID, turnSequence+1, eventSequence, now, responseID, engagement)
+			if err != nil {
+				return err
+			}
+			if found {
+				result = backtrackResult
+				published = append(published, backtrackEvent)
+				return nil
+			}
+			decision = tutor.Decision{NextState: tutor.StateScaffold, SocraticRound: max(1, row.fails+1), Reason: "prerequisite gap reported but no released dependency is available; use a smaller local step"}
+			message = tutorMessage(decision.NextState)
+			responseID = ""
+		}
+		result = SubmitResult{SessionID: sessionID.String(), Action: decision.NextState, SocraticRound: decision.SocraticRound, Message: message}
+		if decision.NextState == tutor.StateVoiceExplain {
+			if voice == nil {
+				return errors.New("voice explanation was not prepared")
+			}
+			result.VoiceSegments = voice.result.Segments
+			result.VoiceAudio = voice.result.AudioDataURL
+			outputID := uuid.New()
+			if _, err := tx.Exec(ctx, `INSERT INTO speech_outputs (id,student_id,session_id,provider,model,duration_seconds,audio_data_url) VALUES ($1,$2,$3,$4,$5,$6::numeric,$7)`, outputID, row.studentID, sessionID, voice.result.Provider, voice.result.Model, voice.result.DurationSeconds, voice.result.AudioDataURL); err != nil {
+				return err
+			}
+			for index, segment := range voice.result.Segments {
+				if _, err := tx.Exec(ctx, `INSERT INTO speech_segments(id,speech_output_id,sequence,text,start_ms,end_ms)VALUES($1,$2,$3,$4,$5,$6)`, uuid.New(), outputID, index+1, segment.Text, segment.StartMS, segment.EndMS); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_state=$2,socratic_fail_count=$3,teaching_response_id=COALESCE(NULLIF($4,''),teaching_response_id),engagement_state=$5,version=version+1 WHERE id=$1`, sessionID, decision.NextState, max(row.fails, decision.SocraticRound), responseID, engagement); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns (id,session_id,sequence,actor,action,message,reason_private) VALUES ($1,$2,$3,'TUTOR',$4,$5,$6)`, uuid.New(), sessionID, turnSequence+1, decision.NextState, message, decision.Reason); err != nil {
+			return err
+		}
+		studentPayload, _ := json.Marshal(map[string]any{"action": decision.NextState, "round": decision.SocraticRound, "message": message})
+		parentPayload, _ := json.Marshal(map[string]any{"student_answer": answer, "correct_answer": row.answer, "answer_correct": false, "error_type": errorType, "misconception": misconceptionCode, "action": decision.NextState, "round": decision.SocraticRound, "message": message, "reason": decision.Reason})
+		event := makeEvent(row.studentID, sessionID, eventSequence, realtime.EventTutorActionSelected, studentPayload, parentPayload, now)
+		if err := insertEvent(ctx, tx, event); err != nil {
+			return err
+		}
+		published = append(published, event)
+		if decision.NextState == tutor.StateVoiceExplain {
+			voiceStudent, _ := json.Marshal(map[string]any{"action": decision.NextState, "message": message})
+			voiceParent, _ := json.Marshal(map[string]any{"action": decision.NextState, "message": message, "reason": decision.Reason})
+			voiceEvent := makeEvent(row.studentID, sessionID, eventSequence+1, realtime.EventVoiceExplainStarted, voiceStudent, voiceParent, now)
+			if err := insertEvent(ctx, tx, voiceEvent); err != nil {
+				return err
+			}
+			published = append(published, voiceEvent)
+		}
+		return nil
+	})
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if planStudentID != uuid.Nil {
+		if service.planner == nil {
+			return SubmitResult{}, errors.New("adaptive planner is required")
+		}
+		if _, err := service.planner.Ensure(ctx, planStudentID, now.AddDate(0, 0, 1), sessionID); err != nil {
+			return SubmitResult{}, err
+		}
+		result.TomorrowChanged = true
+		planEvent, err := service.recordEvent(ctx, planStudentID, sessionID, realtime.EventPlanModified,
+			map[string]any{"tomorrow_plan_changed": true},
+			map[string]any{"action": tutor.StateComplete, "tomorrow_plan_changed": true, "reason": "session performance changed the next-day plan"}, now)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		published = append(published, planEvent)
+	}
+	for _, event := range published {
+		if service.hub != nil {
+			_ = service.hub.Publish(event)
+		}
+	}
+	return result, nil
+}
+
+func (service *Service) beginBacktrack(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID uuid.UUID, turnSequence, eventSequence int64, now time.Time, responseID, engagement string) (SubmitResult, realtime.Event, bool, error) {
+	var prerequisiteKnowledgePointID, prerequisiteSubjectID, prerequisiteQuestionID uuid.UUID
+	var prerequisiteName, prerequisitePrompt, prerequisiteSubject string
+	err := tx.QueryRow(ctx, `
+SELECT dep.target_knowledge_point_id,kp.subject_id,s.code,kp.name,q.id,q.prompt_public
+FROM cross_subject_dependencies dep
+JOIN knowledge_points kp ON kp.id=dep.target_knowledge_point_id AND kp.status='RELEASED'
+JOIN subjects s ON s.id=kp.subject_id
+JOIN questions q ON q.knowledge_point_id=kp.id AND q.status='RELEASED'
+LEFT JOIN student_skill_states ss ON ss.student_id=$2 AND ss.knowledge_point_id=kp.id
+WHERE dep.source_knowledge_point_id=$1
+  AND COALESCE(ss.state,'UNKNOWN') NOT IN('UNDERSTOOD','MASTERED')
+ORDER BY dep.strength DESC,q.difficulty,q.id LIMIT 1`, row.knowledgePointID, row.studentID).Scan(&prerequisiteKnowledgePointID, &prerequisiteSubjectID, &prerequisiteSubject, &prerequisiteName, &prerequisiteQuestionID, &prerequisitePrompt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SubmitResult{}, realtime.Event{}, false, nil
+	}
+	if err != nil {
+		return SubmitResult{}, realtime.Event{}, false, err
+	}
+	message := "发现可能的底层缺口，先补一小步：" + prerequisiteName + "。完成后会自动回到原题。"
+	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET original_task_id=COALESCE(original_task_id,$2),active_task_id=$3,current_question_id=$4,subject_id=$5,current_state='BACKTRACK',socratic_fail_count=0,evidence_form='TEXTBOOK',teaching_response_id=COALESCE(NULLIF($6,''),teaching_response_id),engagement_state=$7,version=version+1 WHERE id=$1`, sessionID, row.knowledgePointID, prerequisiteKnowledgePointID, prerequisiteQuestionID, prerequisiteSubjectID, responseID, engagement); err != nil {
+		return SubmitResult{}, realtime.Event{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private,response_id) VALUES($1,$2,$3,'TUTOR','BACKTRACK',$4,'released cross-subject prerequisite selected; original task preserved',NULLIF($5,''))`, uuid.New(), sessionID, turnSequence, message, responseID); err != nil {
+		return SubmitResult{}, realtime.Event{}, false, err
+	}
+	studentPayload, _ := json.Marshal(map[string]any{"action": tutor.StateBacktrack, "message": message, "subject": prerequisiteSubject, "knowledge_point": prerequisiteName, "prompt": prerequisitePrompt})
+	parentPayload, _ := json.Marshal(map[string]any{"action": tutor.StateBacktrack, "message": message, "reason": "released cross-subject prerequisite selected; original task preserved", "original_knowledge_point_id": row.knowledgePointID, "prerequisite_knowledge_point_id": prerequisiteKnowledgePointID, "prerequisite_subject": prerequisiteSubject, "prerequisite_prompt": prerequisitePrompt})
+	event := makeEvent(row.studentID, sessionID, eventSequence, realtime.EventBacktrackStarted, studentPayload, parentPayload, now)
+	if err := insertEvent(ctx, tx, event); err != nil {
+		return SubmitResult{}, realtime.Event{}, false, err
+	}
+	return SubmitResult{SessionID: sessionID.String(), Action: tutor.StateBacktrack, Message: message}, event, true, nil
+}
+
+func (service *Service) currentState(ctx context.Context, studentUserID, sessionID uuid.UUID) (tutor.State, error) {
+	var state tutor.State
+	err := service.pool.QueryRow(ctx, `SELECT ls.current_state FROM learning_sessions ls JOIN students st ON st.id=ls.student_id WHERE ls.id=$1 AND st.user_id=$2 AND ls.status='ACTIVE'`, sessionID, studentUserID).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrSessionNotFound
+	}
+	return state, err
+}
+
+func (service *Service) prepareVoice(ctx context.Context, studentUserID, sessionID uuid.UUID, answer string, prepared *preparedAgent, now time.Time) (*preparedVoice, error) {
+	var row sessionRow
+	err := service.pool.QueryRow(ctx, `SELECT ls.student_id,ls.current_state,ls.socratic_fail_count,a.teacher_reference_answer,ls.version FROM learning_sessions ls JOIN students st ON st.id=ls.student_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED' JOIN question_private_answers a ON a.question_id=q.id WHERE ls.id=$1 AND st.user_id=$2 AND ls.status='ACTIVE'`, sessionID, studentUserID).Scan(&row.studentID, &row.state, &row.fails, &row.answer, &row.version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	correct := normalized(answer) == normalized(row.answer)
+	if prepared != nil && prepared.analysis.AnswerCorrect && prepared.analysis.Confidence >= 0.9 {
+		correct = true
+	}
+	if correct {
+		return nil, nil
+	}
+	decision := nextDecision(row)
+	message := tutorMessage(decision.NextState)
+	if prepared != nil {
+		decision = prepared.decision
+		message = prepared.turn.Message
+	}
+	if decision.NextState != tutor.StateVoiceExplain {
+		return nil, nil
+	}
+	if service.voice == nil || service.usage == nil {
+		return nil, errors.New("voice explanation provider and usage recorder are required")
+	}
+	started := time.Now()
+	guard, ok := service.usage.(ai.PriceGuard)
+	if !ok {
+		return nil, errors.New("voice usage price guard is required")
+	}
+	provider, model := service.voice.VoiceUsageIdentity()
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+		return nil, errors.New("voice provider billing identity is required")
+	}
+	if err := guard.EnsurePrice(ctx, provider, model, started); err != nil {
+		return nil, err
+	}
+	voice, err := service.voice.Explain(ctx, message)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(voice.AudioDataURL, "data:audio/") {
+		return nil, errors.New("voice explanation audio data URL is required")
+	}
+	if len(voice.AudioDataURL) > 24<<20 {
+		return nil, errors.New("voice explanation audio exceeds persistence limit")
+	}
+	usageRecord := ai.UsageRecord{RequestID: voice.RequestID, StudentID: row.studentID.String(), SessionID: sessionID.String(), Purpose: ai.PurposeTTSExplanation, Latency: time.Since(started), CreatedAt: now, Usage: ai.ModelUsage{Provider: voice.Provider, Model: voice.Model, AudioOutputSeconds: voice.DurationSeconds}}
+	if err := service.usage.RecordAIUsage(ctx, usageRecord); err != nil {
+		return nil, err
+	}
+	return &preparedVoice{version: row.version, result: voice}, nil
+}
+
+func (service *Service) RequestSupport(ctx context.Context, studentUserID, sessionID uuid.UUID, support SupportType) (SubmitResult, error) {
+	decision := tutor.Decision{AnswerRevealAllowed: false}
+	eventType := realtime.EventHintRequested
+	switch support {
+	case SupportHint:
+		decision.NextState, decision.Reason = tutor.StateHint, "student requested one bounded hint"
+	case SupportExplain:
+		decision.NextState, decision.Reason = tutor.StateExplain, "student requested a parallel example without the original answer"
+		eventType = realtime.EventAITurnCompleted
+	default:
+		return SubmitResult{}, ErrInvalidSupport
+	}
+	var studentID, questionID uuid.UUID
+	var version int64
+	var responseID string
+	if err := service.pool.QueryRow(ctx, `SELECT ls.student_id,ls.current_question_id,ls.version,COALESCE(ls.teaching_response_id,'') FROM learning_sessions ls JOIN students st ON st.id=ls.student_id WHERE ls.id=$1 AND st.user_id=$2 AND ls.status='ACTIVE'`, sessionID, studentUserID).Scan(&studentID, &questionID, &version, &responseID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return SubmitResult{}, ErrSessionNotFound
+		}
+		return SubmitResult{}, err
+	}
+	message := tutorMessage(decision.NextState)
+	newResponseID := ""
+	if service.agent != nil {
+		question, err := content.NewRepository(service.pool).ReleasedQuestionForTeaching(ctx, questionID)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		prior, err := service.priorTurns(ctx, sessionID)
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		request := ai.GenerateTurnRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question, TutorDecision: decision, PriorTurns: prior, PreviousResponseID: responseID}
+		var turn ai.TutorTurn
+		if support == SupportExplain {
+			turn, err = service.agent.GenerateParallelExample(ctx, ai.ExampleRequest(request))
+		} else {
+			turn, err = service.agent.GenerateTurn(ctx, request)
+		}
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		if turn.Action != decision.NextState {
+			return SubmitResult{}, errors.New("teaching agent action does not match support decision")
+		}
+		message, newResponseID = turn.Message, turn.ResponseID
+	}
+	now := service.now()
+	var event realtime.Event
+	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		row, err := loadSession(ctx, tx, studentUserID, sessionID)
+		if err != nil {
+			return err
+		}
+		if row.version != version {
+			return ErrClassroomChanged
+		}
+		turnSequence, eventSequence, err := nextSequences(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_state=$2,teaching_response_id=COALESCE(NULLIF($3,''),teaching_response_id),version=version+1 WHERE id=$1`, sessionID, decision.NextState, newResponseID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private,response_id) VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), sessionID, turnSequence, decision.NextState, message, decision.Reason, newResponseID); err != nil {
+			return err
+		}
+		studentPayload, _ := json.Marshal(map[string]any{"action": decision.NextState, "message": message})
+		parentPayload, _ := json.Marshal(map[string]any{"action": decision.NextState, "message": message, "reason": decision.Reason})
+		event = makeEvent(row.studentID, sessionID, eventSequence, eventType, studentPayload, parentPayload, now)
+		return insertEvent(ctx, tx, event)
+	})
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if service.hub != nil {
+		_ = service.hub.Publish(event)
+	}
+	return SubmitResult{SessionID: sessionID.String(), Action: decision.NextState, Message: message}, nil
+}
+
+func (service *Service) ReturnFromVoice(ctx context.Context, studentUserID, sessionID uuid.UUID) (SubmitResult, error) {
+	now := service.now()
+	var event realtime.Event
+	var socraticRound int
+	message := "语音讲解已经结束，现在回到原题，用刚才的方法自己验证一次。"
+	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		row, err := loadSession(ctx, tx, studentUserID, sessionID)
+		if err != nil {
+			return err
+		}
+		if row.state != tutor.StateVoiceExplain {
+			return ErrVoiceNotActive
+		}
+		socraticRound = row.fails
+		turnSequence, eventSequence, err := nextSequences(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_state='RETURN',version=version+1 WHERE id=$1`, sessionID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private) VALUES($1,$2,$3,'TUTOR','RETURN',$4,'voice explanation completed; original released question remains active')`, uuid.New(), sessionID, turnSequence, message); err != nil {
+			return err
+		}
+		studentPayload, _ := json.Marshal(map[string]any{"action": tutor.StateReturn, "message": message})
+		parentPayload, _ := json.Marshal(map[string]any{"action": tutor.StateReturn, "message": message, "reason": "voice explanation completed; original released question remains active"})
+		event = makeEvent(row.studentID, sessionID, eventSequence, realtime.EventVoiceExplainCompleted, studentPayload, parentPayload, now)
+		return insertEvent(ctx, tx, event)
+	})
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if service.hub != nil {
+		_ = service.hub.Publish(event)
+	}
+	return SubmitResult{SessionID: sessionID.String(), Action: tutor.StateReturn, SocraticRound: socraticRound, Message: message}, nil
+}
+
+func loadSession(ctx context.Context, tx pgx.Tx, userID, sessionID uuid.UUID) (sessionRow, error) {
+	var row sessionRow
+	err := tx.QueryRow(ctx, `SELECT ls.student_id,ls.current_question_id,q.knowledge_point_id,ls.subject_id,ls.current_state,ls.socratic_fail_count,a.teacher_reference_answer,a.misconceptions_private_json,ls.version,COALESCE(ls.teaching_response_id,''),ls.evidence_form,ls.original_task_id,ls.active_task_id FROM learning_sessions ls JOIN students st ON st.id=ls.student_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED' JOIN question_private_answers a ON a.question_id=q.id WHERE ls.id=$1 AND st.user_id=$2 AND ls.status='ACTIVE' FOR UPDATE OF ls`, sessionID, userID).Scan(&row.studentID, &row.questionID, &row.knowledgePointID, &row.subjectID, &row.state, &row.fails, &row.answer, &row.misconceptions, &row.version, &row.responseID, &row.evidenceForm, &row.originalTaskID, &row.activeTaskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return row, ErrSessionNotFound
+	}
+	return row, err
+}
+
+func (service *Service) prepareAgent(ctx context.Context, userID, sessionID uuid.UUID, answer string) (*preparedAgent, error) {
+	var studentID, questionID uuid.UUID
+	var state tutor.State
+	var fails int
+	var version int64
+	var responseID string
+	err := service.pool.QueryRow(ctx, `SELECT ls.student_id,ls.current_question_id,ls.current_state,ls.socratic_fail_count,ls.version,COALESCE(ls.teaching_response_id,'') FROM learning_sessions ls JOIN students st ON st.id=ls.student_id WHERE ls.id=$1 AND st.user_id=$2 AND ls.status='ACTIVE'`, sessionID, userID).Scan(&studentID, &questionID, &state, &fails, &version, &responseID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	question, err := content.NewRepository(service.pool).ReleasedQuestionForTeaching(ctx, questionID)
+	if err != nil {
+		return nil, err
+	}
+	prior, err := service.priorTurns(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	analysis, err := service.agent.AnalyzeAnswer(ctx, ai.AnalyzeAnswerRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question, StudentAnswer: answer, PriorTurns: prior})
+	if err != nil {
+		return nil, err
+	}
+	serverAnalysis := tutor.Analysis{AnswerCorrect: analysis.AnswerCorrect, ReasoningQuality: parseReasoning(analysis.ReasoningQuality), PrerequisiteGap: analysis.RecommendedAction == tutor.StateBacktrack, Emotion: parseEmotion(analysis.EmotionSignal), VoicePreferred: analysis.RecommendedAction == tutor.StateVoiceExplain}
+	decision := tutor.NewEngine(3).Decide(tutor.Session{State: state, SocraticFailedRounds: fails, ActiveTaskID: questionID.String()}, serverAnalysis)
+	prepared := &preparedAgent{version: version, analysis: analysis, decision: decision}
+	if decision.NextState == tutor.StateVariant {
+		return prepared, nil
+	}
+	request := ai.GenerateTurnRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question, StudentAnswer: answer, TutorDecision: decision, PriorTurns: prior, PreviousResponseID: responseID}
+	var turn ai.TutorTurn
+	switch decision.NextState {
+	case tutor.StateAnalogy:
+		turn, err = service.agent.GenerateAnalogy(ctx, ai.AnalogyRequest(request))
+	case tutor.StateExplain, tutor.StateVoiceExplain:
+		turn, err = service.agent.GenerateExplanation(ctx, ai.ExplainRequest(request))
+	default:
+		turn, err = service.agent.GenerateTurn(ctx, request)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if turn.Action != decision.NextState {
+		return nil, fmt.Errorf("teaching agent action %s does not match server decision %s", turn.Action, decision.NextState)
+	}
+	prepared.turn = turn
+	return prepared, nil
+}
+
+func (service *Service) priorTurns(ctx context.Context, sessionID uuid.UUID) ([]ai.TutorTurn, error) {
+	rows, err := service.pool.Query(ctx, `SELECT message,COALESCE(action,'') FROM tutor_turns WHERE session_id=$1 ORDER BY sequence DESC LIMIT 12`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	reverse := []ai.TutorTurn{}
+	for rows.Next() {
+		var turn ai.TutorTurn
+		var action string
+		if err := rows.Scan(&turn.Message, &action); err != nil {
+			return nil, err
+		}
+		if action != "" {
+			turn.Action = tutor.State(action)
+		}
+		reverse = append(reverse, turn)
+	}
+	turns := make([]ai.TutorTurn, len(reverse))
+	for i := range reverse {
+		turns[len(reverse)-1-i] = reverse[i]
+	}
+	return turns, rows.Err()
+}
+func parseReasoning(value string) tutor.ReasoningQuality {
+	switch value {
+	case "STRONG":
+		return tutor.ReasoningStrong
+	case "PARTIAL":
+		return tutor.ReasoningPartial
+	default:
+		return tutor.ReasoningWeak
+	}
+}
+func parseEmotion(value string) tutor.Emotion {
+	switch value {
+	case "FRUSTRATED", "ANXIOUS":
+		return tutor.EmotionFrustrated
+	case "BORED":
+		return tutor.EmotionBored
+	default:
+		return tutor.EmotionNeutral
+	}
+}
+
+func nextDecision(row sessionRow) tutor.Decision {
+	return tutor.NewEngine(3).Decide(tutor.Session{State: row.state, SocraticFailedRounds: row.fails, ActiveTaskID: row.questionID.String()}, tutor.Analysis{ReasoningQuality: tutor.ReasoningWeak, VoicePreferred: true})
+}
+
+func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID uuid.UUID, turnSequence, eventSequence int64, now time.Time) (SubmitResult, []realtime.Event, error) {
+	skill, err := loadSkill(ctx, tx, row.studentID, row.knowledgePointID)
+	if err != nil {
+		return SubmitResult{}, nil, err
+	}
+	skill = mastery.NewEngine().Apply(skill, mastery.Evidence{Correct: true, Independent: true, Form: row.evidenceForm, At: now})
+	if row.evidenceForm == mastery.FormReview {
+		if _, err := tx.Exec(ctx, `UPDATE review_queue SET status='COMPLETED' WHERE student_id=$1 AND knowledge_point_id=$2 AND status='PENDING' AND due_at<=$3`, row.studentID, row.knowledgePointID, now); err != nil {
+			return SubmitResult{}, nil, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE student_misconceptions SET successful_corrections=successful_corrections+1,status='MONITORING',last_seen_at=$3 WHERE student_id=$1 AND knowledge_point_id=$2 AND status='ACTIVE'`, row.studentID, row.knowledgePointID, now); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	score := mastery.NewEngine().Score(skill)
+	if _, err := tx.Exec(ctx, `INSERT INTO student_skill_states (student_id,knowledge_point_id,state,score_internal,independent_successes,assisted_successes,life_context_successes,variant_successes,textbook_successes,review_successes,consecutive_review_failures,next_review_at,last_seen_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (student_id,knowledge_point_id) DO UPDATE SET state=EXCLUDED.state,score_internal=EXCLUDED.score_internal,independent_successes=EXCLUDED.independent_successes,assisted_successes=EXCLUDED.assisted_successes,life_context_successes=EXCLUDED.life_context_successes,variant_successes=EXCLUDED.variant_successes,textbook_successes=EXCLUDED.textbook_successes,review_successes=EXCLUDED.review_successes,consecutive_review_failures=EXCLUDED.consecutive_review_failures,next_review_at=EXCLUDED.next_review_at,last_seen_at=EXCLUDED.last_seen_at,version=student_skill_states.version+1`, row.studentID, row.knowledgePointID, skill.State, score, skill.IndependentSuccesses, skill.AssistedSuccesses, skill.LifeContextSuccesses, skill.VariantSuccesses, skill.TextbookSuccesses, skill.ReviewSuccesses, skill.ConsecutiveReviewFailures, skill.NextReviewAt, now); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	rewardType, rewardSource := reward.Effort, sessionID.String()
+	if skill.State == mastery.Mastered {
+		rewardType, rewardSource = reward.Mastery, row.knowledgePointID.String()
+	}
+	returnToOriginal := row.originalTaskID != nil && row.activeTaskID != nil && *row.originalTaskID != *row.activeTaskID
+	if returnToOriginal {
+		rewardType, rewardSource = reward.CrossSubjectInsight, sessionID.String()+":"+row.knowledgePointID.String()
+	}
+	energy, err := grantReward(ctx, tx, row.studentID, sessionID, rewardType, rewardSource)
+	if err != nil {
+		return SubmitResult{}, nil, err
+	}
+	if returnToOriginal {
+		return service.returnToOriginal(ctx, tx, row, sessionID, turnSequence, eventSequence, now, skill.State, energy)
+	}
+	message := "这次思路已经记录，明天计划会根据表现调整。"
+	if skill.State == mastery.Mastered {
+		message = "你已经在生活、变式、课本和跨天复习中都能独立解决，掌握证据完整。"
+	}
+	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_state='COMPLETE',status='COMPLETED',ended_at=$2,actual_seconds=LEAST(7200,GREATEST(1,EXTRACT(EPOCH FROM ($2-started_at))::integer)),version=version+1 WHERE id=$1`, sessionID, now); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	if err := recordStudentActivity(ctx, tx, row.studentID, sessionID, now); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns (id,session_id,sequence,actor,action,message,reason_private) VALUES ($1,$2,$3,'TUTOR','COMPLETE',$4,'rules engine verified spaced mastery')`, uuid.New(), sessionID, turnSequence, message); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	studentPayload, _ := json.Marshal(map[string]any{"mastery_state": skill.State, "mastery_score": score, "energy": energy, "tomorrow_plan_changed": true, "message": message})
+	parentPayload, _ := json.Marshal(map[string]any{"action": tutor.StateComplete, "mastery_state": skill.State, "mastery_score": score, "evidence_form": row.evidenceForm, "energy": energy, "tomorrow_plan_changed": true, "message": message})
+	masteryEvent := makeEvent(row.studentID, sessionID, eventSequence, realtime.EventMasteryUpdated, studentPayload, parentPayload, now)
+	if err := insertEvent(ctx, tx, masteryEvent); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	rewardStudent, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType})
+	rewardParent, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType, "source_id": rewardSource})
+	rewardEvent := makeEvent(row.studentID, sessionID, eventSequence+1, realtime.EventRewardGranted, rewardStudent, rewardParent, now)
+	if err := insertEvent(ctx, tx, rewardEvent); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	completedStudent, _ := json.Marshal(map[string]any{"action": tutor.StateComplete, "message": message})
+	completedParent, _ := json.Marshal(map[string]any{"action": tutor.StateComplete, "mastery_state": skill.State, "mastery_score": score, "energy": energy, "message": message})
+	completedEvent := makeEvent(row.studentID, sessionID, eventSequence+2, realtime.EventSessionCompleted, completedStudent, completedParent, now)
+	if err := insertEvent(ctx, tx, completedEvent); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	return SubmitResult{SessionID: sessionID.String(), Action: tutor.StateComplete, Message: message, MasteryState: skill.State, Energy: energy, TomorrowChanged: true}, []realtime.Event{masteryEvent, rewardEvent, completedEvent}, nil
+}
+
+func (service *Service) returnToOriginal(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID uuid.UUID, turnSequence, eventSequence int64, now time.Time, skillState mastery.State, energy int) (SubmitResult, []realtime.Event, error) {
+	var questionID, subjectID uuid.UUID
+	var prompt string
+	if err := tx.QueryRow(ctx, `
+SELECT q.id,kp.subject_id,q.prompt_public FROM questions q
+JOIN knowledge_points kp ON kp.id=q.knowledge_point_id
+WHERE q.knowledge_point_id=$1 AND q.status='RELEASED'
+ORDER BY q.difficulty,q.id LIMIT 1`, *row.originalTaskID).Scan(&questionID, &subjectID, &prompt); err != nil {
+		return SubmitResult{}, nil, fmt.Errorf("released original task unavailable: %w", err)
+	}
+	message := "底层知识已经补好，现在回到原问题，用刚才的方法再验证一次。"
+	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_question_id=$2,subject_id=$3,current_state='RETURN',socratic_fail_count=0,active_task_id=original_task_id,evidence_form='VARIANT',version=version+1 WHERE id=$1`, sessionID, questionID, subjectID); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private) VALUES($1,$2,$3,'TUTOR','RETURN',$4,'cross-subject prerequisite verified; original task restored')`, uuid.New(), sessionID, turnSequence, message); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	studentPayload, _ := json.Marshal(map[string]any{"action": tutor.StateReturn, "message": message, "prompt": prompt})
+	parentPayload, _ := json.Marshal(map[string]any{"action": tutor.StateReturn, "message": message, "remediated_knowledge_point_id": row.knowledgePointID, "restored_knowledge_point_id": row.originalTaskID, "mastery_state": skillState, "energy": energy})
+	masteryStudent, _ := json.Marshal(map[string]any{"mastery_state": skillState, "energy": energy})
+	masteryParent, _ := json.Marshal(map[string]any{"mastery_state": skillState, "energy": energy, "knowledge_point_id": row.knowledgePointID})
+	masteryEvent := makeEvent(row.studentID, sessionID, eventSequence, realtime.EventMasteryUpdated, masteryStudent, masteryParent, now)
+	if err := insertEvent(ctx, tx, masteryEvent); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	rewardStudent, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": reward.CrossSubjectInsight})
+	rewardParent, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": reward.CrossSubjectInsight})
+	rewardEvent := makeEvent(row.studentID, sessionID, eventSequence+1, realtime.EventRewardGranted, rewardStudent, rewardParent, now)
+	if err := insertEvent(ctx, tx, rewardEvent); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	event := makeEvent(row.studentID, sessionID, eventSequence+2, realtime.EventBacktrackCompleted, studentPayload, parentPayload, now)
+	if err := insertEvent(ctx, tx, event); err != nil {
+		return SubmitResult{}, nil, err
+	}
+	return SubmitResult{SessionID: sessionID.String(), Action: tutor.StateReturn, Message: message, MasteryState: skillState, Energy: energy}, []realtime.Event{masteryEvent, rewardEvent, event}, nil
+}
+
+func loadSkill(ctx context.Context, tx pgx.Tx, studentID, knowledgePointID uuid.UUID) (mastery.Skill, error) {
+	var skill mastery.Skill
+	err := tx.QueryRow(ctx, `SELECT state,independent_successes,assisted_successes,life_context_successes,variant_successes,textbook_successes,review_successes,consecutive_review_failures,next_review_at FROM student_skill_states WHERE student_id=$1 AND knowledge_point_id=$2`, studentID, knowledgePointID).Scan(&skill.State, &skill.IndependentSuccesses, &skill.AssistedSuccesses, &skill.LifeContextSuccesses, &skill.VariantSuccesses, &skill.TextbookSuccesses, &skill.ReviewSuccesses, &skill.ConsecutiveReviewFailures, &skill.NextReviewAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return mastery.Skill{}, nil
+	}
+	return skill, err
+}
+
+func grantReward(ctx context.Context, tx pgx.Tx, studentID, sessionID uuid.UUID, rewardType reward.Type, sourceID string) (int, error) {
+	growth, _, err := (reward.Engine{}).Apply(reward.Growth{}, reward.Event{Type: rewardType, SourceID: sourceID})
+	if err != nil {
+		return 0, err
+	}
+	points := growth.TotalEnergy
+	command, err := tx.Exec(ctx, `INSERT INTO reward_events(id,student_id,session_id,type,points,source_id) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(student_id,type,source_id) DO NOTHING`, uuid.New(), studentID, sessionID, rewardType, points, sourceID)
+	if err != nil {
+		return 0, err
+	}
+	if command.RowsAffected() == 1 {
+		if _, err := tx.Exec(ctx, `INSERT INTO student_growth(student_id,total_energy,buildings_json) VALUES($1,$2,'{}') ON CONFLICT(student_id) DO UPDATE SET total_energy=student_growth.total_energy+EXCLUDED.total_energy,updated_at=now()`, studentID, points); err != nil {
+			return 0, err
+		}
+	}
+	var energy int
+	err = tx.QueryRow(ctx, `SELECT total_energy FROM student_growth WHERE student_id=$1`, studentID).Scan(&energy)
+	return energy, err
+}
+
+func recordStudentActivity(ctx context.Context, tx pgx.Tx, studentID, sessionID uuid.UUID, now time.Time) error {
+	activityDate := now.Format("2006-01-02")
+	if _, err := tx.Exec(ctx, `
+INSERT INTO student_activity_days(student_id,activity_date,completed_sessions,active_seconds,first_completed_at,last_completed_at)
+SELECT $1,$2::date,1,actual_seconds,$3,$3 FROM learning_sessions WHERE id=$4
+ON CONFLICT(student_id,activity_date) DO UPDATE SET
+completed_sessions=student_activity_days.completed_sessions+1,
+active_seconds=student_activity_days.active_seconds+EXCLUDED.active_seconds,
+last_completed_at=EXCLUDED.last_completed_at`, studentID, activityDate, now, sessionID); err != nil {
+		return err
+	}
+	var streak int
+	if err := tx.QueryRow(ctx, `
+WITH RECURSIVE consecutive(day,count) AS (
+    SELECT $2::date,0
+    UNION ALL
+    SELECT day-1,count+1 FROM consecutive
+    WHERE EXISTS(SELECT 1 FROM student_activity_days WHERE student_id=$1 AND activity_date=consecutive.day)
+)
+SELECT max(count) FROM consecutive`, studentID, activityDate).Scan(&streak); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+UPDATE student_growth SET streak_days=$2,buildings_json=jsonb_build_object(
+    'completed_days',(SELECT count(*) FROM student_activity_days WHERE student_id=$1),
+    'completed_sessions',(SELECT COALESCE(sum(completed_sessions),0) FROM student_activity_days WHERE student_id=$1),
+    'mastered_knowledge_points',(SELECT count(*) FROM student_skill_states WHERE student_id=$1 AND state='MASTERED'),
+    'mastered_by_subject',COALESCE((
+        SELECT jsonb_object_agg(code,total) FROM (
+            SELECT s.code,count(*) AS total FROM student_skill_states ss
+            JOIN knowledge_points kp ON kp.id=ss.knowledge_point_id
+            JOIN subjects s ON s.id=kp.subject_id
+            WHERE ss.student_id=$1 AND ss.state='MASTERED' GROUP BY s.code
+        ) counts
+    ),'{}'::jsonb),
+    'corrected_misconceptions',(SELECT COALESCE(sum(successful_corrections),0) FROM student_misconceptions WHERE student_id=$1),
+    'cross_subject_insights',(SELECT count(*) FROM reward_events WHERE student_id=$1 AND type='CROSS_SUBJECT_INSIGHT')
+),updated_at=$3 WHERE student_id=$1`, studentID, streak, now)
+	return err
+}
+
+func nextSequences(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID) (int64, int64, error) {
+	var turns, events int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(sequence),0)+1 FROM tutor_turns WHERE session_id=$1`, sessionID).Scan(&turns); err != nil {
+		return 0, 0, err
+	}
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(sequence),0)+1 FROM tutor_events WHERE session_id=$1`, sessionID).Scan(&events); err != nil {
+		return 0, 0, err
+	}
+	return turns, events, nil
+}
+func makeEvent(studentID, sessionID uuid.UUID, sequence int64, eventType realtime.EventType, student, parent json.RawMessage, now time.Time) realtime.Event {
+	return realtime.Event{EventID: uuid.NewString(), StudentID: studentID.String(), SessionID: sessionID.String(), Sequence: sequence, Type: eventType, CreatedAt: now, StudentPayload: student, ParentPayload: parent}
+}
+func insertEvent(ctx context.Context, tx pgx.Tx, event realtime.Event) error {
+	_, err := tx.Exec(ctx, `INSERT INTO tutor_events(id,session_id,student_id,sequence,type,student_payload_json,parent_payload_json,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, event.EventID, event.SessionID, event.StudentID, event.Sequence, event.Type, event.StudentPayload, event.ParentPayload, event.CreatedAt)
+	return err
+}
+
+func (service *Service) recordEvent(ctx context.Context, studentID, sessionID uuid.UUID, eventType realtime.EventType, studentPayload, parentPayload map[string]any, now time.Time) (realtime.Event, error) {
+	var event realtime.Event
+	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		_, sequence, err := nextSequences(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		student, _ := json.Marshal(studentPayload)
+		parent, _ := json.Marshal(parentPayload)
+		event = makeEvent(studentID, sessionID, sequence, eventType, student, parent, now)
+		return insertEvent(ctx, tx, event)
+	})
+	return event, err
+}
+func normalized(value string) string { return strings.Join(strings.Fields(strings.ToLower(value)), "") }
+func reasoning(correct bool) string {
+	if correct {
+		return "STRONG"
+	}
+	return "WEAK"
+}
+func misconceptionPayload(correct bool, values json.RawMessage) json.RawMessage {
+	if correct {
+		return json.RawMessage(`[]`)
+	}
+	if len(values) == 0 {
+		return json.RawMessage(`["REASONING_GAP"]`)
+	}
+	return values
+}
+func firstMisconception(values json.RawMessage) string {
+	var codes []string
+	if json.Unmarshal(values, &codes) == nil && len(codes) > 0 && codes[0] != "" {
+		return codes[0]
+	}
+	return "REASONING_GAP"
+}
+func recordMisconception(ctx context.Context, tx pgx.Tx, row sessionRow, now time.Time, code string) error {
+	var id uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT id FROM misconceptions WHERE code=$1`, code).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO student_misconceptions(student_id,knowledge_point_id,misconception_id,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$4) ON CONFLICT(student_id,knowledge_point_id,misconception_id) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at,occurrences=student_misconceptions.occurrences+1,status='ACTIVE'`, row.studentID, row.knowledgePointID, id, now); err != nil {
+		return err
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM review_queue WHERE student_id=$1 AND knowledge_point_id=$2 AND source='MISCONCEPTION' AND status='PENDING')`, row.studentID, row.knowledgePointID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO review_queue(id,student_id,knowledge_point_id,source,due_at,priority) VALUES($1,$2,$3,'MISCONCEPTION',$4,80)`, uuid.New(), row.studentID, row.knowledgePointID, now.Add(24*time.Hour))
+	return err
+}
+func tutorMessage(state tutor.State) string {
+	switch state {
+	case tutor.StateProbe:
+		return "先说说你用了哪些已知量？"
+	case tutor.StateScaffold:
+		return "先只完成最小的一步：圈出题目要求你判断或求出的对象。"
+	case tutor.StateAnalogy:
+		return "换成一个相似的生活场景，再比较两部分。"
+	case tutor.StateVoiceExplain:
+		return "我们听一个不同数值的平行例子，然后回到原题。"
+	case tutor.StateHint:
+		return "先找出题目中最能支持判断的一个关键信息。"
+	case tutor.StateExplain:
+		return "先换一个不同情境：用自己的话说清要判断的对象，再找能支持判断的证据，最后把同样的方法带回原题。"
+	default:
+		return "再想一小步。"
+	}
+}
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

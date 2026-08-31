@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message", "action", "answer_revealed", "segments"],
+  "properties": {
+    "message": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "action": {
+      "enum": ["ASK", "PROBE", "HINT", "SCAFFOLD", "ANALOGY", "BACKTRACK", "EXPLAIN", "VOICE_EXPLAIN", "RETURN", "VARIANT", "ABSTRACT", "VERIFY", "BREAK"]
+    },
+    "answer_revealed": { "type": "boolean" },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text"],
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" }
+        }
+      }
+    }
+  }
+}

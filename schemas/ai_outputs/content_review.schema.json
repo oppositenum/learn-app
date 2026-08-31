@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "result",
+    "age_appropriate",
+    "factually_sound",
+    "unambiguous",
+    "no_answer_leak",
+    "safe_values",
+    "findings"
+  ],
+  "properties": {
+    "result": { "enum": ["PASS", "PASS_WITH_FIX", "REJECT", "NEEDS_HUMAN"] },
+    "age_appropriate": { "type": "boolean" },
+    "factually_sound": { "type": "boolean" },
+    "unambiguous": { "type": "boolean" },
+    "no_answer_leak": { "type": "boolean" },
+    "safe_values": { "type": "boolean" },
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+    }
+  }
+}
