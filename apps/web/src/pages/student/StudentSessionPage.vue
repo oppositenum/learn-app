@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ArrowLeft, CalendarCheck2, Lightbulb, Pause, Send, StopCircle, Volume2 } from '@lucide/vue'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useLearningStore } from '../../stores/learning'
@@ -27,6 +27,8 @@ async function support(type: 'HINT' | 'EXPLAIN') {
   await learning.requestSupport(String(route.params.id), type)
   if (type === 'EXPLAIN' && !learning.error) await router.push(`/student/session/${String(route.params.id)}/supply`)
 }
+
+watch(() => learning.sessionGone, (gone) => { if (gone) router.replace('/student') })
 
 onMounted(() => learning.loadSession(String(route.params.id)))
 onBeforeUnmount(() => window.clearInterval(timer))

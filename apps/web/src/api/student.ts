@@ -33,9 +33,15 @@ export interface StudentGrowth {
   }
 }
 
+export class ApiError extends Error {
+  constructor(message: string, public status: number) {
+    super(message)
+  }
+}
+
 async function studentJSON<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, { credentials: 'same-origin', ...options })
-  if (!response.ok) throw new Error(`学习数据暂时不可用（${response.status}）`)
+  if (!response.ok) throw new ApiError(`学习数据暂时不可用（${response.status}）`, response.status)
   return response.json() as Promise<T>
 }
 
@@ -59,7 +65,7 @@ export async function submitStudentAnswer(sessionID: string, answer: string): Pr
   const response = await fetch(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/answers`, {
     method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer }),
   })
-  if (!response.ok) throw new Error(`课堂暂时无法提交（${response.status}）`)
+  if (!response.ok) throw new ApiError(`课堂暂时无法提交（${response.status}）`, response.status)
   return response.json() as Promise<SubmitAnswerResult>
 }
 

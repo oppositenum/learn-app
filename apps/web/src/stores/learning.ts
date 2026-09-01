@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-import { completeStudentVoiceExplanation, getStudentSession, requestStudentSupport, submitSessionReflection, submitStudentAnswer, type SpeechSegment, type StudentSessionTurn } from '../api/student'
+import { ApiError, completeStudentVoiceExplanation, getStudentSession, requestStudentSupport, submitSessionReflection, submitStudentAnswer, type SpeechSegment, type StudentSessionTurn } from '../api/student'
 
 export type TutorAction = 'INTRO' | 'ASK' | 'WAIT' | 'ANALYZE' | 'PROBE' | 'HINT' | 'SCAFFOLD' | 'ANALOGY' | 'BACKTRACK' | 'EXPLAIN' | 'VOICE_EXPLAIN' | 'RETURN' | 'VARIANT' | 'ABSTRACT' | 'VERIFY' | 'REVIEW' | 'BREAK' | 'COMPLETE'
 
@@ -18,6 +18,9 @@ export const useLearningStore = defineStore('learning', {
 		socraticRound: 0,
 		loading: false,
 		error: '',
+		// The classroom no longer exists or has already ended (HTTP 404);
+		// the session page redirects home when this is set.
+		sessionGone: false,
 		voiceAudio: '',
 		voiceSegments: [] as SpeechSegment[],
 		reflectionStatus: '',
@@ -27,6 +30,7 @@ export const useLearningStore = defineStore('learning', {
 		async loadSession(sessionID: string) {
 			this.loading = true
 			this.error = ''
+			this.sessionGone = false
 			try {
 				const session = await getStudentSession(sessionID)
 				this.sessionID = session.id
@@ -42,6 +46,7 @@ export const useLearningStore = defineStore('learning', {
 				this.voiceSegments = session.voice_segments ?? []
 				this.timeline = session.timeline.map((turn: StudentSessionTurn) => ({ id: `${turn.sequence}`, actor: turn.actor, text: turn.message, meta: turn.action }))
 			} catch (error) {
+				if (error instanceof ApiError && error.status === 404) this.sessionGone = true
 				this.error = error instanceof Error ? error.message : '课堂暂时不可用'
 			} finally {
 				this.loading = false
@@ -66,6 +71,7 @@ export const useLearningStore = defineStore('learning', {
 				this.voiceSegments = result.voice_segments ?? []
 				this.timeline.push({ id: crypto.randomUUID(), actor: 'TUTOR', text: result.message, meta: `${result.action} · ${result.socratic_round}/3` })
 			} catch (error) {
+				if (error instanceof ApiError && error.status === 404) this.sessionGone = true
 				this.error = error instanceof Error ? error.message : '课堂暂时无法提交'
 			} finally {
 				this.loading = false
@@ -79,6 +85,7 @@ export const useLearningStore = defineStore('learning', {
 				this.tutorAction = result.action
 				this.timeline.push({ id: crypto.randomUUID(), actor: 'TUTOR', text: result.message, meta: result.action })
 			} catch (error) {
+				if (error instanceof ApiError && error.status === 404) this.sessionGone = true
 				this.error = error instanceof Error ? error.message : '暂时无法生成帮助'
 			} finally {
 				this.loading = false
@@ -93,6 +100,7 @@ export const useLearningStore = defineStore('learning', {
 				this.socraticRound = result.socratic_round
 				this.timeline.push({ id: crypto.randomUUID(), actor: 'TUTOR', text: result.message, meta: result.action })
 			} catch (error) {
+				if (error instanceof ApiError && error.status === 404) this.sessionGone = true
 				this.error = error instanceof Error ? error.message : '暂时无法返回原题'
 			} finally {
 				this.loading = false
