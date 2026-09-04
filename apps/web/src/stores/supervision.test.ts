@@ -70,6 +70,12 @@ function liveSession(sessionID: string, answer = '第一次回答') {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((next) => { resolve = next })
+  return { promise, resolve }
+}
+
 it('renders canonical Tutor reasons as concise Parent-facing Chinese', () => {
   expect(formatTutorReason('student requested a parallel example without the original answer')).toBe('孩子表示不会，切换到不泄露原题答案的平行讲解。')
   expect(formatTutorReason('Socratic failed-round limit reached; explain with a parallel example')).toContain('三轮有效启发已到上限')
@@ -158,5 +164,29 @@ describe('Parent realtime supervision', () => {
     await vi.advanceTimersByTimeAsync(500)
     expect(FakeWebSocket.instances).toHaveLength(2)
     expect(FakeWebSocket.instances[1]?.url).toContain('/ws/parent/student-new')
+  })
+
+  it('clears private parent state and ignores requests from the previous account generation', async () => {
+    const children = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn(() => children.promise))
+    const store = useSupervisionStore()
+
+    const initialization = store.initialize()
+    store.children = [{ student_id: 'student-old', display_name: '旧账号', grade_level: 7, active_session_id: 'session-old', subject: '数学', knowledge_point: '方程', started_at: '2026-08-27T01:00:00Z' }]
+    store.studentID = 'student-old'
+    store.studentAnswer = '旧账号回答'
+    store.correctAnswer = '旧账号答案'
+    store.openRealtime('student-old')
+    const socket = FakeWebSocket.instances[0]
+    store.reset()
+
+    children.resolve({ ok: true, status: 200, json: async () => ({ children: [{ student_id: 'student-old', display_name: '旧账号', grade_level: 7, active_session_id: null, subject: null, knowledge_point: null, started_at: null }] }) } as Response)
+    await initialization
+
+    expect(store.children).toEqual([])
+    expect(store.studentID).toBe('')
+    expect(store.studentAnswer).toBe('')
+    expect(store.correctAnswer).toBe('')
+    expect(socket?.readyState).toBe(FakeWebSocket.CLOSED)
   })
 })

@@ -21,8 +21,7 @@ const misconception = computed(() => {
 const tutorReason = computed(() => formatTutorReason(session.value?.tutor_reason ?? ''))
 const durationMinutes = computed(() => {
   if (!session.value) return 0
-  if (session.value.active_seconds > 0) return Math.max(1, Math.round(session.value.active_seconds / 60))
-  return Math.max(1, Math.round((Date.now() - new Date(session.value.started_at).getTime()) / 60_000))
+	return Math.round(session.value.active_seconds / 60)
 })
 
 const actorLabel = {

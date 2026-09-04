@@ -17,11 +17,23 @@ import (
 
 	"github.com/oppositenum/ai-learning-tutor/server/internal/api"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/classroom"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/database"
 	parentrepo "github.com/oppositenum/ai-learning-tutor/server/internal/parent"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 	"github.com/oppositenum/ai-learning-tutor/server/migrations"
 )
+
+func TestIntegrationDatabaseConfiguredInCI(t *testing.T) {
+	if os.Getenv("CI") == "" {
+		t.Skip("CI-only PostgreSQL configuration gate")
+	}
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Fatal("TEST_DATABASE_URL must be configured in CI so PostgreSQL safety tests cannot silently skip")
+	}
+}
 
 func TestPostgresStudentAnswerNonDisclosureGate(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
@@ -69,10 +81,14 @@ func TestPostgresStudentAnswerNonDisclosureGate(t *testing.T) {
 
 	authenticator := auth.NewSessionAuthenticator(pool)
 	parents := parentrepo.NewRepository(pool)
+	hub := realtime.NewHub()
+	plannerService := planner.NewService(pool)
+	classroomService := classroom.NewService(pool, hub, nil, nil, plannerService)
 	router := api.NewRouter(api.Dependencies{
 		Authenticate:    authenticator.Middleware,
 		PublicQuestions: content.NewRepository(pool),
 		Parents:         parents,
+		Classroom:       classroom.NewHandler(classroomService, pool, parents, plannerService),
 	})
 
 	response := performQuestionRequest(router, fixture.studentToken, fixture.releasedQuestionID)
@@ -92,6 +108,87 @@ func TestPostgresStudentAnswerNonDisclosureGate(t *testing.T) {
 	response = performQuestionRequest(router, fixture.studentToken, fixture.draftQuestionID)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("draft question status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+
+	for _, path := range []string{
+		"/api/v1/student/sessions/current",
+		"/api/v1/student/sessions/" + fixture.sessionID.String(),
+	} {
+		response = performJSON(router, http.MethodGet, path, fixture.studentToken, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("student classroom GET %s = %d: %s", path, response.Code, response.Body.String())
+		}
+		assertStudentPayloadHasNoPrivateFields(t, response.Body.Bytes())
+		if strings.Contains(response.Body.String(), fixture.privateCanary) {
+			t.Fatalf("student classroom GET leaked private answer canary: %s", response.Body.String())
+		}
+	}
+
+	studentEvents, unsubscribe := hub.Subscribe(fixture.studentID.String(), auth.RoleStudent)
+	defer unsubscribe()
+	for _, action := range []string{"pause", "heartbeat", "resume"} {
+		response = performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/"+action, fixture.studentToken, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("student lifecycle %s = %d: %s", action, response.Code, response.Body.String())
+		}
+		assertStudentPayloadHasNoPrivateFields(t, response.Body.Bytes())
+		if strings.Contains(response.Body.String(), fixture.privateCanary) {
+			t.Fatalf("student lifecycle %s leaked private answer canary: %s", action, response.Body.String())
+		}
+	}
+	pauseEvent := <-studentEvents
+	assertStudentPayloadHasNoPrivateFields(t, pauseEvent)
+	if strings.Contains(string(pauseEvent), fixture.privateCanary) {
+		t.Fatalf("student lifecycle event leaked private answer canary: %s", pauseEvent)
+	}
+
+	response = performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/support", fixture.studentToken, map[string]any{"type": "HINT"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("student support = %d: %s", response.Code, response.Body.String())
+	}
+	assertStudentPayloadHasNoPrivateFields(t, response.Body.Bytes())
+	if strings.Contains(response.Body.String(), fixture.privateCanary) {
+		t.Fatalf("student support leaked private answer canary: %s", response.Body.String())
+	}
+
+	response = performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/answers", fixture.studentToken, map[string]any{"answer": fixture.privateCanary})
+	if response.Code != http.StatusOK {
+		t.Fatalf("student answer = %d: %s", response.Code, response.Body.String())
+	}
+	assertStudentPayloadHasNoPrivateFields(t, response.Body.Bytes())
+	if strings.Contains(response.Body.String(), fixture.privateCanary) {
+		t.Fatalf("student answer response echoed private answer: %s", response.Body.String())
+	}
+	for {
+		select {
+		case event := <-studentEvents:
+			assertStudentPayloadHasNoPrivateFields(t, event)
+			if strings.Contains(string(event), fixture.privateCanary) {
+				t.Fatalf("student realtime event leaked private answer canary: %s", event)
+			}
+		default:
+			goto realtimeDrained
+		}
+	}
+
+realtimeDrained:
+	rows, err := pool.Query(ctx, `SELECT student_payload_json FROM tutor_events WHERE session_id=$1 ORDER BY sequence`, fixture.sessionID)
+	if err != nil {
+		t.Fatalf("load persisted student events: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload json.RawMessage
+		if err := rows.Scan(&payload); err != nil {
+			t.Fatalf("scan persisted student event: %v", err)
+		}
+		assertStudentPayloadHasNoPrivateFields(t, payload)
+		if strings.Contains(string(payload), fixture.privateCanary) {
+			t.Fatalf("persisted student event leaked private answer canary: %s", payload)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate persisted student events: %v", err)
 	}
 
 	response = performParentSessionRequest(router, fixture.parentToken, fixture.studentID, fixture.sessionID)
@@ -222,8 +319,8 @@ VALUES ($1, jsonb_build_object('value', $3::text), $3, $3, '{"exact":true}', '["
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
-INSERT INTO learning_sessions (id, student_id, subject_id, current_question_id, status, target_minutes, current_state, socratic_fail_count)
-VALUES ($1, $2, $3, $4, 'ACTIVE', 20, 'PROBE', 2)`, sessionID, studentID, subjectID, releasedQuestionID); err != nil {
+INSERT INTO learning_sessions (id, student_id, subject_id, current_question_id, status, target_minutes, current_state, socratic_fail_count, assistance_level, last_resumed_at, last_activity_at)
+VALUES ($1, $2, $3, $4, 'ACTIVE', 20, 'PROBE', 2, 1, now(), now())`, sessionID, studentID, subjectID, releasedQuestionID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -332,9 +429,13 @@ func assertStudentPayloadHasNoPrivateFields(t *testing.T, body []byte) {
 		t.Fatalf("decode student response: %v", err)
 	}
 	forbidden := map[string]bool{
-		"correct_answer": true, "answer_correct": true, "full_solution": true,
-		"teacher_reference_answer": true, "teacher_solution": true, "scoring_key": true,
-		"misconceptions": true, "hint_policy": true,
+		"correct_answer": true, "correct_answer_json": true, "answer_correct": true,
+		"full_solution": true, "full_solution_private": true,
+		"teacher_reference_answer": true, "teacher_solution": true,
+		"scoring_key": true, "scoring_key_json": true,
+		"misconceptions": true, "misconceptions_private_json": true,
+		"hint_policy": true, "hint_policy_private_json": true,
+		"reason_private": true,
 	}
 	var walk func(any)
 	walk = func(value any) {

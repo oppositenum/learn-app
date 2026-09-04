@@ -23,6 +23,7 @@ let socketGeneration = 0
 let reconnectAttempt = 0
 let reconnectTimer: number | undefined
 let refreshTimer: number | undefined
+let requestGeneration = 0
 
 export const useSupervisionStore = defineStore('supervision', {
   state: () => ({
@@ -30,7 +31,7 @@ export const useSupervisionStore = defineStore('supervision', {
     connected: false,
     reconnecting: false,
     sessionActive: false,
-    studentID: '', sessionID: '', childName: '', startedAt: '', subject: '', knowledgePoint: '', elapsed: '00:00', target: '00:00',
+		studentID: '', sessionID: '', childName: '', startedAt: '', subject: '', knowledgePoint: '', elapsed: '00:00', target: '00:00', activeSeconds: 0, timingClientAt: 0,
     studentAnswer: '', correctAnswer: '', misconception: '', tutorAction: '', tutorReason: '', socraticRound: 0,
     masteryState: 'UNKNOWN', masteryScore: 0,
     timeline: [] as ParentTimelineItem[],
@@ -39,9 +40,12 @@ export const useSupervisionStore = defineStore('supervision', {
   }),
   actions: {
     async initialize(preferredStudentID = '', preferredSessionID = '') {
+      const generation = ++requestGeneration
       this.connectionError = ''
       try {
-        this.children = await getParentChildren()
+        const children = await getParentChildren()
+        if (generation !== requestGeneration) return
+        this.children = children
         if (this.children.length === 0) {
           this.disconnect()
           this.connectionError = '尚未绑定孩子账户'
@@ -53,13 +57,15 @@ export const useSupervisionStore = defineStore('supervision', {
           .filter((child) => child.active_session_id)
           .sort((left, right) => Date.parse(right.started_at ?? '') - Date.parse(left.started_at ?? ''))[0]
         const child = preferred ?? current ?? latestActive ?? this.children[0]
-        await this.selectChild(child.student_id, preferredSessionID || child.active_session_id || '')
+        await this.selectChild(child.student_id, preferredSessionID || child.active_session_id || '', generation)
       } catch (error) {
+        if (generation !== requestGeneration) return
         this.connectionError = error instanceof Error ? error.message : '孩子状态暂时不可用'
       }
     },
 
-    async selectChild(studentID: string, sessionID = '') {
+    async selectChild(studentID: string, sessionID = '', generation = ++requestGeneration) {
+      if (generation !== requestGeneration) return
       const child = this.children.find((item) => item.student_id === studentID)
       if (!child) return
       const switched = this.studentID !== studentID
@@ -69,15 +75,15 @@ export const useSupervisionStore = defineStore('supervision', {
       if (switched) this.clearSession()
       this.openRealtime(studentID)
       const activeSessionID = sessionID || child.active_session_id || ''
-      if (activeSessionID) await this.refreshSession(studentID, activeSessionID)
+      if (activeSessionID) await this.refreshSession(studentID, activeSessionID, generation)
       else this.clearSession()
     },
 
-    async refreshSession(studentID: string, sessionID: string) {
+    async refreshSession(studentID: string, sessionID: string, generation = requestGeneration) {
       if (!studentID || !sessionID || studentID !== this.studentID) return
       try {
         const live = await getParentLiveSession(studentID, sessionID)
-        if (studentID !== this.studentID) return
+        if (generation !== requestGeneration || studentID !== this.studentID) return
         this.sessionID = sessionID
         this.sessionActive = live.status === 'ACTIVE'
         this.subject = live.subject
@@ -89,11 +95,14 @@ export const useSupervisionStore = defineStore('supervision', {
         this.tutorReason = formatTutorReason(live.tutor_reason)
         this.socraticRound = live.socratic_round
         this.startedAt = live.started_at
+				this.activeSeconds = live.active_seconds
+				this.timingClientAt = performance.now()
         this.target = `${String(live.target_minutes).padStart(2, '0')}:00`
         this.masteryState = live.mastery_state
         this.masteryScore = live.mastery_score
         this.timeline = live.timeline.map((turn) => ({ id: `${turn.sequence}`, actor: turn.actor, text: turn.message, meta: turn.action || new Date(turn.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }))
       } catch (error) {
+        if (generation !== requestGeneration) return
         this.connectionError = error instanceof Error ? error.message : '课堂状态暂时不可用'
       }
     },
@@ -106,6 +115,8 @@ export const useSupervisionStore = defineStore('supervision', {
       this.knowledgePoint = ''
       this.elapsed = '00:00'
       this.target = '00:00'
+			this.activeSeconds = 0
+			this.timingClientAt = 0
       this.studentAnswer = ''
       this.correctAnswer = ''
       this.misconception = ''
@@ -174,6 +185,10 @@ export const useSupervisionStore = defineStore('supervision', {
       if (typeof payload.subject === 'string') this.subject = payload.subject
       if (typeof payload.knowledge_point === 'string') this.knowledgePoint = payload.knowledge_point
       if (typeof payload.target_minutes === 'number') this.target = `${String(payload.target_minutes).padStart(2, '0')}:00`
+			if (typeof payload.active_seconds === 'number') {
+				this.activeSeconds = payload.active_seconds
+				this.timingClientAt = performance.now()
+			}
       if (typeof payload.correct_answer !== 'undefined') this.correctAnswer = formatAnswer(payload.correct_answer)
       if (typeof payload.student_answer === 'string') this.studentAnswer = payload.student_answer
       if (typeof payload.error_type === 'string') this.misconception = payload.error_type
@@ -184,9 +199,10 @@ export const useSupervisionStore = defineStore('supervision', {
       if (typeof payload.mastery_state === 'string') this.masteryState = payload.mastery_state
       if (typeof payload.mastery_score === 'number') this.masteryScore = payload.mastery_score
       if (typeof payload.reason === 'string') this.tutorReason = formatTutorReason(payload.reason)
-      if (message.type === 'SESSION_COMPLETED') {
+			if (message.type === 'SESSION_RESUMED') this.sessionActive = true
+			if (message.type === 'SESSION_PAUSED' || message.type === 'SESSION_ABANDONED' || message.type === 'SESSION_COMPLETED') {
         this.sessionActive = false
-        if (child) child.active_session_id = null
+				if (child && (message.type === 'SESSION_ABANDONED' || message.type === 'SESSION_COMPLETED')) child.active_session_id = null
       }
       this.timeline.push({
         id: message.event_id,
@@ -205,6 +221,9 @@ export const useSupervisionStore = defineStore('supervision', {
       socketGeneration += 1
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
       if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+      reconnectTimer = undefined
+      refreshTimer = undefined
+      reconnectAttempt = 0
       parentSocket?.close(1000, 'parent view closed')
       parentSocket = undefined
       socketStudentID = ''
@@ -212,11 +231,22 @@ export const useSupervisionStore = defineStore('supervision', {
       this.reconnecting = false
     },
 
+    reset() {
+      requestGeneration++
+      this.disconnect()
+      this.$reset()
+    },
+
     async intervene(type: 'ENCOURAGEMENT' | 'REDUCE_INTENSITY' | 'REVIEW_ONLY' | 'STATE_NOT_GOOD') {
       if (!this.studentID) return
+			const generation = requestGeneration
       this.interventionStatus = '保存中'
-      try { await sendParentIntervention(this.studentID, type); this.interventionStatus = '已同步' }
-      catch (error) { this.interventionStatus = error instanceof Error ? error.message : '操作失败' }
+      try {
+				await sendParentIntervention(this.studentID, type)
+				if (generation === requestGeneration) this.interventionStatus = '已同步'
+			} catch (error) {
+				if (generation === requestGeneration) this.interventionStatus = error instanceof Error ? error.message : '操作失败'
+			}
     },
   },
 })

@@ -68,7 +68,7 @@ func (handler *Handler) ParentChildren(writer http.ResponseWriter, request *http
 	rows, err := handler.pool.Query(request.Context(), `
 SELECT st.id,u.display_name,st.grade_level,ls.id,s.name_zh,kp.name,ls.started_at
 FROM parent_student_links l JOIN students st ON st.id=l.student_id JOIN users u ON u.id=st.user_id
-LEFT JOIN LATERAL (SELECT * FROM learning_sessions x WHERE x.student_id=st.id AND x.status='ACTIVE' ORDER BY x.started_at DESC LIMIT 1) ls ON true
+	LEFT JOIN LATERAL (SELECT * FROM learning_sessions x WHERE x.student_id=st.id AND x.status='ACTIVE' AND x.last_activity_at>=CURRENT_TIMESTAMP-interval '90 seconds' ORDER BY x.started_at DESC LIMIT 1) ls ON true
 LEFT JOIN subjects s ON s.id=ls.subject_id LEFT JOIN questions q ON q.id=ls.current_question_id LEFT JOIN knowledge_points kp ON kp.id=q.knowledge_point_id
 WHERE l.parent_user_id=$1 AND l.status='ACTIVE' ORDER BY l.created_at`, parentID)
 	if err != nil {
@@ -190,16 +190,21 @@ func (handler *Handler) ParentReport(writer http.ResponseWriter, request *http.R
 	if !ok {
 		return
 	}
-	var completedSessions, activeSeconds, totalEnergy, streakDays, rewardEvents int
+	var completedSessions, activeSeconds, totalEnergy, rewardEvents int
 	if err := handler.pool.QueryRow(request.Context(), `
-SELECT count(*) FILTER(WHERE ls.status='COMPLETED')::int,
-       COALESCE(sum(ls.actual_seconds) FILTER(WHERE ls.status='COMPLETED'),0)::int,
-       COALESCE(g.total_energy,0)::int,COALESCE(g.streak_days,0)::int,
-       (SELECT count(*)::int FROM reward_events re WHERE re.student_id=st.id)
+	SELECT count(*) FILTER(WHERE ls.status='COMPLETED')::int,
+	       COALESCE(sum(ls.actual_seconds) FILTER(WHERE ls.status='COMPLETED'),0)::int,
+	       COALESCE(g.total_energy,0)::int,
+	       (SELECT count(*)::int FROM reward_events re WHERE re.student_id=st.id)
 FROM students st
 LEFT JOIN learning_sessions ls ON ls.student_id=st.id
 LEFT JOIN student_growth g ON g.student_id=st.id
-WHERE st.id=$1 GROUP BY st.id,g.total_energy,g.streak_days`, studentID).Scan(&completedSessions, &activeSeconds, &totalEnergy, &streakDays, &rewardEvents); err != nil {
+	WHERE st.id=$1 GROUP BY st.id,g.total_energy`, studentID).Scan(&completedSessions, &activeSeconds, &totalEnergy, &rewardEvents); err != nil {
+		http.Error(writer, "report unavailable", http.StatusInternalServerError)
+		return
+	}
+	streakDays, err := currentStreak(request.Context(), handler.pool, studentID, handler.now())
+	if err != nil {
 		http.Error(writer, "report unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -228,10 +233,11 @@ WHERE st.id=$1 GROUP BY st.id,g.total_energy,g.streak_days`, studentID).Scan(&co
 	dayRows.Close()
 
 	sessionRows, err := handler.pool.Query(request.Context(), `
-SELECT ls.id,s.name_zh,kp.name,ls.status,ls.current_state,ls.started_at,ls.ended_at,ls.actual_seconds
+	SELECT ls.id,s.name_zh,kp.name,ls.status,ls.current_state,ls.started_at,ls.ended_at,
+		       ls.accumulated_seconds + CASE WHEN ls.status='ACTIVE' THEN GREATEST(0,EXTRACT(EPOCH FROM ((CASE WHEN ls.last_activity_at >= $2::timestamptz-interval '90 seconds' THEN $2::timestamptz ELSE ls.last_activity_at END)-COALESCE(ls.last_resumed_at,ls.started_at)))::integer) ELSE 0 END
 FROM learning_sessions ls JOIN subjects s ON s.id=ls.subject_id
 LEFT JOIN questions q ON q.id=ls.current_question_id LEFT JOIN knowledge_points kp ON kp.id=q.knowledge_point_id
-WHERE ls.student_id=$1 ORDER BY ls.started_at DESC LIMIT 10`, studentID)
+	WHERE ls.student_id=$1 ORDER BY ls.started_at DESC LIMIT 10`, studentID, handler.now())
 	if err != nil {
 		http.Error(writer, "report unavailable", http.StatusInternalServerError)
 		return
@@ -323,8 +329,14 @@ func (handler *Handler) ParentIntervention(writer http.ResponseWriter, request *
 	}
 	var event *realtime.Event
 	err = pgx.BeginFunc(request.Context(), handler.pool, func(tx pgx.Tx) error {
+		var lockedStudentID uuid.UUID
+		if err := tx.QueryRow(request.Context(), `SELECT id FROM students WHERE id=$1 FOR NO KEY UPDATE`, studentID).Scan(&lockedStudentID); err != nil {
+			return err
+		}
 		var sessionID *uuid.UUID
-		_ = tx.QueryRow(request.Context(), `SELECT id FROM learning_sessions WHERE student_id=$1 AND status='ACTIVE' ORDER BY started_at DESC LIMIT 1`, studentID).Scan(&sessionID)
+		if err := tx.QueryRow(request.Context(), `SELECT id FROM learning_sessions WHERE student_id=$1 AND status='ACTIVE' ORDER BY started_at DESC LIMIT 1 FOR UPDATE`, studentID).Scan(&sessionID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 		if _, err := tx.Exec(request.Context(), `INSERT INTO parent_interventions(id,parent_user_id,student_id,session_id,type,payload_json)VALUES($1,$2,$3,$4,$5,'{}')`, uuid.New(), parentID, studentID, sessionID, body.Type); err != nil {
 			return err
 		}
@@ -346,13 +358,13 @@ updated_at=now()`, parentID, studentID, body.Type)
 			}
 		}
 		if sessionID != nil {
-			var sequence int64
-			if err := tx.QueryRow(request.Context(), `SELECT COALESCE(max(sequence),0)+1 FROM tutor_events WHERE session_id=$1`, *sessionID).Scan(&sequence); err != nil {
+			_, sequence, err := nextSequences(request.Context(), tx, *sessionID)
+			if err != nil {
 				return err
 			}
 			studentPayload, _ := json.Marshal(map[string]any{"intervention": body.Type, "message": message})
 			parentPayload, _ := json.Marshal(map[string]any{"intervention": body.Type, "message": message, "answer_controls_available": false})
-			created := makeEvent(studentID, *sessionID, sequence, realtime.EventParentIntervention, studentPayload, parentPayload, time.Now())
+			created := makeEvent(studentID, *sessionID, sequence, realtime.EventParentIntervention, studentPayload, parentPayload, handler.now())
 			if err := insertEvent(request.Context(), tx, created); err != nil {
 				return err
 			}

@@ -1,0 +1,400 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
+import { afterEach, expect, test, vi } from 'vitest'
+
+import type { StudentSession } from '../api/student'
+import { useAuthSession } from '../stores/auth'
+import { useLearningStore } from '../stores/learning'
+import StudentLayout from './StudentLayout.vue'
+
+function session(overrides: Partial<StudentSession> = {}): StudentSession {
+  return {
+    id: 'session-1',
+    version: 1,
+		timing_version: 1,
+    subject_code: 'MATH',
+    subject_name: '数学',
+    knowledge_point: '分数通分',
+    difficulty: 'L1',
+    question_id: 'question-1',
+    prompt: '三分之一和四分之一的小格一样大吗？',
+    scene: {},
+    input_schema: {},
+    started_at: '2026-08-26T12:00:00Z',
+    target_minutes: 20,
+    status: 'ACTIVE',
+    active_seconds: 10,
+    current_active_seconds: 10,
+    active_since: '2026-08-26T12:00:00Z',
+    timing_observed_at: '2026-08-26T12:00:10Z',
+    state: 'ASK',
+    socratic_round: 0,
+    timeline: [],
+    ...overrides,
+  }
+}
+
+async function classroomHarness() {
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/student', component: { template: '<div>首页</div>' } },
+      { path: '/student/session/:id', component: { template: '<div>课堂</div>' }, meta: { classroom: true, hideStudentNav: true } },
+    ],
+  })
+  await router.push('/student/session/session-1')
+  await router.isReady()
+  const learning = useLearningStore()
+	useAuthSession().user.value = { user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }
+  learning.applySession(session())
+  const wrapper = mount(StudentLayout, { global: { plugins: [pinia, router] } })
+  return { learning, router, wrapper }
+}
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+})
+
+test('pauses immediately when hidden while answer analysis is loading', async () => {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  const fetch = vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      session_id: 'session-1',
+      version: 1,
+		timing_version: 2,
+      status: 'PAUSED',
+      active_seconds: 20,
+      current_active_seconds: 0,
+      timing_observed_at: '2026-08-26T12:00:20Z',
+    }),
+  } as Response))
+  vi.stubGlobal('fetch', fetch)
+  const { learning, wrapper } = await classroomHarness()
+  learning.loading = true
+
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+  document.dispatchEvent(new Event('visibilitychange'))
+  await flushPromises()
+
+  expect(fetch).toHaveBeenCalledWith('/api/v1/student/sessions/session-1/pause', expect.objectContaining({ method: 'POST' }))
+  expect(learning.status).toBe('PAUSED')
+  expect(learning.loading).toBe(true)
+  wrapper.unmount()
+})
+
+test('pageshow reconciles a terminal session from the server before resuming', async () => {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  const fetch = vi.fn(async (input: string | URL | Request) => String(input).endsWith('/auth/me')
+		? jsonResponse({ user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' })
+		: jsonResponse(session({
+			version: 2,
+			timing_version: 2,
+			status: 'ABANDONED',
+			current_active_seconds: 0,
+			timing_observed_at: '2026-08-27T12:00:00Z',
+		})))
+  vi.stubGlobal('fetch', fetch)
+  const { learning, wrapper } = await classroomHarness()
+
+  window.dispatchEvent(persistedPageShow())
+  await flushPromises()
+
+	expect(fetch).toHaveBeenCalledTimes(2)
+  expect(learning.status).toBe('ABANDONED')
+  expect(learning.version).toBe(2)
+  wrapper.unmount()
+})
+
+test('does not leave the classroom when the required pause fails', async () => {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  vi.spyOn(window, 'confirm').mockReturnValue(true)
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500 } as Response)))
+  const { router, wrapper } = await classroomHarness()
+
+  await router.push('/student')
+  await flushPromises()
+
+  expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+  wrapper.unmount()
+})
+
+test('waits for a pagehide pause before pageshow refresh and automatic resume', async () => {
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const pause = deferred<Response>()
+	const identity = deferred<Response>()
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/pause')) return pause.promise
+		if (path.endsWith('/auth/me')) return identity.promise
+		if (path.endsWith('/sessions/session-1')) return Promise.resolve(jsonResponse(session({
+			timing_version: 2,
+			status: 'PAUSED',
+			active_seconds: 20,
+			current_active_seconds: 0,
+			timing_observed_at: '2026-08-26T12:00:20Z',
+		})))
+		if (path.endsWith('/resume')) return Promise.resolve(jsonResponse({
+			session_id: 'session-1',
+			version: 1,
+			timing_version: 3,
+			status: 'ACTIVE',
+			active_seconds: 20,
+			current_active_seconds: 0,
+			active_since: '2026-08-26T12:00:21Z',
+			timing_observed_at: '2026-08-26T12:00:21Z',
+		}))
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const { learning, wrapper } = await classroomHarness()
+
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	window.dispatchEvent(new Event('pagehide'))
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	await Promise.resolve()
+	expect(requests).toEqual(['/api/v1/student/sessions/session-1/pause'])
+
+	pause.resolve(jsonResponse({
+		session_id: 'session-1',
+		version: 1,
+		timing_version: 2,
+		status: 'PAUSED',
+		active_seconds: 20,
+		current_active_seconds: 0,
+		timing_observed_at: '2026-08-26T12:00:20Z',
+	}))
+	await flushPromises()
+	expect(requests).toEqual([
+		'/api/v1/student/sessions/session-1/pause',
+		'/api/v1/auth/me',
+	])
+
+	window.dispatchEvent(persistedPageShow())
+	identity.resolve(jsonResponse({ user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }))
+	await flushPromises()
+
+	expect(requests).toEqual([
+		'/api/v1/student/sessions/session-1/pause',
+		'/api/v1/auth/me',
+		'/api/v1/student/sessions/session-1',
+		'/api/v1/student/sessions/session-1/resume',
+	])
+	expect(learning.status).toBe('ACTIVE')
+	expect(learning.timingVersion).toBe(3)
+	wrapper.unmount()
+})
+
+test('does not resume when a visible reconciliation returns after the page is hidden again', async () => {
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const firstIdentity = deferred<Response>()
+	let identityRequests = 0
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/pause')) return Promise.resolve(jsonResponse({
+			session_id: 'session-1',
+			version: 1,
+			timing_version: 2,
+			status: 'PAUSED',
+			active_seconds: 20,
+			current_active_seconds: 0,
+			timing_observed_at: '2026-08-26T12:00:20Z',
+		}))
+		if (path.endsWith('/auth/me')) {
+			identityRequests++
+			if (identityRequests === 1) return firstIdentity.promise
+			return Promise.resolve(jsonResponse({ user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }))
+		}
+		if (path.endsWith('/sessions/session-1')) return Promise.resolve(jsonResponse(session({
+			timing_version: 2,
+			status: 'PAUSED',
+			active_seconds: 20,
+			current_active_seconds: 0,
+			timing_observed_at: '2026-08-26T12:00:20Z',
+		})))
+		if (path.endsWith('/resume')) return Promise.resolve(jsonResponse({
+			session_id: 'session-1',
+			version: 1,
+			timing_version: 3,
+			status: 'ACTIVE',
+			active_seconds: 20,
+			current_active_seconds: 0,
+			active_since: '2026-08-26T12:00:21Z',
+			timing_observed_at: '2026-08-26T12:00:21Z',
+		}))
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const { learning, wrapper } = await classroomHarness()
+
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	await flushPromises()
+	expect(learning.status).toBe('PAUSED')
+
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	await Promise.resolve()
+	expect(requests.at(-1)).toBe('/api/v1/auth/me')
+
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	firstIdentity.resolve(jsonResponse({ user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }))
+	await flushPromises()
+
+	expect(requests.some((path) => path.endsWith('/resume'))).toBe(false)
+	expect(learning.status).toBe('PAUSED')
+
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	await flushPromises()
+
+	expect(identityRequests).toBe(2)
+	expect(requests.at(-1)).toBe('/api/v1/student/sessions/session-1/resume')
+	expect(learning.status).toBe('ACTIVE')
+	wrapper.unmount()
+})
+
+test('pauses again when the page is hidden while automatic resume is in flight', async () => {
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const resume = deferred<Response>()
+	let pauseRequests = 0
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/pause')) {
+			pauseRequests++
+			return Promise.resolve(jsonResponse({
+				session_id: 'session-1',
+				version: 1,
+				timing_version: pauseRequests === 1 ? 2 : 4,
+				status: 'PAUSED',
+				active_seconds: pauseRequests === 1 ? 20 : 21,
+				current_active_seconds: 0,
+				timing_observed_at: pauseRequests === 1 ? '2026-08-26T12:00:20Z' : '2026-08-26T12:00:22Z',
+			}))
+		}
+		if (path.endsWith('/auth/me')) return Promise.resolve(jsonResponse({ user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }))
+		if (path.endsWith('/sessions/session-1')) return Promise.resolve(jsonResponse(session({
+			timing_version: 2,
+			status: 'PAUSED',
+			active_seconds: 20,
+			current_active_seconds: 0,
+			timing_observed_at: '2026-08-26T12:00:20Z',
+		})))
+		if (path.endsWith('/resume')) return resume.promise
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const { learning, wrapper } = await classroomHarness()
+
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	await flushPromises()
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	await flushPromises()
+	expect(requests.at(-1)).toBe('/api/v1/student/sessions/session-1/resume')
+
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	resume.resolve(jsonResponse({
+		session_id: 'session-1',
+		version: 1,
+		timing_version: 3,
+		status: 'ACTIVE',
+		active_seconds: 20,
+		current_active_seconds: 0,
+		active_since: '2026-08-26T12:00:21Z',
+		timing_observed_at: '2026-08-26T12:00:21Z',
+	}))
+	await flushPromises()
+
+	expect(pauseRequests).toBe(2)
+	expect(requests.at(-1)).toBe('/api/v1/student/sessions/session-1/pause')
+	expect(learning.status).toBe('PAUSED')
+	wrapper.unmount()
+})
+
+test('waits for an in-flight resume and pauses before leaving the classroom', async () => {
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	vi.spyOn(window, 'confirm').mockReturnValue(true)
+	const resume = deferred<Response>()
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/resume')) return resume.promise
+		if (path.endsWith('/pause')) return Promise.resolve(jsonResponse({
+			session_id: 'session-1',
+			version: 1,
+			timing_version: 4,
+			status: 'PAUSED',
+			active_seconds: 21,
+			current_active_seconds: 0,
+			timing_observed_at: '2026-08-26T12:00:22Z',
+		}))
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const { learning, router, wrapper } = await classroomHarness()
+	learning.applySession(session({
+		timing_version: 2,
+		status: 'PAUSED',
+		active_seconds: 20,
+		current_active_seconds: 0,
+		timing_observed_at: '2026-08-26T12:00:20Z',
+	}))
+
+	const resumeOperation = learning.resumeSession()
+	const navigation = router.push('/student')
+	await flushPromises()
+	expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+	expect(requests).toEqual(['/api/v1/student/sessions/session-1/resume'])
+
+	resume.resolve(jsonResponse({
+		session_id: 'session-1',
+		version: 1,
+		timing_version: 3,
+		status: 'ACTIVE',
+		active_seconds: 20,
+		current_active_seconds: 0,
+		active_since: '2026-08-26T12:00:21Z',
+		timing_observed_at: '2026-08-26T12:00:21Z',
+	}))
+	await resumeOperation
+	await navigation
+	await flushPromises()
+
+	expect(requests).toEqual([
+		'/api/v1/student/sessions/session-1/resume',
+		'/api/v1/student/sessions/session-1/pause',
+	])
+	expect(router.currentRoute.value.path).toBe('/student')
+	expect(learning.status).toBe('PAUSED')
+	wrapper.unmount()
+})
+
+function jsonResponse(body: unknown): Response {
+	return { ok: true, status: 200, json: async () => body } as Response
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void
+	const promise = new Promise<T>((next) => { resolve = next })
+	return { promise, resolve }
+}
+
+function persistedPageShow(): Event {
+	const event = new Event('pageshow')
+	Object.defineProperty(event, 'persisted', { value: true })
+	return event
+}

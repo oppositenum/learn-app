@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/classroom"
@@ -74,6 +75,10 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		studentStart := auth.RequireRole(auth.RoleStudent, http.HandlerFunc(dependencies.Classroom.StartSession))
 		studentSession := auth.RequireRole(auth.RoleStudent, http.HandlerFunc(dependencies.Classroom.GetSession))
 		studentCurrent := auth.RequireRole(auth.RoleStudent, http.HandlerFunc(dependencies.Classroom.CurrentSession))
+		studentPause := auth.RequireRole(auth.RoleStudent, http.HandlerFunc(dependencies.Classroom.PauseSession))
+		studentResume := auth.RequireRole(auth.RoleStudent, http.HandlerFunc(dependencies.Classroom.ResumeSession))
+		studentAbandon := auth.RequireRole(auth.RoleStudent, http.HandlerFunc(dependencies.Classroom.AbandonSession))
+		studentHeartbeat := auth.RequireRole(auth.RoleStudent, http.HandlerFunc(dependencies.Classroom.HeartbeatSession))
 		parentPreferences := auth.RequireRole(auth.RoleParent, http.HandlerFunc(dependencies.Classroom.ParentPreferences))
 		parentPreferencesRead := auth.RequireRole(auth.RoleParent, http.HandlerFunc(dependencies.Classroom.GetParentPreferences))
 		parentChildren := auth.RequireRole(auth.RoleParent, http.HandlerFunc(dependencies.Classroom.ParentChildren))
@@ -90,6 +95,10 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/v1/student/sessions", dependencies.Authenticate(studentStart))
 		mux.Handle("GET /api/v1/student/sessions/current", dependencies.Authenticate(studentCurrent))
 		mux.Handle("GET /api/v1/student/sessions/{session_id}", dependencies.Authenticate(studentSession))
+		mux.Handle("POST /api/v1/student/sessions/{session_id}/pause", dependencies.Authenticate(studentPause))
+		mux.Handle("POST /api/v1/student/sessions/{session_id}/resume", dependencies.Authenticate(studentResume))
+		mux.Handle("POST /api/v1/student/sessions/{session_id}/abandon", dependencies.Authenticate(studentAbandon))
+		mux.Handle("POST /api/v1/student/sessions/{session_id}/heartbeat", dependencies.Authenticate(studentHeartbeat))
 		mux.Handle("PUT /api/v1/parent/child/{student_id}/preferences", dependencies.Authenticate(parentPreferences))
 		mux.Handle("GET /api/v1/parent/child/{student_id}/preferences", dependencies.Authenticate(parentPreferencesRead))
 		mux.Handle("GET /api/v1/parent/children", dependencies.Authenticate(parentChildren))
@@ -118,5 +127,10 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/v1/owner/trials", dependencies.Authenticate(ownerTrialReport))
 	}
 
-	return mux
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/api/") {
+			writer.Header().Set("Cache-Control", "no-store")
+		}
+		mux.ServeHTTP(writer, request)
+	})
 }

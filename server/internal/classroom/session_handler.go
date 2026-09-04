@@ -1,6 +1,7 @@
 package classroom
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 
 type StudentSession struct {
 	ID             uuid.UUID        `json:"id"`
+	Version        int64            `json:"version"`
+	TimingVersion  int64            `json:"timing_version"`
+	PlanBlockID    *uuid.UUID       `json:"plan_block_id,omitempty"`
 	SubjectCode    string           `json:"subject_code"`
 	SubjectName    string           `json:"subject_name"`
 	KnowledgePoint string           `json:"knowledge_point"`
@@ -26,6 +30,11 @@ type StudentSession struct {
 	InputSchema    json.RawMessage  `json:"input_schema"`
 	StartedAt      time.Time        `json:"started_at"`
 	TargetMinutes  int              `json:"target_minutes"`
+	Status         string           `json:"status"`
+	ActiveSeconds  int              `json:"active_seconds"`
+	CurrentSeconds int              `json:"current_active_seconds"`
+	ActiveSince    *time.Time       `json:"active_since,omitempty"`
+	TimingAt       time.Time        `json:"timing_observed_at"`
 	State          string           `json:"state"`
 	SocraticRound  int              `json:"socratic_round"`
 	Timeline       []StudentTurn    `json:"timeline"`
@@ -57,30 +66,45 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 		http.Error(writer, "invalid plan block", http.StatusBadRequest)
 		return
 	}
+	if err := handler.service.RecoverStaleSessions(request.Context(), userID); err != nil {
+		http.Error(writer, "session could not start", http.StatusInternalServerError)
+		return
+	}
 	var sessionID uuid.UUID
 	var startedEvents []realtime.Event
 	err = pgx.BeginFunc(request.Context(), handler.pool, func(tx pgx.Tx) error {
 		var studentID, subjectID, knowledgePointID, questionID uuid.UUID
 		var minutes int
-		var mode string
+		var mode, blockStatus string
 		var subjectCode, knowledgePointName, prompt string
 		var originalTaskID *uuid.UUID
+		if err := tx.QueryRow(request.Context(), `SELECT id FROM students WHERE user_id=$1 FOR NO KEY UPDATE`, userID).Scan(&studentID); err != nil {
+			return err
+		}
+		now := handler.now()
 		err := tx.QueryRow(request.Context(), `
-SELECT p.student_id,b.subject_id,b.knowledge_point_id,b.minutes,b.mode,b.original_task_id,q.id,s.code,kp.name,q.prompt_public
+	SELECT p.student_id,b.subject_id,b.knowledge_point_id,b.minutes,b.mode,b.status,b.original_task_id,q.id,s.code,kp.name,q.prompt_public
 FROM learning_plan_blocks b JOIN learning_plans p ON p.id=b.plan_id
 JOIN students st ON st.id=p.student_id
 JOIN subjects s ON s.id=b.subject_id
 JOIN knowledge_points kp ON kp.id=b.knowledge_point_id
 JOIN questions q ON q.knowledge_point_id=b.knowledge_point_id AND q.status='RELEASED'
-WHERE b.id=$1 AND st.user_id=$2 AND p.plan_date=current_date AND p.status IN('PROPOSED','ACTIVE')
-		ORDER BY q.difficulty,q.id LIMIT 1 FOR UPDATE OF p`, body.PlanBlockID, userID).Scan(&studentID, &subjectID, &knowledgePointID, &minutes, &mode, &originalTaskID, &questionID, &subjectCode, &knowledgePointName, &prompt)
+	WHERE b.id=$1 AND st.user_id=$2 AND p.plan_date=$3::date AND p.status IN('PROPOSED','ACTIVE')
+			ORDER BY q.difficulty,q.id LIMIT 1 FOR UPDATE OF p`, body.PlanBlockID, userID, learningDate(now)).Scan(&studentID, &subjectID, &knowledgePointID, &minutes, &mode, &blockStatus, &originalTaskID, &questionID, &subjectCode, &knowledgePointName, &prompt)
 		if err != nil {
 			return err
 		}
-		if err := tx.QueryRow(request.Context(), `SELECT id FROM learning_sessions WHERE student_id=$1 AND status='ACTIVE' ORDER BY started_at DESC LIMIT 1`, studentID).Scan(&sessionID); err == nil {
-			return nil
+		var openBlockID *uuid.UUID
+		if err := tx.QueryRow(request.Context(), `SELECT id,plan_block_id FROM learning_sessions WHERE student_id=$1 AND status IN ('ACTIVE','PAUSED') ORDER BY started_at DESC LIMIT 1`, studentID).Scan(&sessionID, &openBlockID); err == nil {
+			if openBlockID != nil && *openBlockID == body.PlanBlockID {
+				return nil
+			}
+			return ErrAnotherSessionOpen
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return err
+		}
+		if blockStatus != "AVAILABLE" {
+			return ErrAnotherSessionOpen
 		}
 		sessionID = uuid.New()
 		evidenceForm := "LIFE"
@@ -92,13 +116,15 @@ WHERE b.id=$1 AND st.user_id=$2 AND p.plan_date=current_date AND p.status IN('PR
 		case "MICRO_BACKTRACK":
 			evidenceForm = "TEXTBOOK"
 		}
-		if _, err := tx.Exec(request.Context(), `INSERT INTO learning_sessions(id,student_id,subject_id,current_question_id,status,target_minutes,current_state,original_task_id,active_task_id,evidence_form)VALUES($1,$2,$3,$4,'ACTIVE',$5,'ASK',$6,$7,$8)`, sessionID, studentID, subjectID, questionID, minutes, originalTaskID, knowledgePointID, evidenceForm); err != nil {
+		if _, err := tx.Exec(request.Context(), `INSERT INTO learning_sessions(id,student_id,plan_block_id,subject_id,current_question_id,started_at,status,target_minutes,current_state,original_task_id,active_task_id,evidence_form,last_resumed_at,last_activity_at)VALUES($1,$2,$3,$4,$5,$10,'ACTIVE',$6,'ASK',$7,$8,$9,$10,$10)`, sessionID, studentID, body.PlanBlockID, subjectID, questionID, minutes, originalTaskID, knowledgePointID, evidenceForm, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(request.Context(), `UPDATE learning_plan_blocks SET status='ACTIVE' WHERE id=$1`, body.PlanBlockID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(request.Context(), `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private)SELECT $1,$2,1,'TUTOR','ASK',prompt_public,'server selected released plan content' FROM questions WHERE id=$3`, uuid.New(), sessionID, questionID); err != nil {
 			return err
 		}
-		now := time.Now()
 		startedStudent, _ := json.Marshal(map[string]any{"action": "ASK", "subject": subjectCode, "knowledge_point": knowledgePointName})
 		startedParent, _ := json.Marshal(map[string]any{"action": "ASK", "subject": subjectCode, "knowledge_point": knowledgePointName, "target_minutes": minutes})
 		started := makeEvent(studentID, sessionID, 1, realtime.EventSessionStarted, startedStudent, startedParent, now)
@@ -117,6 +143,10 @@ WHERE b.id=$1 AND st.user_id=$2 AND p.plan_date=current_date AND p.status IN('PR
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(writer, "plan block not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, ErrAnotherSessionOpen) {
+		http.Error(writer, "finish or leave the current session before starting another", http.StatusConflict)
 		return
 	}
 	if err != nil {
@@ -138,6 +168,10 @@ func (handler *Handler) GetSession(writer http.ResponseWriter, request *http.Req
 		http.Error(writer, "invalid principal", http.StatusUnauthorized)
 		return
 	}
+	if err := handler.service.RecoverStaleSessions(request.Context(), userID); err != nil {
+		http.Error(writer, "session unavailable", http.StatusInternalServerError)
+		return
+	}
 	sessionID, err := uuid.Parse(request.PathValue("session_id"))
 	if err != nil {
 		http.Error(writer, "invalid session id", http.StatusBadRequest)
@@ -153,82 +187,171 @@ func (handler *Handler) CurrentSession(writer http.ResponseWriter, request *http
 		http.Error(writer, "invalid principal", http.StatusUnauthorized)
 		return
 	}
-	var sessionID uuid.UUID
-	err = handler.pool.QueryRow(request.Context(), `SELECT ls.id FROM learning_sessions ls JOIN students st ON st.id=ls.student_id WHERE st.user_id=$1 AND ls.status='ACTIVE' ORDER BY ls.started_at DESC LIMIT 1`, userID).Scan(&sessionID)
+	if err := handler.service.RecoverStaleSessions(request.Context(), userID); err != nil {
+		http.Error(writer, "session unavailable", http.StatusInternalServerError)
+		return
+	}
+	var session StudentSession
+	err = pgx.BeginTxFunc(request.Context(), handler.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		var sessionID uuid.UUID
+		if err := tx.QueryRow(request.Context(), `SELECT ls.id FROM learning_sessions ls JOIN students st ON st.id=ls.student_id WHERE st.user_id=$1 AND ls.status IN ('ACTIVE','PAUSED') ORDER BY ls.started_at DESC LIMIT 1`, userID).Scan(&sessionID); err != nil {
+			return err
+		}
+		var err error
+		session, err = readStudentSession(request.Context(), tx, userID, sessionID, true, handler.now())
+		return err
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		writer.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if errors.Is(err, errVoiceExplanationUnavailable) {
+		http.Error(writer, "voice explanation unavailable", http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(writer, "session unavailable", http.StatusInternalServerError)
 		return
 	}
-	handler.writeStudentSession(writer, request, userID, sessionID)
+	writeJSON(writer, http.StatusOK, session)
 }
 
 func (handler *Handler) writeStudentSession(writer http.ResponseWriter, request *http.Request, userID, sessionID uuid.UUID) {
 	var session StudentSession
-	err := handler.pool.QueryRow(request.Context(), `
-SELECT ls.id,s.code,s.name_zh,kp.name,q.difficulty,q.id,q.prompt_public,q.scene_public_json,q.input_schema_json,ls.started_at,ls.target_minutes,ls.current_state,ls.socratic_fail_count
-FROM learning_sessions ls JOIN students st ON st.id=ls.student_id
-JOIN subjects s ON s.id=ls.subject_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED'
-JOIN knowledge_points kp ON kp.id=q.knowledge_point_id
-WHERE ls.id=$1 AND st.user_id=$2`, sessionID, userID).Scan(&session.ID, &session.SubjectCode, &session.SubjectName, &session.KnowledgePoint, &session.Difficulty, &session.QuestionID, &session.Prompt, &session.Scene, &session.InputSchema, &session.StartedAt, &session.TargetMinutes, &session.State, &session.SocraticRound)
+	err := pgx.BeginTxFunc(request.Context(), handler.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		var err error
+		session, err = readStudentSession(request.Context(), tx, userID, sessionID, false, handler.now())
+		return err
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(writer, "session not found", http.StatusNotFound)
 		return
 	}
+	if errors.Is(err, errVoiceExplanationUnavailable) {
+		http.Error(writer, "voice explanation unavailable", http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(writer, "session unavailable", http.StatusInternalServerError)
 		return
 	}
-	rows, err := handler.pool.Query(request.Context(), `SELECT sequence,actor,action,message,created_at FROM tutor_turns WHERE session_id=$1 ORDER BY sequence`, sessionID)
+	writeJSON(writer, http.StatusOK, session)
+}
+
+var errVoiceExplanationUnavailable = errors.New("voice explanation unavailable")
+
+type studentSessionQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func readStudentSession(ctx context.Context, db studentSessionQueryer, userID, sessionID uuid.UUID, requireOpen bool, now time.Time) (StudentSession, error) {
+	var session StudentSession
+	var accumulatedSeconds int
+	var lastResumedAt *time.Time
+	err := db.QueryRow(ctx, `
+	SELECT ls.id,ls.version,ls.timing_version,ls.plan_block_id,s.code,s.name_zh,kp.name,q.difficulty,q.id,q.prompt_public,q.scene_public_json,q.input_schema_json,ls.started_at,ls.target_minutes,ls.status,ls.accumulated_seconds,ls.last_resumed_at,ls.current_state,ls.socratic_fail_count
+	FROM learning_sessions ls JOIN students st ON st.id=ls.student_id
+	JOIN subjects s ON s.id=ls.subject_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED'
+	JOIN knowledge_points kp ON kp.id=q.knowledge_point_id
+		WHERE ls.id=$1 AND st.user_id=$2
+		  AND (NOT $3 OR ls.status IN ('ACTIVE','PAUSED'))`, sessionID, userID, requireOpen).Scan(&session.ID, &session.Version, &session.TimingVersion, &session.PlanBlockID, &session.SubjectCode, &session.SubjectName, &session.KnowledgePoint, &session.Difficulty, &session.QuestionID, &session.Prompt, &session.Scene, &session.InputSchema, &session.StartedAt, &session.TargetMinutes, &session.Status, &accumulatedSeconds, &lastResumedAt, &session.State, &session.SocraticRound)
 	if err != nil {
-		http.Error(writer, "session unavailable", http.StatusInternalServerError)
-		return
+		return session, err
 	}
-	defer rows.Close()
+	timing := timingFromRow(lifecycleRow{sessionID: session.ID, status: session.Status, startedAt: session.StartedAt, accumulatedSeconds: accumulatedSeconds, lastResumedAt: lastResumedAt, timingVersion: session.TimingVersion}, now)
+	session.ActiveSeconds = timing.ActiveSeconds
+	session.CurrentSeconds = timing.CurrentActiveSeconds
+	session.ActiveSince = timing.ActiveSince
+	session.TimingAt = timing.TimingObservedAt
+	rows, err := db.Query(ctx, `SELECT sequence,actor,action,message,created_at FROM tutor_turns WHERE session_id=$1 ORDER BY sequence`, sessionID)
+	if err != nil {
+		return session, err
+	}
+	session.Timeline = []StudentTurn{}
 	for rows.Next() {
 		var turn StudentTurn
 		if err := rows.Scan(&turn.Sequence, &turn.Actor, &turn.Action, &turn.Message, &turn.At); err != nil {
-			http.Error(writer, "session unavailable", http.StatusInternalServerError)
-			return
+			rows.Close()
+			return session, err
 		}
 		session.Timeline = append(session.Timeline, turn)
 	}
 	if err := rows.Err(); err != nil {
-		http.Error(writer, "session unavailable", http.StatusInternalServerError)
-		return
+		rows.Close()
+		return session, err
 	}
+	rows.Close()
 	if session.State == "VOICE_EXPLAIN" {
 		var outputID uuid.UUID
-		err := handler.pool.QueryRow(request.Context(), `SELECT id,audio_data_url FROM speech_outputs WHERE session_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1`, sessionID).Scan(&outputID, &session.VoiceAudio)
+		err := db.QueryRow(ctx, `SELECT id,audio_data_url FROM speech_outputs WHERE session_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1`, sessionID).Scan(&outputID, &session.VoiceAudio)
 		if errors.Is(err, pgx.ErrNoRows) {
-			http.Error(writer, "voice explanation unavailable", http.StatusConflict)
-			return
+			return session, errVoiceExplanationUnavailable
 		}
 		if err != nil {
-			http.Error(writer, "session unavailable", http.StatusInternalServerError)
-			return
+			return session, err
 		}
-		segmentRows, err := handler.pool.Query(request.Context(), `SELECT id::text,text,start_ms,end_ms FROM speech_segments WHERE speech_output_id=$1 ORDER BY sequence`, outputID)
+		segmentRows, err := db.Query(ctx, `SELECT id::text,text,start_ms,end_ms FROM speech_segments WHERE speech_output_id=$1 ORDER BY sequence`, outputID)
 		if err != nil {
-			http.Error(writer, "session unavailable", http.StatusInternalServerError)
-			return
+			return session, err
 		}
-		defer segmentRows.Close()
 		for segmentRows.Next() {
 			var segment speech.Segment
 			if err := segmentRows.Scan(&segment.ID, &segment.Text, &segment.StartMS, &segment.EndMS); err != nil {
-				http.Error(writer, "session unavailable", http.StatusInternalServerError)
-				return
+				segmentRows.Close()
+				return session, err
 			}
 			session.VoiceSegments = append(session.VoiceSegments, segment)
 		}
 		if err := segmentRows.Err(); err != nil {
-			http.Error(writer, "session unavailable", http.StatusInternalServerError)
-			return
+			segmentRows.Close()
+			return session, err
 		}
+		segmentRows.Close()
 	}
-	writeJSON(writer, http.StatusOK, session)
+	return session, nil
+}
+
+func (handler *Handler) PauseSession(writer http.ResponseWriter, request *http.Request) {
+	handler.writeLifecycleResult(writer, request, handler.service.PauseSession)
+}
+
+func (handler *Handler) ResumeSession(writer http.ResponseWriter, request *http.Request) {
+	handler.writeLifecycleResult(writer, request, handler.service.ResumeSession)
+}
+
+func (handler *Handler) AbandonSession(writer http.ResponseWriter, request *http.Request) {
+	handler.writeLifecycleResult(writer, request, handler.service.AbandonSession)
+}
+
+func (handler *Handler) HeartbeatSession(writer http.ResponseWriter, request *http.Request) {
+	handler.writeLifecycleResult(writer, request, handler.service.HeartbeatSession)
+}
+
+func (handler *Handler) writeLifecycleResult(writer http.ResponseWriter, request *http.Request, transition func(context.Context, uuid.UUID, uuid.UUID) (SessionTiming, error)) {
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	userID, err := uuid.Parse(principal.UserID)
+	if err != nil {
+		http.Error(writer, "invalid principal", http.StatusUnauthorized)
+		return
+	}
+	sessionID, err := uuid.Parse(request.PathValue("session_id"))
+	if err != nil {
+		http.Error(writer, "invalid session id", http.StatusBadRequest)
+		return
+	}
+	result, err := transition(request.Context(), userID, sessionID)
+	if errors.Is(err, ErrSessionNotFound) {
+		http.Error(writer, "session not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, ErrSessionNotActive) {
+		http.Error(writer, "session can no longer change", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		http.Error(writer, "session state could not be changed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }

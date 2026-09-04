@@ -84,3 +84,11 @@ func TestReplanDeescalatesBeforeAddingWork(t *testing.T) {
 		t.Fatalf("prerequisite replan = %s", got)
 	}
 }
+
+func TestPlanDateUsesShanghaiLearningDay(t *testing.T) {
+	justAfterShanghaiMidnight := time.Date(2030, 2, 3, 16, 1, 0, 0, time.UTC)
+	got := day(justAfterShanghaiMidnight)
+	if got.Format("2006-01-02") != "2030-02-04" || got.Location().String() != "Asia/Shanghai" {
+		t.Fatalf("learning day=%s location=%s", got.Format(time.RFC3339), got.Location())
+	}
+}

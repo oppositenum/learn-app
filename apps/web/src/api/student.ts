@@ -1,9 +1,18 @@
 export interface SpeechSegment { id: string; text: string; start_ms: number; end_ms: number }
+export type TutorAction = 'INTRO' | 'ASK' | 'WAIT' | 'ANALYZE' | 'PROBE' | 'HINT' | 'SCAFFOLD' | 'ANALOGY' | 'BACKTRACK' | 'EXPLAIN' | 'VOICE_EXPLAIN' | 'RETURN' | 'VARIANT' | 'ABSTRACT' | 'VERIFY' | 'REVIEW' | 'BREAK' | 'COMPLETE'
+export type SessionStatus = 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'ABANDONED'
+export type PlanBlockStatus = 'AVAILABLE' | 'ACTIVE' | 'COMPLETED'
 export interface SubmitAnswerResult {
   session_id: string
-  action: 'INTRO' | 'ASK' | 'WAIT' | 'ANALYZE' | 'PROBE' | 'HINT' | 'SCAFFOLD' | 'ANALOGY' | 'BACKTRACK' | 'EXPLAIN' | 'VOICE_EXPLAIN' | 'RETURN' | 'VARIANT' | 'ABSTRACT' | 'VERIFY' | 'REVIEW' | 'BREAK' | 'COMPLETE'
+  version: number
+  timing_version: number
+  action: TutorAction
   socratic_round: number
   message: string
+  status?: SessionStatus
+  active_seconds?: number
+  current_active_seconds?: number
+  timing_observed_at: string
   voice_segments?: SpeechSegment[]
   voice_audio?: string
   mastery_state?: string
@@ -11,16 +20,51 @@ export interface SubmitAnswerResult {
   tomorrow_plan_changed?: boolean
 }
 
-export interface PlanBlock { id: string; sequence: number; subject: string; knowledge_point_id: string; minutes: number; mode: string; reason: string; focus: string; original_task_id?: string }
+export interface PlanBlock { id: string; sequence: number; subject: string; knowledge_point_id: string; minutes: number; mode: string; reason: string; focus: string; original_task_id?: string | null; status: PlanBlockStatus; session_id?: string | null; session_status?: SessionStatus | null }
 export interface TodayPlan { id: string; date: string; target_minutes: number; blocks: PlanBlock[] }
+export interface TodayPlanResponse { learning_date: string; plans: TodayPlan[] }
 export interface StudentSessionTurn { sequence: number; actor: 'STUDENT' | 'TUTOR' | 'SYSTEM'; action?: string; message: string; at: string }
 export interface StudentSession {
-  id: string; subject_code: string; subject_name: string; knowledge_point: string; difficulty: string; question_id: string; prompt: string
-  scene: Record<string, unknown>; input_schema: Record<string, unknown>; started_at: string; target_minutes: number; state: string; socratic_round: number; timeline: StudentSessionTurn[]
-  voice_segments?: SpeechSegment[]; voice_audio?: string
+  id: string
+  version: number
+  timing_version: number
+  plan_block_id?: string
+  subject_code: string
+  subject_name: string
+  knowledge_point: string
+  difficulty: string
+  question_id: string
+  prompt: string
+  scene: Record<string, unknown>
+  input_schema: Record<string, unknown>
+  started_at: string
+  target_minutes: number
+  status: SessionStatus
+  active_seconds: number
+  current_active_seconds: number
+  active_since?: string
+  timing_observed_at: string
+  state: TutorAction
+  socratic_round: number
+  timeline: StudentSessionTurn[]
+  voice_segments?: SpeechSegment[]
+  voice_audio?: string
+}
+
+export interface SessionTiming {
+  session_id: string
+  version: number
+  timing_version: number
+  status: SessionStatus
+  active_seconds: number
+  current_active_seconds: number
+  active_since?: string
+  timing_observed_at: string
 }
 
 export interface StudentGrowth {
+  student_id: string
+  learning_date: string
   total_energy: number
   streak_days: number
   buildings: {
@@ -45,8 +89,8 @@ async function studentJSON<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export async function getTodayPlan(): Promise<TodayPlan | null> {
-  return (await studentJSON<{ plans: TodayPlan[] }>('/api/v1/student/today')).plans[0] ?? null
+export async function getTodayPlan(): Promise<TodayPlanResponse> {
+  return studentJSON<TodayPlanResponse>('/api/v1/student/today')
 }
 export async function startStudentSession(planBlockID: string): Promise<StudentSession> {
   return studentJSON<StudentSession>('/api/v1/student/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan_block_id: planBlockID }) })
@@ -60,6 +104,18 @@ export async function getCurrentStudentSession(): Promise<StudentSession | null>
   if (!response.ok) throw new Error(`课堂状态暂时不可用（${response.status}）`)
   return response.json() as Promise<StudentSession>
 }
+
+async function changeStudentSession(sessionID: string, action: 'pause' | 'resume' | 'abandon' | 'heartbeat', keepalive = false): Promise<SessionTiming> {
+	return studentJSON<SessionTiming>(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/${action}`, {
+		method: 'POST',
+		keepalive,
+	})
+}
+
+export const pauseStudentSession = (sessionID: string, keepalive = false) => changeStudentSession(sessionID, 'pause', keepalive)
+export const resumeStudentSession = (sessionID: string) => changeStudentSession(sessionID, 'resume')
+export const abandonStudentSession = (sessionID: string) => changeStudentSession(sessionID, 'abandon')
+export const heartbeatStudentSession = (sessionID: string) => changeStudentSession(sessionID, 'heartbeat')
 
 export async function submitStudentAnswer(sessionID: string, answer: string): Promise<SubmitAnswerResult> {
   const response = await fetch(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/answers`, {

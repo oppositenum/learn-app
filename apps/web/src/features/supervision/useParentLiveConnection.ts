@@ -9,9 +9,10 @@ export function useParentLiveConnection() {
 	let elapsedTimer: number | undefined
 
 	function updateElapsed() {
-		const startedAt = Date.parse(supervision.startedAt)
-		if (!Number.isFinite(startedAt)) { supervision.elapsed = '00:00'; return }
-		const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+		const running = supervision.sessionActive && supervision.timingClientAt > 0
+			? Math.max(0, Math.floor((performance.now() - supervision.timingClientAt) / 1000))
+			: 0
+		const seconds = Math.max(0, supervision.activeSeconds + running)
 		supervision.elapsed = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
 	}
 
@@ -25,6 +26,7 @@ export function useParentLiveConnection() {
 
 	onUnmounted(() => {
 		if (elapsedTimer !== undefined) window.clearInterval(elapsedTimer)
+		supervision.disconnect()
 	})
 
   return supervision

@@ -91,7 +91,7 @@ func TestStudentSupportIsBoundedRoleSeparatedAndMetered(t *testing.T) {
 		}
 	}
 
-	var answersAfter, analysesAfter, turnsAfter, failedRoundsAfter, usageCount int
+	var answersAfter, analysesAfter, turnsAfter, failedRoundsAfter, usageCount, assistanceLevel int
 	var state, responseID string
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM student_answers WHERE session_id=$1`, fixture.sessionID).Scan(&answersAfter); err != nil {
 		t.Fatal(err)
@@ -102,13 +102,13 @@ func TestStudentSupportIsBoundedRoleSeparatedAndMetered(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_turns WHERE session_id=$1`, fixture.sessionID).Scan(&turnsAfter); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT current_state,socratic_fail_count,teaching_response_id FROM learning_sessions WHERE id=$1`, fixture.sessionID).Scan(&state, &failedRoundsAfter, &responseID); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT current_state,socratic_fail_count,teaching_response_id,assistance_level FROM learning_sessions WHERE id=$1`, fixture.sessionID).Scan(&state, &failedRoundsAfter, &responseID, &assistanceLevel); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND price_catalog_id IS NOT NULL AND purpose IN('SOCRATIC_TURN','EXPLANATION')`, fixture.sessionID).Scan(&usageCount); err != nil {
 		t.Fatal(err)
 	}
-	if answersAfter != answersBefore || analysesAfter != analysesBefore || turnsAfter != turnsBefore+2 || failedRoundsAfter != failedRoundsBefore || state != "EXPLAIN" || responseID != "resp-runtime-2" || usageCount != 2 {
+	if answersAfter != answersBefore || analysesAfter != analysesBefore || turnsAfter != turnsBefore+2 || failedRoundsAfter != failedRoundsBefore || state != "EXPLAIN" || assistanceLevel != 4 || responseID != "resp-runtime-2" || usageCount != 2 {
 		t.Fatalf("support side effects answers=%d/%d analyses=%d/%d turns=%d/%d rounds=%d/%d state=%s response=%s usage=%d", answersAfter, answersBefore, analysesAfter, analysesBefore, turnsAfter, turnsBefore, failedRoundsAfter, failedRoundsBefore, state, responseID, usageCount)
 	}
 

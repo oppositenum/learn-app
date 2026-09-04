@@ -25,6 +25,8 @@ const (
 	EventRewardGranted         EventType = "REWARD_GRANTED"
 	EventPlanModified          EventType = "PLAN_MODIFIED"
 	EventSessionPaused         EventType = "SESSION_PAUSED"
+	EventSessionResumed        EventType = "SESSION_RESUMED"
+	EventSessionAbandoned      EventType = "SESSION_ABANDONED"
 	EventSessionCompleted      EventType = "SESSION_COMPLETED"
 	EventParentIntervention    EventType = "PARENT_INTERVENTION"
 )

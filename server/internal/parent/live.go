@@ -55,7 +55,8 @@ SELECT ls.id, ls.student_id, s.name_zh, kp.name, ls.started_at, ls.status,
        q.prompt_public, qa.correct_answer_json, qa.full_solution_private,
        COALESCE(sa.answer_text, ''), COALESCE(aa.answer_correct, false),
        COALESCE(aa.error_type, ''), COALESCE(aa.misconceptions_private_json, '[]'::jsonb),
-	   COALESCE(tt.action, ''), COALESCE(tt.reason_private, ''),ls.target_minutes,ls.actual_seconds,
+		   COALESCE(tt.action, ''), COALESCE(tt.reason_private, ''),ls.target_minutes,
+			   ls.accumulated_seconds + CASE WHEN ls.status='ACTIVE' THEN GREATEST(0,EXTRACT(EPOCH FROM ((CASE WHEN ls.last_activity_at>=CURRENT_TIMESTAMP-interval '90 seconds' THEN CURRENT_TIMESTAMP ELSE ls.last_activity_at END)-COALESCE(ls.last_resumed_at,ls.started_at)))::integer) ELSE 0 END,
 	   COALESCE(ss.state,'UNKNOWN'),COALESCE(ss.score_internal,0)::float8
 FROM learning_sessions ls
 JOIN subjects s ON s.id = ls.subject_id

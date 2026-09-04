@@ -31,7 +31,7 @@ func TestMasteryRequiresFourRealClassroomEvidenceForms(t *testing.T) {
 	for index, form := range forms {
 		sessionID := fixture.sessionID
 		if index == 0 {
-			if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET current_state='ASK',socratic_fail_count=0,evidence_form=$2 WHERE id=$1`, sessionID, form); err != nil {
+			if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET current_state='ASK',socratic_fail_count=0,assistance_level=0,evidence_form=$2 WHERE id=$1`, sessionID, form); err != nil {
 				t.Fatal(err)
 			}
 		} else {
