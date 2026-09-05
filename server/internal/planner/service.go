@@ -152,7 +152,12 @@ func (service *Service) ReplaceToday(ctx context.Context, studentID uuid.UUID, d
 			return err
 		}
 		var activeSessions int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM learning_sessions WHERE student_id=$1 AND status IN ('ACTIVE','PAUSED')`, studentID).Scan(&activeSessions); err != nil {
+		if err := tx.QueryRow(ctx, `
+	SELECT count(*)
+	FROM learning_sessions session
+	JOIN learning_plan_blocks block ON block.id=session.plan_block_id
+	JOIN learning_plans plan ON plan.id=block.plan_id AND plan.student_id=session.student_id
+	WHERE session.student_id=$1 AND session.status IN ('ACTIVE','PAUSED') AND plan.plan_date=$2`, studentID, date).Scan(&activeSessions); err != nil {
 			return err
 		}
 		var todayStarted bool
@@ -166,7 +171,7 @@ SELECT EXISTS(
 )`, studentID, date).Scan(&todayStarted); err != nil {
 			return err
 		}
-		result.TodayPreserved = activeSessions > 0 || todayStarted
+		result.TodayPreserved = shouldPreserveToday(activeSessions, todayStarted)
 		if result.TodayPreserved {
 			replanDate = date.AddDate(0, 0, 1)
 			result.AppliesFrom = replanDate
@@ -193,6 +198,10 @@ SELECT EXISTS(
 		return PlanUpdate{}, err
 	}
 	return result, nil
+}
+
+func shouldPreserveToday(openTodaySessions int, todayStarted bool) bool {
+	return openTodaySessions > 0 || todayStarted
 }
 
 type candidateMetadata struct {
