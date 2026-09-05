@@ -32,8 +32,8 @@ Evidence levels are deliberately separated: static/code, automated local, real P
 | 26 | A classroom really completes variant, abstraction, and verification | `REQ-CLASSROOM-01`, `REQ-EVIDENCE-01` | B4 has not been implemented | 未验证 |
 | 27 | Structured interactions are versioned, allowlisted, and accessible | `REQ-INTERACTION-01` | B5 has not been implemented | 未验证 |
 | 28 | Learning-effect metrics are computable without answer or audio bodies | `REQ-METRICS-01`, `REQ-METRICS-02` | B6 has not been implemented | 未验证 |
-| 29 | Identity replacement closes the old learning session without a resume race | `REQ-SESSION-05` | B1B has not been implemented | 未验证 |
-| 30 | Student navigation has three unique destinations without dead redirects | `REQ-NAV-01` | B1C has not been implemented | 未验证 |
+| 29 | Identity replacement closes the old learning session without a resume race | `REQ-SESSION-05` | Real PostgreSQL tests `TestB1BLogoutPausesSessionAndPublishesImmediately`, `TestB1BLogoutCutoverIsAtomic`, and `TestB1BLogoutWinsResumeRaceInBothCommitOrders` cover immediate pause, active-time checkpointing, persisted and published realtime events, atomic rollback, revoked-token writes, Parent live state, and both commit orders; frontend auth and StudentLayout tests cover logout-before-login, failed-logout blocking, and cross-tab write shutdown | Pass |
+| 30 | Student navigation has three unique destinations without dead redirects | `REQ-NAV-01` | Frontend `Navigation.test.ts` verifies three unique Student destinations with one active link, unchanged four-item Parent and five-item Owner navigation, removed top-level redirects, and retained classroom supply/voice subroutes | Pass |
 
 Automated evidence is concentrated in `server/internal/*_test.go`, `server/tests/integration`, and `apps/web/src/*.test.ts`. Provider HTTP mocks exercise the real adapters and metering path, including rejected structured output. No live OpenAI request was made without deployment credentials and a matching Owner-approved price catalog. A real seven-day child trial is also outside engineering proof and remains required before a product-readiness claim.
 
