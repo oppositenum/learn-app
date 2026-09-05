@@ -1,14 +1,27 @@
 <script setup lang="ts">
 import { BookOpen, FlaskConical, Landmark, Sparkles } from '@lucide/vue'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
 
-import { getStudentGrowth, type StudentGrowth } from '../../api/student'
+import { useGrowthStore } from '../../stores/growth'
+import { useAuthSession } from '../../stores/auth'
 
-const energy = ref(0)
-const streak = ref(0)
-const buildings = ref<StudentGrowth['buildings']>({})
-const unavailable = ref(false)
-onMounted(async () => { try { const growth = await getStudentGrowth(); energy.value = growth.total_energy; streak.value = growth.streak_days; buildings.value = growth.buildings } catch { unavailable.value = true } })
+const growth = useGrowthStore()
+const auth = useAuthSession()
+const currentGrowth = computed(() => growth.data?.student_id === auth.user.value?.student_id ? growth.data : null)
+const buildings = computed(() => currentGrowth.value?.buildings ?? {})
+function loadGrowth(force = false) {
+	return growth.load(force, auth.user.value?.student_id ?? '')
+}
+
+function handlePageShow(event: PageTransitionEvent) {
+	if (event.persisted) void loadGrowth(true)
+}
+
+onMounted(() => {
+	void loadGrowth()
+	window.addEventListener('pageshow', handlePageShow)
+})
+onBeforeUnmount(() => window.removeEventListener('pageshow', handlePageShow))
 
 const count = (subject: 'MATH' | 'CHINESE' | 'ENGLISH' | 'PHYSICS' | 'CHEMISTRY') => buildings.value.mastered_by_subject?.[subject] ?? 0
 const places = computed(() => [
@@ -30,17 +43,24 @@ const places = computed(() => [
     <h1 class="mt-3 text-3xl font-semibold">
       你正在建造自己的知识基地
     </h1>
+    <p
+      v-if="growth.error"
+      class="mt-4 text-sm text-red-700"
+      role="alert"
+    >
+      {{ growth.error }}
+    </p>
     <div class="mt-7 flex items-end justify-between border-b border-zinc-300 pb-5">
       <div>
         <p class="text-4xl font-semibold tabular-nums">
-          {{ energy }}
+          {{ currentGrowth?.total_energy ?? '--' }}
         </p>
         <p class="mt-1 text-sm text-zinc-500">
           探索能量
         </p>
       </div>
       <p class="text-sm font-medium text-teal-700">
-        {{ unavailable ? '等待同步' : `连续 ${streak} 天` }}
+        {{ currentGrowth ? `连续 ${currentGrowth.streak_days} 天` : '等待同步' }}
       </p>
     </div>
 
@@ -54,7 +74,10 @@ const places = computed(() => [
       >
         成长基地
       </h2>
-      <div class="mt-4 space-y-3">
+      <div
+        v-if="currentGrowth"
+        class="mt-4 space-y-3"
+      >
         <article
           v-for="place in places"
           :key="place.name"
@@ -79,6 +102,17 @@ const places = computed(() => [
             </p>
           </div>
         </article>
+      </div>
+      <div
+        v-else
+        class="mt-4 space-y-3"
+        aria-label="成长数据正在同步"
+      >
+        <div
+          v-for="item in 3"
+          :key="item"
+          class="h-20 animate-pulse bg-zinc-200"
+        />
       </div>
     </section>
   </main>

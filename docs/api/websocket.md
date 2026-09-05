@@ -22,13 +22,15 @@ Runtime-persisted and broadcast event types are:
 
 | Lifecycle | Event types |
 |---|---|
-| Session | `SESSION_STARTED`, `QUESTION_PRESENTED`, `SESSION_COMPLETED` |
+| Session | `SESSION_STARTED`, `QUESTION_PRESENTED`, `SESSION_PAUSED`, `SESSION_RESUMED`, `SESSION_ABANDONED`, `SESSION_COMPLETED` |
 | Answer | `ANSWER_SUBMITTED`, `ANSWER_ANALYZED` |
 | Tutor | `TUTOR_ACTION_SELECTED`, `HINT_REQUESTED`, `AI_TURN_COMPLETED` |
 | Remediation | `BACKTRACK_STARTED`, `BACKTRACK_COMPLETED`, `VOICE_EXPLAIN_STARTED`, `VOICE_EXPLAIN_COMPLETED` |
 | Adaptive engines | `MASTERY_UPDATED`, `REWARD_GRANTED`, `PLAN_MODIFIED` |
 | Parent | `PARENT_INTERVENTION` |
 
-`AI_TURN_STARTED`, `AI_TURN_STREAM`, and `SESSION_PAUSED` remain reserved protocol types. The current OpenAI Responses adapter is request/response based and therefore does not emit fake streaming events. A future streaming adapter must emit these events from real provider lifecycle signals.
+`SESSION_PAUSED`, `SESSION_RESUMED`, and `SESSION_ABANDONED` are persisted and broadcast with `status` and checkpointed `active_seconds` in both role-specific payloads. They can be produced by an explicit Student lifecycle request or stale-session recovery. Clients still reconcile against the authoritative REST session after event bursts.
+
+`AI_TURN_STARTED` and `AI_TURN_STREAM` remain reserved protocol types. The current OpenAI Responses adapter is request/response based and therefore does not emit fake streaming events. A future streaming adapter must emit these events from real provider lifecycle signals.
 
 Student payloads must not contain `correct_answer`, solutions, scoring keys, private misconception mappings, provider raw logs, or the submitted answer echoed back by the server. `ANSWER_SUBMITTED` only acknowledges receipt on the Student channel; the authenticated Parent projection contains the answer.

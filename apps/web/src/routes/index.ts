@@ -24,9 +24,9 @@ export const router = createRouter({
       children: [
         { path: '', component: StudentHomePage },
         { path: 'today', redirect: '/student' },
-        { path: 'session/:id/voice', component: StudentVoicePage },
-        { path: 'session/:id/supply', component: StudentSupplyPage },
-        { path: 'session/:id', component: StudentSessionPage },
+		{ path: 'session/:id/voice', name: 'student-session-voice', component: StudentVoicePage, meta: { classroom: true, hideStudentNav: true } },
+		{ path: 'session/:id/supply', name: 'student-session-supply', component: StudentSupplyPage, meta: { classroom: true, hideStudentNav: true } },
+		{ path: 'session/:id', name: 'student-session', component: StudentSessionPage, meta: { classroom: true, hideStudentNav: true } },
         { path: 'supply', redirect: '/student' },
         { path: 'voice', redirect: '/student' },
         { path: 'growth', component: StudentGrowthPage },

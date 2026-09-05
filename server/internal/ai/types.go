@@ -50,13 +50,13 @@ type AnalyzeAnswerResult struct {
 }
 
 type GenerateTurnRequest struct {
-	StudentID          string                      `json:"-"`
-	SessionID          string                      `json:"session_id"`
-	Question           content.QuestionForTeaching `json:"question"`
-	StudentAnswer      string                      `json:"student_answer"`
-	TutorDecision      tutor.Decision              `json:"tutor_decision"`
-	PriorTurns         []TutorTurn                 `json:"prior_turns"`
-	PreviousResponseID string                      `json:"previous_response_id,omitempty"`
+	StudentID          string                 `json:"-"`
+	SessionID          string                 `json:"session_id"`
+	Question           content.QuestionPublic `json:"question"`
+	StudentAnswer      string                 `json:"student_answer"`
+	TutorDecision      tutor.Decision         `json:"tutor_decision"`
+	PriorTurns         []TutorTurn            `json:"prior_turns"`
+	PreviousResponseID string                 `json:"previous_response_id,omitempty"`
 }
 
 type AnalogyRequest GenerateTurnRequest

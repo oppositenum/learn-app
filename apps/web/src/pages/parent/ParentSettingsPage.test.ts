@@ -12,6 +12,14 @@ const savedPreferences = {
   configured: true,
 }
 
+const immediateUpdate = {
+  saved: true,
+  plan_updated: true,
+  today_preserved: false,
+  applies_from: '2026-09-05',
+  answer_controls_available: false,
+}
+
 function testRouter(path: string) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -42,7 +50,7 @@ it('hydrates saved preferences including enabled subjects', async () => {
 it('saves the checked subject codes and blocks an empty selection', async () => {
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const path = String(input)
-    if (path.includes('/preferences') && init?.method === 'PUT') return { ok: true, json: async () => ({ saved: true }) } as Response
+    if (path.includes('/preferences') && init?.method === 'PUT') return { ok: true, json: async () => immediateUpdate } as Response
     if (path.includes('/preferences')) return { ok: true, json: async () => savedPreferences } as Response
     return { ok: true, json: async () => ({ children: [] }) } as Response
   })
@@ -57,6 +65,7 @@ it('saves the checked subject codes and blocks an empty selection', async () => 
   expect(putCall).toBeTruthy()
   const payload = JSON.parse(String((putCall?.[1] as RequestInit).body))
   expect(payload.enabled_subject_codes).toEqual(['MATH', 'ENGLISH'])
+  expect(wrapper.text()).toContain('已保存并更新今日计划')
 
   for (const box of wrapper.findAll('input[type="checkbox"]')) {
     if ((box.element as HTMLInputElement).checked) await box.setValue(false)
@@ -67,4 +76,26 @@ it('saves the checked subject codes and blocks an empty selection', async () => 
   const putCallsAfter = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PUT').length
   expect(putCallsAfter).toBe(putCallsBefore)
   expect(wrapper.text()).toContain('至少开放一个学科')
+})
+
+it('explains when a started today plan is preserved', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const path = String(input)
+    if (path.includes('/preferences') && init?.method === 'PUT') {
+      return {
+        ok: true,
+        json: async () => ({ ...immediateUpdate, today_preserved: true, applies_from: '2026-09-06' }),
+      } as Response
+    }
+    if (path.includes('/preferences')) return { ok: true, json: async () => savedPreferences } as Response
+    return { ok: true, json: async () => ({ children: [] }) } as Response
+  }))
+  const router = await testRouter('/parent/settings?student=student-1')
+  const wrapper = mount(ParentSettingsPage, { global: { plugins: [router] } })
+  await flushPromises()
+
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(wrapper.text()).toContain('已保存，今日计划保持不变，将从 2026-09-06 生效')
 })

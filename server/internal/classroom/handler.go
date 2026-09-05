@@ -33,6 +33,13 @@ func NewHandler(service *Service, pool *pgxpool.Pool, parents *parent.Repository
 	return handler
 }
 
+func (handler *Handler) now() time.Time {
+	if handler.service != nil && handler.service.now != nil {
+		return handler.service.now()
+	}
+	return time.Now()
+}
+
 func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := auth.PrincipalFromContext(request.Context())
 	if !ok {
@@ -65,6 +72,14 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 		http.Error(writer, "session not found", http.StatusNotFound)
 		return
 	}
+	if errors.Is(err, ErrSessionNotActive) {
+		http.Error(writer, "resume the session before answering", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, ErrClassroomChanged) {
+		http.Error(writer, "classroom changed; retry answer", http.StatusConflict)
+		return
+	}
 	if err != nil {
 		log.Printf("classroom submit failed: %v", err)
 		http.Error(writer, "answer could not be processed", http.StatusInternalServerError)
@@ -88,6 +103,10 @@ func (handler *Handler) ReturnFromVoice(writer http.ResponseWriter, request *htt
 	result, err := handler.service.ReturnFromVoice(request.Context(), userID, sessionID)
 	if errors.Is(err, ErrSessionNotFound) {
 		http.Error(writer, "session not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, ErrSessionNotActive) {
+		http.Error(writer, "resume the session before returning", http.StatusConflict)
 		return
 	}
 	if errors.Is(err, ErrVoiceNotActive) {
@@ -136,6 +155,10 @@ func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http
 		http.Error(writer, "session not found", http.StatusNotFound)
 		return
 	}
+	if errors.Is(err, ErrSessionNotActive) {
+		http.Error(writer, "resume the session before requesting support", http.StatusConflict)
+		return
+	}
 	if errors.Is(err, ErrClassroomChanged) {
 		http.Error(writer, "classroom changed; retry support request", http.StatusConflict)
 		return
@@ -156,14 +179,20 @@ func (handler *Handler) Growth(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	var studentID uuid.UUID
-	var energy, streak int
+	var energy int
 	var buildings json.RawMessage
-	err = handler.pool.QueryRow(request.Context(), `SELECT st.id,COALESCE(g.total_energy,0),COALESCE(g.streak_days,0),COALESCE(g.buildings_json,'{}') FROM students st LEFT JOIN student_growth g ON g.student_id=st.id WHERE st.user_id=$1`, userID).Scan(&studentID, &energy, &streak, &buildings)
+	err = handler.pool.QueryRow(request.Context(), `SELECT st.id,COALESCE(g.total_energy,0),COALESCE(g.buildings_json,'{}') FROM students st LEFT JOIN student_growth g ON g.student_id=st.id WHERE st.user_id=$1`, userID).Scan(&studentID, &energy, &buildings)
 	if err != nil {
 		http.Error(writer, "growth unavailable", http.StatusNotFound)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"student_id": studentID, "total_energy": energy, "streak_days": streak, "buildings": buildings})
+	now := handler.now()
+	streak, err := currentStreak(request.Context(), handler.pool, studentID, now)
+	if err != nil {
+		http.Error(writer, "growth unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"student_id": studentID, "learning_date": learningDate(now), "total_energy": energy, "streak_days": streak, "buildings": buildings})
 }
 
 func (handler *Handler) Today(writer http.ResponseWriter, request *http.Request) {
@@ -173,17 +202,24 @@ func (handler *Handler) Today(writer http.ResponseWriter, request *http.Request)
 		http.Error(writer, "invalid principal", http.StatusUnauthorized)
 		return
 	}
+	if handler.service != nil {
+		if err := handler.service.RecoverStaleSessions(request.Context(), userID); err != nil {
+			http.Error(writer, "plan unavailable", http.StatusInternalServerError)
+			return
+		}
+	}
 	if handler.planner != nil {
-		plan, err := handler.planner.EnsureForUser(request.Context(), userID, time.Now())
+		now := handler.now()
+		plan, err := handler.planner.EnsureForUser(request.Context(), userID, now)
 		if err != nil {
 			http.Error(writer, "plan unavailable", 500)
 			return
 		}
 		blocks := make([]map[string]any, 0, len(plan.Blocks))
 		for _, block := range plan.Blocks {
-			blocks = append(blocks, map[string]any{"id": block.ID, "sequence": block.Sequence, "subject": block.SubjectCode, "knowledge_point_id": block.KnowledgePointID, "minutes": block.Minutes, "mode": block.Mode, "reason": block.Reason, "focus": block.Focus, "original_task_id": block.OriginalTaskID})
+			blocks = append(blocks, map[string]any{"id": block.ID, "sequence": block.Sequence, "subject": block.SubjectCode, "knowledge_point_id": block.KnowledgePointID, "minutes": block.Minutes, "mode": block.Mode, "reason": block.Reason, "focus": block.Focus, "original_task_id": block.OriginalTaskID, "status": block.Status, "session_id": block.SessionID, "session_status": block.SessionStatus})
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"plans": []map[string]any{{"id": plan.ID, "date": plan.Date, "target_minutes": plan.TargetMinutes, "blocks": blocks}}})
+		writeJSON(writer, http.StatusOK, map[string]any{"learning_date": learningDate(now), "plans": []map[string]any{{"id": plan.ID, "date": learningDate(plan.Date), "target_minutes": plan.TargetMinutes, "blocks": blocks}}})
 		return
 	}
 	rows, err := handler.pool.Query(request.Context(), `SELECT p.id,p.plan_date,p.target_minutes,b.sequence,s.code,b.minutes,b.mode,b.reason,kp.name FROM learning_plans p JOIN students st ON st.id=p.student_id LEFT JOIN learning_plan_blocks b ON b.plan_id=p.id LEFT JOIN subjects s ON s.id=b.subject_id LEFT JOIN knowledge_points kp ON kp.id=b.knowledge_point_id WHERE st.user_id=$1 AND p.status IN('PROPOSED','ACTIVE') ORDER BY p.plan_date,b.sequence`, userID)
@@ -202,7 +238,7 @@ func (handler *Handler) Today(writer http.ResponseWriter, request *http.Request)
 	}
 	type plan struct {
 		ID     uuid.UUID `json:"id"`
-		Date   time.Time `json:"date"`
+		Date   string    `json:"date"`
 		Target int16     `json:"target_minutes"`
 		Blocks []block   `json:"blocks"`
 	}
@@ -222,11 +258,11 @@ func (handler *Handler) Today(writer http.ResponseWriter, request *http.Request)
 		if !exists {
 			index = len(plans)
 			indexes[id] = index
-			plans = append(plans, plan{ID: id, Date: date, Target: target, Blocks: []block{}})
+			plans = append(plans, plan{ID: id, Date: date.Format("2006-01-02"), Target: target, Blocks: []block{}})
 		}
 		plans[index].Blocks = append(plans[index].Blocks, block{sequence, subject, minutes, mode, reason, focus})
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"plans": plans})
+	writeJSON(writer, http.StatusOK, map[string]any{"learning_date": learningDate(handler.now()), "plans": plans})
 }
 
 var allSubjectCodes = []string{"MATH", "CHINESE", "ENGLISH", "PHYSICS", "CHEMISTRY"}
@@ -285,20 +321,39 @@ func (handler *Handler) ParentPreferences(writer http.ResponseWriter, request *h
 			return
 		}
 	}
-	_, err = handler.pool.Exec(request.Context(), `INSERT INTO parent_preferences(parent_user_id,student_id,daily_minutes,priority_subject_codes,review_only,reduce_intensity,enabled_subject_codes) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(parent_user_id,student_id) DO UPDATE SET daily_minutes=EXCLUDED.daily_minutes,priority_subject_codes=EXCLUDED.priority_subject_codes,review_only=EXCLUDED.review_only,reduce_intensity=EXCLUDED.reduce_intensity,enabled_subject_codes=EXCLUDED.enabled_subject_codes,updated_at=now()`, parentID, studentID, body.DailyMinutes, body.PrioritySubjects, body.ReviewOnly, body.ReduceIntensity, enabledSubjects)
+	err = pgx.BeginFunc(request.Context(), handler.pool, func(tx pgx.Tx) error {
+		var lockedStudentID uuid.UUID
+		if err := tx.QueryRow(request.Context(), `SELECT id FROM students WHERE id=$1 FOR NO KEY UPDATE`, studentID).Scan(&lockedStudentID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(request.Context(), `INSERT INTO parent_preferences(parent_user_id,student_id,daily_minutes,priority_subject_codes,review_only,reduce_intensity,enabled_subject_codes) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(parent_user_id,student_id) DO UPDATE SET daily_minutes=EXCLUDED.daily_minutes,priority_subject_codes=EXCLUDED.priority_subject_codes,review_only=EXCLUDED.review_only,reduce_intensity=EXCLUDED.reduce_intensity,enabled_subject_codes=EXCLUDED.enabled_subject_codes,updated_at=now()`, parentID, studentID, body.DailyMinutes, body.PrioritySubjects, body.ReviewOnly, body.ReduceIntensity, enabledSubjects)
+		return err
+	})
 	if err != nil {
 		http.Error(writer, "preferences unavailable", 500)
 		return
 	}
-	replanned := false
+	now := handler.now()
+	planUpdated := false
+	todayPreserved := false
+	appliesFrom := learningDate(now)
 	if handler.planner != nil {
-		_, replanned, err = handler.planner.ReplaceToday(request.Context(), studentID, time.Now())
+		result, err := handler.planner.ReplaceToday(request.Context(), studentID, now)
 		if err != nil {
 			http.Error(writer, "preferences saved but plan could not be updated", 500)
 			return
 		}
+		planUpdated = result.PlanUpdated
+		todayPreserved = result.TodayPreserved
+		appliesFrom = learningDate(result.AppliesFrom)
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"saved": true, "plan_replaced": replanned, "answer_controls_available": false})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"saved":                     true,
+		"plan_updated":              planUpdated,
+		"today_preserved":           todayPreserved,
+		"applies_from":              appliesFrom,
+		"answer_controls_available": false,
+	})
 }
 
 func (handler *Handler) GetParentPreferences(writer http.ResponseWriter, request *http.Request) {

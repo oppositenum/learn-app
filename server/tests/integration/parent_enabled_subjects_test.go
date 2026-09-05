@@ -2,7 +2,9 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -15,6 +17,23 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 	"github.com/oppositenum/ai-learning-tutor/server/migrations"
 )
+
+type preferenceUpdateResponse struct {
+	Saved                   bool   `json:"saved"`
+	PlanUpdated             bool   `json:"plan_updated"`
+	TodayPreserved          bool   `json:"today_preserved"`
+	AppliesFrom             string `json:"applies_from"`
+	AnswerControlsAvailable bool   `json:"answer_controls_available"`
+}
+
+func decodePreferenceUpdate(t *testing.T, response *httptest.ResponseRecorder) preferenceUpdateResponse {
+	t.Helper()
+	var payload preferenceUpdateResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode preference update: %v; body=%s", err, response.Body.String())
+	}
+	return payload
+}
 
 func TestParentEnabledSubjectsControlStudentPlan(t *testing.T) {
 	ctx := context.Background()
@@ -53,8 +72,12 @@ func TestParentEnabledSubjectsControlStudentPlan(t *testing.T) {
 	}
 
 	mathOnly := performJSON(router, http.MethodPut, preferencesPath, fixture.parentToken, map[string]any{"daily_minutes": 30, "priority_subject_codes": []string{}, "review_only": false, "reduce_intensity": false, "enabled_subject_codes": []string{"MATH"}})
-	if mathOnly.Code != http.StatusOK || !strings.Contains(mathOnly.Body.String(), `"plan_replaced":true`) {
+	if mathOnly.Code != http.StatusOK {
 		t.Fatalf("math-only preferences=%d %s", mathOnly.Code, mathOnly.Body.String())
+	}
+	update := decodePreferenceUpdate(t, mathOnly)
+	if !update.Saved || !update.PlanUpdated || update.TodayPreserved || update.AppliesFrom == "" || update.AnswerControlsAvailable || strings.Contains(mathOnly.Body.String(), "plan_replaced") {
+		t.Fatalf("math-only update contract=%+v body=%s", update, mathOnly.Body.String())
 	}
 	if response := performJSON(router, http.MethodGet, "/api/v1/student/today", fixture.studentToken, nil); response.Code != http.StatusOK {
 		t.Fatalf("student plan=%d %s", response.Code, response.Body.String())
@@ -66,6 +89,7 @@ func TestParentEnabledSubjectsControlStudentPlan(t *testing.T) {
 	if blockCount != 1 || mathBlocks != 1 {
 		t.Fatalf("math-only plan blocks=%d math=%d", blockCount, mathBlocks)
 	}
+	t.Logf("verified math-only plan content: blockCount=%d mathBlocks=%d", blockCount, mathBlocks)
 
 	saved := performJSON(router, http.MethodGet, preferencesPath, fixture.parentToken, nil)
 	if saved.Code != http.StatusOK || !strings.Contains(saved.Body.String(), `"enabled_subject_codes":["MATH"]`) || !strings.Contains(saved.Body.String(), `"configured":true`) {

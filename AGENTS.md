@@ -38,7 +38,7 @@ Task 004, Student Answer Non-Disclosure, is the first product safety gate. Do no
 
 - Keep changes within the active numbered task.
 - Add tests in proportion to the affected security or state boundary.
-- Run `go test ./...`, `npm test`, and `npm run build` before declaring a task complete.
-- Run `npm run lint` for frontend source or configuration changes.
+- Run `go vet ./server/... ./schemas/...`, `go test -count=1 ./server/internal/... ./server/cmd/... ./schemas/...`, `go test -count=1 ./server/tests/integration`, `npm test`, `npm run lint`, and `npm run build` before declaring a task complete.
+- Run the integration command with `TEST_DATABASE_URL` pointing to real PostgreSQL. A skipped integration test does not count as passing.
 - Never commit secrets, provider keys, raw child audio, or unnecessary personal data.
 - Use migrations for persistent schema changes and keep PostgreSQL as the production database contract.

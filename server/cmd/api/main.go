@@ -82,6 +82,7 @@ func newDatabaseHandler(pool *pgxpool.Pool) http.Handler {
 		speechHandler = speech.NewHandler(speechService, pool, usageRecorder)
 	}
 	classrooms := classroom.NewService(pool, hub, voice, usageRecorder, plannerService)
+	go classrooms.RunStaleSessionRecovery(context.Background(), time.Minute)
 	if apiKey, tutorModel := os.Getenv("OPENAI_API_KEY"), os.Getenv("OPENAI_TUTOR_MODEL"); apiKey != "" && tutorModel != "" {
 		client, err := ai.NewOpenAIResponsesClient(&http.Client{Timeout: 90 * time.Second}, os.Getenv("OPENAI_BASE_URL"), apiKey, tutorModel)
 		if err != nil {

@@ -7,9 +7,9 @@ AI Learning Tutor is a mobile-first, five-subject Socratic learning prototype fo
 - Student, Parent, and Owner authorization with explicit Parent-Student binding, plus answer-free Parent ability and activity reports.
 - PostgreSQL-level public/private answer separation and authenticated Student non-disclosure tests.
 - Five-subject curriculum with all 132 assessable primary/junior-secondary skeleton entries from the V1 product specification, 10 preserved high-quality detail points, prerequisite graph, cross-subject graph, abilities, and misconceptions. The 142 released points are organized into 44 useful subject/grade-band domains rather than the original broad three-domain demo taxonomy.
-- Complete Tutor transition graph, three-round Socratic fuse, persisted emotion deescalation, functional hint/parallel-example support, automatic released-prerequisite backtrack/return, and explicit voice explanation return.
+- The complete Tutor transition graph is defined, with a three-round Socratic fuse, persisted emotion deescalation, hint/parallel-example support, released-prerequisite backtrack/return, and explicit voice return. Runtime transition enforcement and the real `VARIANT -> ABSTRACT -> VERIFY` path remain pending B4.
 - Student mobile classroom, supply station, voice player with timed highlighting, growth view, Parent live supervision/preferences, and Owner content/cost views.
-- Planner, deterministic Mastery/Review with evidence-derived scores, real activity-day streaks, idempotent Reward, STT/TTS adapters, and versioned usage accounting.
+- Planner and deterministic Mastery with evidence-derived scores, real activity-day streaks, idempotent Reward, STT/TTS adapters, and versioned usage accounting. Review-queue consumption and rescheduling remain pending B2.
 - Content provenance, deterministic validation, independent review, database release gate, quarantine, 142 released and source-linked knowledge points, and 15 curated demo questions.
 - Full Student/Parent/Owner PostgreSQL + HTTP + role-projected realtime lifecycle E2E.
 - Recoverable TTS sessions and Student-only post-session willingness reflections for a real seven-day trial.
@@ -85,18 +85,15 @@ Owner AI question generation is enabled with `OPENAI_CONTENT_GENERATION_MODEL`. 
 ## Verify
 
 ```sh
-go test ./...
-go vet ./server/...
+go vet ./server/... ./schemas/...
+go test -count=1 ./server/internal/... ./server/cmd/... ./schemas/...
+export TEST_DATABASE_URL='postgres://learning_tutor:learning_tutor@127.0.0.1:55433/learning_tutor?sslmode=disable'
+go test -count=1 ./server/tests/integration
 npm test
-npm run build
 npm run lint
+npm run build
 ```
 
-Run the real PostgreSQL gates:
-
-```sh
-TEST_DATABASE_URL='postgres://learning_tutor:learning_tutor@127.0.0.1:55433/learning_tutor?sslmode=disable' \
-  go test ./server/tests/integration -count=1 -v
-```
+The integration command must target real PostgreSQL. A skipped integration test does not count as passing.
 
 HTTP and WebSocket contracts are documented under [`docs/api/`](docs/api/).

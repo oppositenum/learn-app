@@ -169,7 +169,7 @@ func TestFullStudentParentOwnerE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture := seedSecurityFixture(t, ctx, pool)
-	if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET socratic_fail_count=0,current_state='ASK',evidence_form='REVIEW' WHERE id=$1`, fixture.sessionID); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET socratic_fail_count=0,current_state='ASK',assistance_level=0,evidence_form='REVIEW' WHERE id=$1`, fixture.sessionID); err != nil {
 		t.Fatal(err)
 	}
 	var knowledgePointID uuid.UUID
@@ -283,7 +283,7 @@ func TestFullStudentParentOwnerE2E(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &completed); err != nil {
 		t.Fatal(err)
 	}
-	if completed.MasteryState != "MASTERED" || completed.Energy != 12 || !completed.TomorrowChanged {
+	if completed.MasteryState != "UNDERSTOOD" || completed.Energy != 2 || !completed.TomorrowChanged {
 		t.Fatalf("completion = %+v", completed)
 	}
 	studentCompletionEvent := awaitEventType(t, studentEvents, "SESSION_COMPLETED")
@@ -291,11 +291,11 @@ func TestFullStudentParentOwnerE2E(t *testing.T) {
 	if strings.Contains(string(studentCompletionEvent), fixture.privateCanary) || strings.Contains(string(studentCompletionEvent), "correct_answer") {
 		t.Fatalf("Student completion event leaked private answer: %s", studentCompletionEvent)
 	}
-	if !strings.Contains(string(parentCompletionEvent), `"action":"COMPLETE"`) || !strings.Contains(string(parentCompletionEvent), `"mastery_state":"MASTERED"`) || !strings.Contains(string(parentCompletionEvent), `"mastery_score":100`) {
+	if !strings.Contains(string(parentCompletionEvent), `"action":"COMPLETE"`) || !strings.Contains(string(parentCompletionEvent), `"mastery_state":"UNDERSTOOD"`) || !strings.Contains(string(parentCompletionEvent), `"mastery_score":75`) {
 		t.Fatalf("Parent completion event lacks mastery update: %s", parentCompletionEvent)
 	}
 	response = performJSON(router, http.MethodGet, "/api/v1/student/growth", fixture.studentToken, nil)
-	if response.Code != 200 || !strings.Contains(response.Body.String(), `"total_energy":12`) {
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"total_energy":2`) {
 		t.Fatalf("growth: %d %s", response.Code, response.Body.String())
 	}
 	response = performJSON(router, http.MethodGet, "/api/v1/student/today", fixture.studentToken, nil)
@@ -328,7 +328,7 @@ func TestFullStudentParentOwnerE2E(t *testing.T) {
 		t.Fatalf("runtime lifecycle event types=%d/%d err=%v", eventTypeCount, len(requiredEventTypes), err)
 	}
 	var unsafeStudentEvents int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_events WHERE session_id=$1 AND (student_payload_json::text ILIKE '%correct_answer%' OR student_payload_json::text ILIKE '%' || $2 || '%')`, fixture.sessionID, fixture.privateCanary).Scan(&unsafeStudentEvents); err != nil || unsafeStudentEvents != 0 {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_events WHERE session_id=$1 AND (student_payload_json::text ILIKE '%correct_answer%' OR student_payload_json::text ILIKE '%answer_correct%' OR student_payload_json::text ILIKE '%' || $2 || '%')`, fixture.sessionID, fixture.privateCanary).Scan(&unsafeStudentEvents); err != nil || unsafeStudentEvents != 0 {
 		t.Fatalf("unsafe Student lifecycle events=%d err=%v", unsafeStudentEvents, err)
 	}
 }
@@ -437,9 +437,16 @@ func TestPostgresPlannerUsesCrossSubjectDependency(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO student_skill_states(student_id,knowledge_point_id,state,score_internal)VALUES($1,$2,'REGRESSED',20)`, fixture.studentID, source); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := planner.NewService(pool).Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+	plannerService := planner.NewService(pool)
+	plan, created, err := plannerService.EnsureWithStatus(ctx, fixture.studentID, time.Now(), uuid.Nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("first EnsureWithStatus did not report a created plan")
+	}
+	if _, createdAgain, err := plannerService.EnsureWithStatus(ctx, fixture.studentID, time.Now(), uuid.Nil); err != nil || createdAgain {
+		t.Fatalf("existing plan reported changed=%v err=%v", createdAgain, err)
 	}
 	found := false
 	for _, block := range plan.Blocks {
@@ -484,6 +491,9 @@ func isolatedPool(t *testing.T, ctx context.Context, databaseURL string) *pgxpoo
 	}
 	config.ConnConfig.RuntimeParams["search_path"] = schema
 	config.ConnConfig.RuntimeParams["timezone"] = "Asia/Shanghai"
+	if config.MaxConns < 4 {
+		config.MaxConns = 4
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)

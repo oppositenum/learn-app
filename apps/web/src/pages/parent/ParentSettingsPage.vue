@@ -17,7 +17,35 @@ const reviewOnly = ref(false)
 const reduceIntensity = ref(false)
 const enabledSubjects = ref<string[]>([...subjectCodes])
 const status = ref('')
-async function save() { if (!effectiveStudentID.value) { status.value = '尚未绑定孩子账户'; return }; if (enabledSubjects.value.length === 0) { status.value = '至少开放一个学科'; return }; status.value = '保存中'; try { await saveParentPreferences(effectiveStudentID.value, { daily_minutes: minutes.value, priority_subject_codes: [priority.value], review_only: reviewOnly.value, reduce_intensity: reduceIntensity.value, enabled_subject_codes: enabledSubjects.value }); status.value = '已保存并更新计划' } catch (error) { status.value = error instanceof Error ? error.message : '保存失败' } }
+async function save() {
+  if (!effectiveStudentID.value) {
+    status.value = '尚未绑定孩子账户'
+    return
+  }
+  if (enabledSubjects.value.length === 0) {
+    status.value = '至少开放一个学科'
+    return
+  }
+  status.value = '保存中'
+  try {
+    const result = await saveParentPreferences(effectiveStudentID.value, {
+      daily_minutes: minutes.value,
+      priority_subject_codes: [priority.value],
+      review_only: reviewOnly.value,
+      reduce_intensity: reduceIntensity.value,
+      enabled_subject_codes: enabledSubjects.value,
+    })
+    if (result.today_preserved) {
+      status.value = `已保存，今日计划保持不变，将从 ${result.applies_from} 生效`
+    } else if (result.plan_updated) {
+      status.value = '已保存并更新今日计划'
+    } else {
+      status.value = '已保存'
+    }
+  } catch (error) {
+    status.value = error instanceof Error ? error.message : '保存失败'
+  }
+}
 onMounted(async () => {
   if (!studentID.value) discoveredStudentID.value = (await getParentChildren())[0]?.student_id ?? ''
   if (!effectiveStudentID.value) return

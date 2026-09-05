@@ -5,6 +5,14 @@ import (
 	"time"
 )
 
+var planLocation = func() *time.Location {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("Asia/Shanghai", 8*60*60)
+	}
+	return location
+}()
+
 type Mode string
 
 const (
@@ -171,8 +179,8 @@ func classify(candidate Candidate, now time.Time) (Mode, string) {
 }
 
 func day(value time.Time) time.Time {
-	year, month, date := value.Date()
-	return time.Date(year, month, date, 0, 0, 0, 0, value.Location())
+	year, month, date := value.In(planLocation).Date()
+	return time.Date(year, month, date, 0, 0, 0, 0, planLocation)
 }
 
 func min(a, b int) int {

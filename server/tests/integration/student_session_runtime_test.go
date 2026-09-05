@@ -41,7 +41,9 @@ func TestStudentStartsAndReadsReleasedPlanSessionWithoutPrivateAnswer(t *testing
 		t.Fatalf("today=%d %s", today.Code, today.Body.String())
 	}
 	var payload struct {
-		Plans []struct {
+		LearningDate string `json:"learning_date"`
+		Plans        []struct {
+			Date   string `json:"date"`
 			Blocks []struct {
 				ID uuid.UUID `json:"id"`
 			} `json:"blocks"`
@@ -49,6 +51,9 @@ func TestStudentStartsAndReadsReleasedPlanSessionWithoutPrivateAnswer(t *testing
 	}
 	if err := json.Unmarshal(today.Body.Bytes(), &payload); err != nil || len(payload.Plans) != 1 || len(payload.Plans[0].Blocks) == 0 || payload.Plans[0].Blocks[0].ID == uuid.Nil {
 		t.Fatalf("today plan lacks executable block: %s err=%v", today.Body.String(), err)
+	}
+	if payload.LearningDate == "" || payload.Plans[0].Date != payload.LearningDate || len(payload.Plans[0].Date) != len("2006-01-02") {
+		t.Fatalf("today plan date contract is inconsistent: %s", today.Body.String())
 	}
 	start := performJSON(router, http.MethodPost, "/api/v1/student/sessions", fixture.studentToken, map[string]any{"plan_block_id": payload.Plans[0].Blocks[0].ID})
 	if start.Code != http.StatusOK {
@@ -78,12 +83,22 @@ func TestStudentStartsAndReadsReleasedPlanSessionWithoutPrivateAnswer(t *testing
 	}
 
 	read := performJSON(router, http.MethodGet, "/api/v1/student/sessions/"+session.ID.String(), fixture.studentToken, nil)
-	if read.Code != http.StatusOK || read.Body.String() != start.Body.String() {
+	var readSession classroom.StudentSession
+	if err := json.Unmarshal(read.Body.Bytes(), &readSession); err != nil {
+		t.Fatal(err)
+	}
+	if read.Code != http.StatusOK || readSession.ID != session.ID || readSession.QuestionID != session.QuestionID || readSession.Prompt != session.Prompt || readSession.State != session.State || readSession.Status != session.Status {
 		t.Fatalf("read=%d %s start=%s", read.Code, read.Body.String(), start.Body.String())
 	}
 	resume := performJSON(router, http.MethodPost, "/api/v1/student/sessions", fixture.studentToken, map[string]any{"plan_block_id": payload.Plans[0].Blocks[0].ID})
 	if resume.Code != http.StatusOK || !strings.Contains(resume.Body.String(), session.ID.String()) {
 		t.Fatalf("resume=%d %s", resume.Code, resume.Body.String())
+	}
+	if len(payload.Plans[0].Blocks) > 1 {
+		conflict := performJSON(router, http.MethodPost, "/api/v1/student/sessions", fixture.studentToken, map[string]any{"plan_block_id": payload.Plans[0].Blocks[1].ID})
+		if conflict.Code != http.StatusConflict {
+			t.Fatalf("different block while session open=%d %s", conflict.Code, conflict.Body.String())
+		}
 	}
 	parentRead := performJSON(router, http.MethodGet, "/api/v1/student/sessions/"+session.ID.String(), fixture.parentToken, nil)
 	if parentRead.Code != http.StatusForbidden {

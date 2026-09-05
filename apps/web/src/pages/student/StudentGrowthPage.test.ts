@@ -1,11 +1,15 @@
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 
+import { useAuthSession } from '../../stores/auth'
 import StudentGrowthPage from './StudentGrowthPage.vue'
 
 it('renders growth-base counts from the Student growth response', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => ({
     ok: true,
     json: async () => ({
+      student_id: 'student-1',
+      learning_date: '2026-08-26',
       total_energy: 42,
       streak_days: 7,
       buildings: {
@@ -18,7 +22,10 @@ it('renders growth-base counts from the Student growth response', async () => {
     }),
   } as Response)))
 
-  const wrapper = mount(StudentGrowthPage)
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  useAuthSession().user.value = { user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }
+  const wrapper = mount(StudentGrowthPage, { global: { plugins: [pinia] } })
   await flushPromises()
 
   expect(wrapper.text()).toContain('42')
