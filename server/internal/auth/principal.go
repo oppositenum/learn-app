@@ -6,8 +6,9 @@ import (
 )
 
 type Principal struct {
-	UserID string
-	Role   Role
+	UserID        string
+	AuthSessionID string
+	Role          Role
 }
 
 type principalKey struct{}

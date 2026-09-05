@@ -80,6 +80,10 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 		http.Error(writer, "classroom changed; retry answer", http.StatusConflict)
 		return
 	}
+	if errors.Is(err, auth.ErrSessionRevoked) {
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
+		return
+	}
 	if err != nil {
 		log.Printf("classroom submit failed: %v", err)
 		http.Error(writer, "answer could not be processed", http.StatusInternalServerError)
@@ -111,6 +115,10 @@ func (handler *Handler) ReturnFromVoice(writer http.ResponseWriter, request *htt
 	}
 	if errors.Is(err, ErrVoiceNotActive) {
 		http.Error(writer, "voice explanation is not active", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, auth.ErrSessionRevoked) {
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
 		return
 	}
 	if err != nil {
@@ -161,6 +169,10 @@ func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http
 	}
 	if errors.Is(err, ErrClassroomChanged) {
 		http.Error(writer, "classroom changed; retry support request", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, auth.ErrSessionRevoked) {
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
 		return
 	}
 	if err != nil {

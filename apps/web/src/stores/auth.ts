@@ -59,6 +59,13 @@ export function useAuthSession() {
   }
 
   async function login(email: string, password: string): Promise<SessionUser> {
+		if (user.value) {
+			try {
+				await logout()
+			} catch {
+				throw new Error('无法退出当前账号，尚未切换；请稍后重试')
+			}
+		}
     const requestedGeneration = ++generation
     loading = null
     refreshing = null

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/mastery"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
@@ -639,6 +640,9 @@ func loadSession(ctx context.Context, tx pgx.Tx, userID, sessionID uuid.UUID) (s
 }
 
 func (service *Service) loadSessionForOperation(ctx context.Context, tx pgx.Tx, userID, sessionID, operationToken uuid.UUID) (sessionRow, error) {
+	if err := auth.LockPrincipalSession(ctx, tx, userID); err != nil {
+		return sessionRow{}, err
+	}
 	row, err := loadSessionRow(ctx, tx, userID, sessionID)
 	if err != nil {
 		return row, err
