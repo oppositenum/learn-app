@@ -2,21 +2,36 @@
 
 Evidence levels are deliberately separated: static/code, automated local, real PostgreSQL integration, provider mock, and external real-world validation are not interchangeable.
 
-| # | V1 success question | Current evidence | Status |
-|---|---|---|---|
-| 1 | Child willingly uses it for seven days | PostgreSQL records completed activity separately from Student-only willingness reflections; Owner reporting requires a historical seven-day window where every day has both. Role and database tests prevent Parent substitution and active-session reflections. No real child trial has been run | Instrumented; external validation required |
-| 2 | Wrong answer produces root-cause diagnosis | Private `answer_analyses`, misconception records, Parent projection, Tutor decision tests | Engineering pass |
-| 3 | Three failed Socratic rounds deescalate | Tutor unit tests and full E2E prove `PROBE -> SCAFFOLD -> ANALOGY -> VOICE_EXPLAIN` | Pass |
-| 4 | Voice explanation returns to original verification | Full E2E rejects direct answers in `VOICE_EXPLAIN`, requires explicit `/voice/complete`, keeps the original released question active, enters `RETURN`, and then requires a fresh correct submission; TTS protocol is provider-mock tested | Engineering pass; real provider pending |
-| 5 | Cross-subject gaps remediate and return | PostgreSQL+HTTP tests cover both Planner remediation and Tutor-diagnosed automatic `BACKTRACK`: they choose a released dependency, preserve the original task, complete the prerequisite, emit `CROSS_SUBJECT_INSIGHT`, restore the released original question in the same session, and require its correct answer | Pass |
-| 6 | Student network responses cannot obtain answers | Real PostgreSQL authenticated HTTP test plus Student event and bundle scans | Pass |
-| 7 | Parent sees complete live state | Bound Parent REST projection, evidence-derived mastery score, role-specific realtime fields, active-child discovery, persisted session/answer/Tutor/voice/mastery/reward/plan lifecycle events, answer-free ability/activity reports, and full E2E | Pass |
-| 8 | Parent adjusts plans but cannot answer | Preferences/intervention tests, first-intervention preference upsert, rejected `answer` field, and 404 assertion for send-answer-like route | Pass |
-| 9 | Misconceptions recur across days | Misconceptions and a review queue persist, but assisted review success does not yet consume and reschedule the due item, so interval progression is incomplete | Partial; B2 review lifecycle required |
-| 10 | Planner changes tomorrow from performance | Full E2E verifies a replaced/proposed next-day plan based on session mastery | Pass |
-| 11 | Every provider call has measurable cost | Provider billing identity is mandatory; request-time price preflight blocks unpriced AI/STT/TTS before network calls; effective-date catalog tests, exact decimal calculation, response-before-validation recording, TTS latency/version transaction, metered TTS E2E, and Owner reports cover the accounting path | Engineering pass; real provider pending |
-| 12 | Generated content must pass release gate | PostgreSQL trigger rejects skipped states; executable Owner pipeline covers validation/review/provenance/release/quarantine; every curated seed asset independently passes the deterministic Validator | Pass |
-| 13 | Complete learning works at 320 px | Existing authenticated Chromium evidence checks viewport width and static control bounds, but does not exercise the mobile soft-keyboard/low-visual-viewport state | Partial engineering evidence; B5 Playwright keyboard coverage required |
+| # | V1 success question | V1.1 requirement IDs | Current evidence | Status |
+|---|---|---|---|---|
+| 1 | Child willingly uses it for seven days | `REQ-V1-CORE-01` | PostgreSQL records completed activity separately from Student-only willingness reflections; Owner reporting requires a historical seven-day window where every day has both. Role and database tests prevent Parent substitution and active-session reflections. No real child trial has been run | Instrumented; external validation required |
+| 2 | Wrong answer produces root-cause diagnosis | `REQ-V1-CORE-02` | Private `answer_analyses`, misconception records, Parent projection, Tutor decision tests | Engineering pass |
+| 3 | Three failed Socratic rounds deescalate | `REQ-V1-CORE-03` | Tutor unit tests and full E2E prove `PROBE -> SCAFFOLD -> ANALOGY -> VOICE_EXPLAIN` | Pass |
+| 4 | Voice explanation returns to original verification | `REQ-V1-CORE-04` | Full E2E rejects direct answers in `VOICE_EXPLAIN`, requires explicit `/voice/complete`, keeps the original released question active, enters `RETURN`, and then requires a fresh correct submission; TTS protocol is provider-mock tested | Engineering pass; real provider pending |
+| 5 | Cross-subject gaps remediate and return | `REQ-V1-CORE-05` | PostgreSQL+HTTP tests cover both Planner remediation and Tutor-diagnosed automatic `BACKTRACK`: they choose a released dependency, preserve the original task, complete the prerequisite, emit `CROSS_SUBJECT_INSIGHT`, restore the released original question in the same session, and require its correct answer | Pass |
+| 6 | Student network responses cannot obtain answers | `REQ-V1-CORE-06` | Real PostgreSQL authenticated HTTP test plus Student event and bundle scans | Pass |
+| 7 | Parent sees complete live state | `REQ-V1-CORE-07` | Bound Parent REST projection, evidence-derived mastery score, role-specific realtime fields, active-child discovery, persisted session/answer/Tutor/voice/mastery/reward/plan lifecycle events, answer-free ability/activity reports, and full E2E | Pass |
+| 8 | Parent adjusts plans but cannot answer | `REQ-V1-CORE-08` | Preferences/intervention tests, first-intervention preference upsert, rejected `answer` field, and 404 assertion for send-answer-like route | Pass |
+| 9 | Misconceptions recur across days | `REQ-V1-CORE-09` | Misconceptions and a review queue persist, but assisted review success does not yet consume and reschedule the due item, so interval progression is incomplete | Partial; B2 review lifecycle required |
+| 10 | Planner changes tomorrow from performance | `REQ-V1-CORE-10` | Full E2E verifies a replaced/proposed next-day plan based on session mastery | Pass |
+| 11 | Every provider call has measurable cost | `REQ-V1-CORE-11` | Provider billing identity is mandatory; request-time price preflight blocks unpriced AI/STT/TTS before network calls; effective-date catalog tests, exact decimal calculation, response-before-validation recording, TTS latency/version transaction, metered TTS E2E, and Owner reports cover the accounting path | Engineering pass; real provider pending |
+| 12 | Generated content must pass release gate | `REQ-V1-CORE-12` | PostgreSQL trigger rejects skipped states; executable Owner pipeline covers validation/review/provenance/release/quarantine; every curated seed asset independently passes the deterministic Validator | Pass |
+| 13 | Complete learning works at 320 px | `REQ-V1-CORE-13` | Existing authenticated Chromium evidence checks viewport width and static control bounds, but does not exercise the mobile soft-keyboard/low-visual-viewport state | Partial engineering evidence; B5 Playwright keyboard coverage required |
+| 14 | Session lifecycle and active-time accounting match V1.1 | `REQ-SESSION-01`, `REQ-SESSION-02`, `REQ-SESSION-03`, `REQ-SESSION-04` | V1.1 traceability row added; evidence must be reconfirmed against the versioned requirement | 未验证 |
+| 15 | Runtime plan, streak, cache, and preference contracts match V1.1 | `REQ-PLAN-BLOCK-01`, `REQ-STREAK-01`, `REQ-API-CACHE-01`, `REQ-PARENT-PREF-01` | V1.1 traceability row added; evidence must be reconfirmed against the versioned requirement | 未验证 |
+| 16 | Teaching stages obey the frozen number policy | `REQ-TEACH-01`, `REQ-TEACH-02`, `REQ-TEACH-03` | B3 has not been implemented | 未验证 |
+| 17 | Parent visibility follows realtime, report, and risk boundaries | `REQ-PARENT-VIS-01`, `REQ-PARENT-VIS-02`, `REQ-PARENT-VIS-03` | B3/B6 have not been implemented | 未验证 |
+| 18 | Growth uses explainable learning evidence rather than energy | `REQ-GROWTH-01`, `REQ-GROWTH-02` | B6 has not been implemented | 未验证 |
+| 19 | Strict mastery semantics preserve independent evidence | `REQ-MASTERY-01`, `REQ-MASTERY-02`, `REQ-MASTERY-03`, `REQ-MASTERY-04`, `REQ-MASTERY-05` | V1.1 traceability row added; evidence must be reconfirmed against the versioned requirement | 未验证 |
+| 20 | Assistance levels separate cognitive help from emotion breaks | `REQ-ASSIST-01`, `REQ-ASSIST-02` | `BREAK=0` remains pending B2 | 未验证 |
+| 21 | Planner never crosses the student's grade boundary | `REQ-GRADE-01` | B1A has not been implemented | 未验证 |
+| 22 | Cross-day paused sessions do not misreport plan effective dates | `REQ-PLAN-EFFECT-01` | B1D has not been implemented | 未验证 |
+| 23 | Successful review attempts close and reschedule deterministically | `REQ-REVIEW-01`, `REQ-REVIEW-02` | B2 has not been implemented | 未验证 |
+| 24 | Student-visible output fails closed on answer disclosure | `REQ-AI-AUDIT-01` | B3 has not been implemented | 未验证 |
+| 25 | Child safety policy is versioned, minimal, and auditable | `REQ-SAFETY-01`, `REQ-PARENT-VIS-03` | B3 has not been implemented | 未验证 |
+| 26 | A classroom really completes variant, abstraction, and verification | `REQ-CLASSROOM-01`, `REQ-EVIDENCE-01` | B4 has not been implemented | 未验证 |
+| 27 | Structured interactions are versioned, allowlisted, and accessible | `REQ-INTERACTION-01` | B5 has not been implemented | 未验证 |
+| 28 | Learning-effect metrics are computable without answer or audio bodies | `REQ-METRICS-01`, `REQ-METRICS-02` | B6 has not been implemented | 未验证 |
 
 Automated evidence is concentrated in `server/internal/*_test.go`, `server/tests/integration`, and `apps/web/src/*.test.ts`. Provider HTTP mocks exercise the real adapters and metering path, including rejected structured output. No live OpenAI request was made without deployment credentials and a matching Owner-approved price catalog. A real seven-day child trial is also outside engineering proof and remains required before a product-readiness claim.
 
