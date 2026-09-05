@@ -83,14 +83,17 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 		}
 		now := handler.now()
 		err := tx.QueryRow(request.Context(), `
-	SELECT p.student_id,b.subject_id,b.knowledge_point_id,b.minutes,b.mode,b.status,b.original_task_id,q.id,s.code,kp.name,q.prompt_public
-FROM learning_plan_blocks b JOIN learning_plans p ON p.id=b.plan_id
-JOIN students st ON st.id=p.student_id
-JOIN subjects s ON s.id=b.subject_id
-JOIN knowledge_points kp ON kp.id=b.knowledge_point_id
-JOIN questions q ON q.knowledge_point_id=b.knowledge_point_id AND q.status='RELEASED'
-	WHERE b.id=$1 AND st.user_id=$2 AND p.plan_date=$3::date AND p.status IN('PROPOSED','ACTIVE')
-			ORDER BY q.difficulty,q.id LIMIT 1 FOR UPDATE OF p`, body.PlanBlockID, userID, learningDate(now)).Scan(&studentID, &subjectID, &knowledgePointID, &minutes, &mode, &blockStatus, &originalTaskID, &questionID, &subjectCode, &knowledgePointName, &prompt)
+		SELECT p.student_id,b.subject_id,b.knowledge_point_id,b.minutes,b.mode,b.status,b.original_task_id,q.id,s.code,kp.name,q.prompt_public
+	FROM learning_plan_blocks b JOIN learning_plans p ON p.id=b.plan_id
+	JOIN students st ON st.id=p.student_id
+	JOIN subjects s ON s.id=b.subject_id
+	JOIN knowledge_points kp ON kp.id=b.knowledge_point_id AND kp.status='RELEASED'
+	JOIN grade_bands grade_band ON grade_band.code=kp.grade_band_code
+	JOIN questions q ON q.knowledge_point_id=b.knowledge_point_id AND q.status='RELEASED'
+		WHERE b.id=$1 AND st.user_id=$2 AND p.plan_date=$3::date AND p.status IN('PROPOSED','ACTIVE')
+		  AND grade_band.min_grade<=st.grade_level
+		  AND (b.mode<>'CURRENT_GRADE' OR st.grade_level<=grade_band.max_grade)
+				ORDER BY q.difficulty,q.id LIMIT 1 FOR UPDATE OF p`, body.PlanBlockID, userID, learningDate(now)).Scan(&studentID, &subjectID, &knowledgePointID, &minutes, &mode, &blockStatus, &originalTaskID, &questionID, &subjectCode, &knowledgePointName, &prompt)
 		if err != nil {
 			return err
 		}

@@ -159,7 +159,87 @@ VALUES($1,$2,$3,999,'SESSION_PAUSED','{}','{}')`, uuid.New(), fixture.sessionID,
 	}
 }
 
-func TestParentPreferencesReplaceUnstartedTodayPlan(t *testing.T) {
+func TestB1DParentPreferencesIgnoreYesterdayPausedSession(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	var subjectID, knowledgePointID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+SELECT knowledge_point.subject_id,knowledge_point.id
+FROM questions question
+JOIN knowledge_points knowledge_point ON knowledge_point.id=question.knowledge_point_id
+WHERE question.id=$1`, fixture.releasedQuestionID).Scan(&subjectID, &knowledgePointID); err != nil {
+		t.Fatal(err)
+	}
+	yesterdayPlanID, yesterdayBlockID := uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `
+INSERT INTO learning_plans(id,student_id,plan_date,target_minutes,status)
+VALUES($1,$2,current_date-1,20,'ACTIVE')`, yesterdayPlanID, fixture.studentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO learning_plan_blocks(id,plan_id,sequence,subject_id,knowledge_point_id,minutes,mode,reason,status)
+VALUES($1,$2,1,$3,$4,20,'CURRENT_GRADE','yesterday_paused_fixture','ACTIVE')`, yesterdayBlockID, yesterdayPlanID, subjectID, knowledgePointID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+UPDATE learning_sessions
+SET status='PAUSED',plan_block_id=$2,last_resumed_at=NULL,last_activity_at=now()-interval '1 hour'
+WHERE id=$1`, fixture.sessionID, yesterdayBlockID); err != nil {
+		t.Fatal(err)
+	}
+
+	plannerService := planner.NewService(pool)
+	parents := parent.NewRepository(pool)
+	service := classroom.NewService(pool, nil, nil, nil, plannerService)
+	router := api.NewRouter(api.Dependencies{Authenticate: auth.NewSessionAuthenticator(pool).Middleware, Classroom: classroom.NewHandler(service, pool, parents, plannerService)})
+	preferences := performJSON(router, http.MethodPut, "/api/v1/parent/child/"+fixture.studentID.String()+"/preferences", fixture.parentToken, map[string]any{
+		"daily_minutes":          18,
+		"priority_subject_codes": []string{"MATH"},
+		"review_only":            false,
+		"reduce_intensity":       false,
+		"enabled_subject_codes":  []string{"MATH"},
+	})
+	if preferences.Code != http.StatusOK {
+		t.Fatalf("preferences=%d %s", preferences.Code, preferences.Body.String())
+	}
+	update := decodePreferenceUpdate(t, preferences)
+	var today string
+	if err := pool.QueryRow(ctx, `SELECT current_date::text`).Scan(&today); err != nil {
+		t.Fatal(err)
+	}
+	if !update.Saved || !update.PlanUpdated || update.TodayPreserved || update.AppliesFrom != today {
+		t.Fatalf("cross-day paused update=%+v today=%s", update, today)
+	}
+	var targetMinutes, blockCount, mathBlocks int
+	if err := pool.QueryRow(ctx, `
+SELECT plan.target_minutes,count(block.id),count(block.id) FILTER(WHERE subject.code='MATH')
+FROM learning_plans plan
+JOIN learning_plan_blocks block ON block.plan_id=plan.id
+JOIN subjects subject ON subject.id=block.subject_id
+WHERE plan.student_id=$1 AND plan.plan_date=current_date AND plan.status='PROPOSED'
+GROUP BY plan.target_minutes`, fixture.studentID).Scan(&targetMinutes, &blockCount, &mathBlocks); err != nil {
+		t.Fatal(err)
+	}
+	if targetMinutes != 18 || blockCount != 1 || mathBlocks != 1 {
+		t.Fatalf("today preference plan minutes=%d blocks=%d math=%d", targetMinutes, blockCount, mathBlocks)
+	}
+	var sessionStatus, yesterdayPlanStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM learning_sessions WHERE id=$1`, fixture.sessionID).Scan(&sessionStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM learning_plans WHERE id=$1`, yesterdayPlanID).Scan(&yesterdayPlanStatus); err != nil {
+		t.Fatal(err)
+	}
+	if sessionStatus != "PAUSED" || yesterdayPlanStatus != "ACTIVE" {
+		t.Fatalf("yesterday history changed: session=%s plan=%s", sessionStatus, yesterdayPlanStatus)
+	}
+}
+
+func TestB1DParentPreferencesRebuildTodayWithoutSessions(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedPool(t, ctx, testDatabaseURL(t))
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
@@ -207,7 +287,7 @@ func TestParentPreferencesReplaceUnstartedTodayPlan(t *testing.T) {
 	}
 }
 
-func TestParentPreferencesPreserveStartedTodayPlan(t *testing.T) {
+func TestB1DParentPreferencesPreserveStartedTodayPlan(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedPool(t, ctx, testDatabaseURL(t))
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {

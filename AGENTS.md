@@ -40,5 +40,6 @@ Task 004, Student Answer Non-Disclosure, is the first product safety gate. Do no
 - Add tests in proportion to the affected security or state boundary.
 - Run `go vet ./server/... ./schemas/...`, `go test -count=1 ./server/internal/... ./server/cmd/... ./schemas/...`, `go test -count=1 ./server/tests/integration`, `npm test`, `npm run lint`, and `npm run build` before declaring a task complete.
 - Run the integration command with `TEST_DATABASE_URL` pointing to real PostgreSQL. A skipped integration test does not count as passing.
+- Integration gate baseline: top-level PASS >= 57, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
 - Never commit secrets, provider keys, raw child audio, or unnecessary personal data.
 - Use migrations for persistent schema changes and keep PostgreSQL as the production database contract.

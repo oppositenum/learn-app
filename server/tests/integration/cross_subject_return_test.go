@@ -54,6 +54,9 @@ func TestTutorPrerequisiteDiagnosisBacktracksAndReturnsWithinSameSession(t *test
 	originalKnowledgePoint := uuid.MustParse("30000000-0000-4000-8000-000000000010")
 	originalQuestion := uuid.MustParse("40000000-0000-4000-8000-000000000010")
 	prerequisiteKnowledgePoint := uuid.MustParse("30000000-0000-4000-8000-000000000002")
+	if _, err := pool.Exec(ctx, `UPDATE knowledge_points SET grade_band_code='PRIMARY' WHERE id=$1`, prerequisiteKnowledgePoint); err != nil {
+		t.Fatal(err)
+	}
 	sessionID := uuid.New()
 	if _, err := pool.Exec(ctx, `INSERT INTO learning_sessions(id,student_id,subject_id,current_question_id,status,target_minutes,current_state,active_task_id,evidence_form) VALUES($1,$2,'00000000-0000-4000-8000-000000000004',$3,'ACTIVE',20,'ASK',$4,'LIFE')`, sessionID, fixture.studentID, originalQuestion, originalKnowledgePoint); err != nil {
 		t.Fatal(err)
@@ -141,6 +144,9 @@ func TestCrossSubjectRemediationReturnsSameSessionToReleasedOriginalTask(t *test
 	}
 	originalKnowledgePoint := uuid.MustParse("30000000-0000-4000-8000-000000000010")
 	remediationKnowledgePoint := uuid.MustParse("30000000-0000-4000-8000-000000000002")
+	if _, err := pool.Exec(ctx, `UPDATE knowledge_points SET grade_band_code='PRIMARY' WHERE id=$1`, remediationKnowledgePoint); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `INSERT INTO student_skill_states(student_id,knowledge_point_id,state,score_internal) VALUES($1,$2,'REGRESSED',20)`, fixture.studentID, originalKnowledgePoint); err != nil {
 		t.Fatal(err)
 	}

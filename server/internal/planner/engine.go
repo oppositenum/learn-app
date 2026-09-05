@@ -25,6 +25,9 @@ const (
 type Candidate struct {
 	SubjectCode         string
 	KnowledgePointID    string
+	StudentGrade        int
+	GradeBandMin        int
+	GradeBandMax        int
 	SkillScore          float64
 	ReviewDueAt         *time.Time
 	ActiveMisconception bool
@@ -99,6 +102,14 @@ func (Engine) Build(input Input) Plan {
 	if input.Preferences.ReviewOnly && len(eligible) == 0 {
 		eligible = candidates
 	}
+	gradeEligible := eligible[:0]
+	for _, candidate := range eligible {
+		mode, _ := candidateMode(candidate, now, input.Preferences.ReviewOnly)
+		if gradeBandAllowsMode(candidate.StudentGrade, candidate.GradeBandMin, candidate.GradeBandMax, mode) {
+			gradeEligible = append(gradeEligible, candidate)
+		}
+	}
+	eligible = gradeEligible
 	if len(eligible) == 0 {
 		return Plan{Date: day(input.Date), TargetMinutes: target}
 	}
@@ -112,10 +123,7 @@ func (Engine) Build(input Input) Plan {
 		if index < remainder {
 			minutes++
 		}
-		mode, reason := classify(candidate, now)
-		if input.Preferences.ReviewOnly && !isReview(candidate, now) {
-			mode, reason = ModeReview, "parent_review_only"
-		}
+		mode, reason := candidateMode(candidate, now, input.Preferences.ReviewOnly)
 		blocks = append(blocks, Block{
 			Sequence: index + 1, SubjectCode: candidate.SubjectCode,
 			KnowledgePointID: candidate.KnowledgePointID, Minutes: minutes,
@@ -123,6 +131,24 @@ func (Engine) Build(input Input) Plan {
 		})
 	}
 	return Plan{Date: day(input.Date), TargetMinutes: target, Blocks: blocks}
+}
+
+func candidateMode(candidate Candidate, now time.Time, reviewOnly bool) (Mode, string) {
+	mode, reason := classify(candidate, now)
+	if reviewOnly && !isReview(candidate, now) {
+		return ModeReview, "parent_review_only"
+	}
+	return mode, reason
+}
+
+func gradeBandAllowsMode(studentGrade, minGrade, maxGrade int, mode Mode) bool {
+	if studentGrade < 1 || minGrade < 1 || maxGrade < minGrade || minGrade > studentGrade {
+		return false
+	}
+	if mode == ModeCurrentGrade {
+		return studentGrade <= maxGrade
+	}
+	return mode == ModeRemediation || mode == ModeMicroBacktrack || mode == ModeReview
 }
 
 // diversify keeps one candidate per subject — the highest-ranked one, since

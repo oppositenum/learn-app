@@ -364,13 +364,16 @@ func (service *Service) beginBacktrack(ctx context.Context, tx pgx.Tx, row sessi
 	var prerequisiteName, prerequisitePrompt, prerequisiteSubject string
 	err := tx.QueryRow(ctx, `
 SELECT dep.target_knowledge_point_id,kp.subject_id,s.code,kp.name,q.id,q.prompt_public
-FROM cross_subject_dependencies dep
-JOIN knowledge_points kp ON kp.id=dep.target_knowledge_point_id AND kp.status='RELEASED'
-JOIN subjects s ON s.id=kp.subject_id
+	FROM cross_subject_dependencies dep
+	JOIN knowledge_points kp ON kp.id=dep.target_knowledge_point_id AND kp.status='RELEASED'
+	JOIN grade_bands grade_band ON grade_band.code=kp.grade_band_code
+	JOIN students student ON student.id=$2
+	JOIN subjects s ON s.id=kp.subject_id
 JOIN questions q ON q.knowledge_point_id=kp.id AND q.status='RELEASED'
 LEFT JOIN student_skill_states ss ON ss.student_id=$2 AND ss.knowledge_point_id=kp.id
-WHERE dep.source_knowledge_point_id=$1
-  AND COALESCE(ss.state,'UNKNOWN') NOT IN('UNDERSTOOD','MASTERED')
+	WHERE dep.source_knowledge_point_id=$1
+	  AND grade_band.min_grade<=student.grade_level
+	  AND COALESCE(ss.state,'UNKNOWN') NOT IN('UNDERSTOOD','MASTERED')
 ORDER BY dep.strength DESC,q.difficulty,q.id LIMIT 1`, row.knowledgePointID, row.studentID).Scan(&prerequisiteKnowledgePointID, &prerequisiteSubjectID, &prerequisiteSubject, &prerequisiteName, &prerequisiteQuestionID, &prerequisitePrompt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SubmitResult{}, realtime.Event{}, false, nil
@@ -875,10 +878,12 @@ func (service *Service) returnToOriginal(ctx context.Context, tx pgx.Tx, row ses
 	var questionID, subjectID uuid.UUID
 	var prompt string
 	if err := tx.QueryRow(ctx, `
-SELECT q.id,kp.subject_id,q.prompt_public FROM questions q
-JOIN knowledge_points kp ON kp.id=q.knowledge_point_id
-WHERE q.knowledge_point_id=$1 AND q.status='RELEASED'
-ORDER BY q.difficulty,q.id LIMIT 1`, *row.originalTaskID).Scan(&questionID, &subjectID, &prompt); err != nil {
+	SELECT q.id,kp.subject_id,q.prompt_public FROM questions q
+	JOIN knowledge_points kp ON kp.id=q.knowledge_point_id AND kp.status='RELEASED'
+	JOIN grade_bands grade_band ON grade_band.code=kp.grade_band_code
+	JOIN students student ON student.id=$2
+	WHERE q.knowledge_point_id=$1 AND q.status='RELEASED' AND grade_band.min_grade<=student.grade_level
+	ORDER BY q.difficulty,q.id LIMIT 1`, *row.originalTaskID, row.studentID).Scan(&questionID, &subjectID, &prompt); err != nil {
 		return SubmitResult{}, nil, fmt.Errorf("released original task unavailable: %w", err)
 	}
 	message := "底层知识已经补好，现在回到原问题，用刚才的方法再验证一次。"

@@ -340,6 +340,19 @@ func (handler *Handler) ParentPreferences(writer http.ResponseWriter, request *h
 	if handler.planner != nil {
 		result, err := handler.planner.ReplaceToday(request.Context(), studentID, now)
 		if err != nil {
+			var availability *planner.SubjectAvailabilityError
+			if errors.As(err, &availability) {
+				writeJSON(writer, http.StatusUnprocessableEntity, map[string]any{
+					"saved":                     true,
+					"plan_updated":              false,
+					"today_preserved":           result.TodayPreserved,
+					"applies_from":              learningDate(result.AppliesFrom),
+					"answer_controls_available": false,
+					"error":                     "no_available_content_for_enabled_subjects",
+					"available_subject_codes":   availability.AvailableSubjectCodes,
+				})
+				return
+			}
 			http.Error(writer, "preferences saved but plan could not be updated", 500)
 			return
 		}
