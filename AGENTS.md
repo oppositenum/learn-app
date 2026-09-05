@@ -2,7 +2,7 @@
 
 ## Source Of Truth
 
-Read this file and `docs/product/互动式学习_V1.md` before changing the repository. The product specification is the V1 source of truth. Implement the numbered tasks in order and do not silently broaden a task.
+Read this file and `docs/product/互动式学习_V1.md` before changing the repository. The document's V1.1 revision is the sole current product and acceptance baseline and supersedes the original V1 frozen baseline preserved at commit `a009be5d43c8edcfb6190a2c8a3967b04cf2758f`. Implement the numbered tasks in order and do not silently broaden a task.
 
 Task 004, Student Answer Non-Disclosure, is the first product safety gate. Do not implement a real Tutor or AI classroom until automated tests prove that Student APIs cannot serialize private answer data.
 
