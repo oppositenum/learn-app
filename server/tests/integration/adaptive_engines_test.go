@@ -434,6 +434,9 @@ func TestPostgresPlannerUsesCrossSubjectDependency(t *testing.T) {
 	fixture := seedSecurityFixture(t, ctx, pool)
 	source := uuid.MustParse("30000000-0000-4000-8000-000000000010")
 	target := uuid.MustParse("30000000-0000-4000-8000-000000000002")
+	if _, err := pool.Exec(ctx, `UPDATE knowledge_points SET grade_band_code='PRIMARY' WHERE id=$1`, target); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `INSERT INTO student_skill_states(student_id,knowledge_point_id,state,score_internal)VALUES($1,$2,'REGRESSED',20)`, fixture.studentID, source); err != nil {
 		t.Fatal(err)
 	}

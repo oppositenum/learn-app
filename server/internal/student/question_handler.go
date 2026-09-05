@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
 )
 
@@ -23,13 +24,23 @@ func NewQuestionHandler(questions content.PublicQuestionReader) *QuestionHandler
 }
 
 func (handler *QuestionHandler) Get(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := auth.PrincipalFromContext(request.Context())
+	if !ok {
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	studentUserID, err := uuid.Parse(principal.UserID)
+	if err != nil {
+		http.Error(writer, "invalid principal", http.StatusUnauthorized)
+		return
+	}
 	questionID, err := uuid.Parse(request.PathValue("id"))
 	if err != nil {
 		http.Error(writer, "invalid question id", http.StatusBadRequest)
 		return
 	}
 
-	question, err := handler.questions.ReleasedPublicQuestion(request.Context(), questionID)
+	question, err := handler.questions.ReleasedPublicQuestionForStudent(request.Context(), questionID, studentUserID)
 	if errors.Is(err, content.ErrQuestionNotFound) {
 		http.Error(writer, "question not found", http.StatusNotFound)
 		return

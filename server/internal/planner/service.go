@@ -41,6 +41,17 @@ type PlanUpdate struct {
 	AppliesFrom    time.Time
 }
 
+type SubjectAvailabilityError struct {
+	AvailableSubjectCodes []string
+}
+
+func (err *SubjectAvailabilityError) Error() string {
+	if len(err.AvailableSubjectCodes) == 0 {
+		return "no released curriculum candidates available for this grade band"
+	}
+	return "enabled subjects have no released curriculum candidates for this grade band"
+}
+
 type Service struct {
 	pool   *pgxpool.Pool
 	engine Engine
@@ -86,25 +97,9 @@ func (service *Service) ensureWithLocked(ctx context.Context, tx pgx.Tx, student
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return PersistedPlan{}, false, err
 	}
-	preferences, prioritySubjects, enabledSubjects, err := service.preferences(ctx, tx, studentID)
+	plan, metadata, err := service.buildPlanWithLocked(ctx, tx, studentID, date)
 	if err != nil {
 		return PersistedPlan{}, false, err
-	}
-	candidates, metadata, err := service.candidates(ctx, tx, studentID, date, prioritySubjects, enabledSubjects)
-	if err != nil {
-		return PersistedPlan{}, false, err
-	}
-	if len(candidates) == 0 && len(enabledSubjects) > 0 {
-		// Enabled subjects may have no released content yet; never let a
-		// parent setting leave the student without a plan.
-		candidates, metadata, err = service.candidates(ctx, tx, studentID, date, prioritySubjects, nil)
-		if err != nil {
-			return PersistedPlan{}, false, err
-		}
-	}
-	plan := service.engine.Build(Input{Date: date, Candidates: candidates, Preferences: preferences})
-	if len(plan.Blocks) == 0 {
-		return PersistedPlan{}, false, errors.New("no released curriculum candidates available")
 	}
 	persisted := PersistedPlan{ID: uuid.New(), StudentID: studentID, Date: plan.Date, TargetMinutes: plan.TargetMinutes}
 	var basedOn any
@@ -140,6 +135,34 @@ func (service *Service) ensureWithLocked(ctx context.Context, tx pgx.Tx, student
 		persisted.Blocks = append(persisted.Blocks, PersistedBlock{ID: blockID, Sequence: block.Sequence, SubjectID: item.subjectID, SubjectCode: block.SubjectCode, KnowledgePointID: &knowledgePointID, Focus: item.focus, Minutes: block.Minutes, Mode: block.Mode, Reason: block.Reason, OriginalTaskID: originalTaskID, Status: "AVAILABLE"})
 	}
 	return persisted, true, nil
+}
+
+func (service *Service) buildPlanWithLocked(ctx context.Context, tx pgx.Tx, studentID uuid.UUID, date time.Time) (Plan, map[string]candidateMetadata, error) {
+	preferences, prioritySubjects, enabledSubjects, err := service.preferences(ctx, tx, studentID)
+	if err != nil {
+		return Plan{}, nil, err
+	}
+	candidates, metadata, err := service.candidates(ctx, tx, studentID, date, prioritySubjects, enabledSubjects)
+	if err != nil {
+		return Plan{}, nil, err
+	}
+	plan := service.engine.Build(Input{Date: date, Candidates: candidates, Preferences: preferences})
+	if len(plan.Blocks) == 0 && len(enabledSubjects) > 0 {
+		allCandidates, _, candidateErr := service.candidates(ctx, tx, studentID, date, prioritySubjects, nil)
+		if candidateErr != nil {
+			return Plan{}, nil, candidateErr
+		}
+		availablePlan := service.engine.Build(Input{Date: date, Candidates: allCandidates, Preferences: preferences})
+		availableSubjects := make([]string, 0, len(availablePlan.Blocks))
+		for _, block := range availablePlan.Blocks {
+			availableSubjects = append(availableSubjects, block.SubjectCode)
+		}
+		return Plan{}, nil, &SubjectAvailabilityError{AvailableSubjectCodes: availableSubjects}
+	}
+	if len(plan.Blocks) == 0 {
+		return Plan{}, nil, errors.New("no released curriculum candidates available")
+	}
+	return plan, metadata, nil
 }
 
 func (service *Service) ReplaceToday(ctx context.Context, studentID uuid.UUID, date time.Time) (PlanUpdate, error) {
@@ -185,7 +208,8 @@ SELECT EXISTS(
 		}
 		replaced := command.RowsAffected() > 0
 		if result.TodayPreserved && !replaced {
-			return nil
+			_, _, availabilityErr := service.buildPlanWithLocked(ctx, tx, studentID, replanDate)
+			return availabilityErr
 		}
 		_, created, ensureErr := service.ensureWithLocked(ctx, tx, studentID, replanDate, uuid.Nil)
 		if ensureErr != nil {
@@ -195,6 +219,10 @@ SELECT EXISTS(
 		return nil
 	})
 	if err != nil {
+		var availability *SubjectAvailabilityError
+		if errors.As(err, &availability) {
+			return result, err
+		}
 		return PlanUpdate{}, err
 	}
 	return result, nil
@@ -226,13 +254,18 @@ func (service *Service) candidates(ctx context.Context, db queryer, studentID uu
 		enabledSubjects = []string{}
 	}
 	rows, err := db.Query(ctx, `
-SELECT s.id,s.code,kp.id,kp.name,COALESCE(ss.score_internal,0)::float8,
+	SELECT s.id,s.code,kp.id,kp.name,st.grade_level,grade_band.min_grade,grade_band.max_grade,
+		   COALESCE(ss.score_internal,0)::float8,
 	   CASE WHEN EXISTS(SELECT 1 FROM review_queue rq WHERE rq.student_id=$1 AND rq.knowledge_point_id=kp.id AND rq.status='PENDING' AND rq.due_at < $2::timestamptz + interval '1 day') THEN $2::timestamptz ELSE NULL END,
        EXISTS(SELECT 1 FROM student_misconceptions sm WHERE sm.student_id=$1 AND sm.knowledge_point_id=kp.id AND sm.status='ACTIVE'),
 	   COALESCE(s.code=ANY($3::text[]),false)
-FROM knowledge_points kp JOIN subjects s ON s.id=kp.subject_id
-LEFT JOIN student_skill_states ss ON ss.student_id=$1 AND ss.knowledge_point_id=kp.id
-WHERE kp.status='RELEASED'
+	FROM knowledge_points kp
+	JOIN subjects s ON s.id=kp.subject_id
+	JOIN students st ON st.id=$1
+	JOIN grade_bands grade_band ON grade_band.code=kp.grade_band_code
+	LEFT JOIN student_skill_states ss ON ss.student_id=$1 AND ss.knowledge_point_id=kp.id
+	WHERE kp.status='RELEASED'
+	  AND grade_band.min_grade<=st.grade_level
   AND EXISTS (SELECT 1 FROM questions q WHERE q.knowledge_point_id=kp.id AND q.status='RELEASED')
   AND (cardinality($4::text[])=0 OR s.code=ANY($4::text[]))
 ORDER BY s.sort_order,kp.code`, studentID, date, priorities, enabledSubjects)
@@ -246,26 +279,31 @@ ORDER BY s.sort_order,kp.code`, studentID, date, priorities, enabledSubjects)
 	for rows.Next() {
 		var subjectID, kpID uuid.UUID
 		var subjectCode, focus string
+		var studentGrade, gradeBandMin, gradeBandMax int
 		var score float64
 		var due *time.Time
 		var misconception, priority bool
-		if err := rows.Scan(&subjectID, &subjectCode, &kpID, &focus, &score, &due, &misconception, &priority); err != nil {
+		if err := rows.Scan(&subjectID, &subjectCode, &kpID, &focus, &studentGrade, &gradeBandMin, &gradeBandMax, &score, &due, &misconception, &priority); err != nil {
 			return nil, nil, err
 		}
 		key := kpID.String()
 		indexes[key] = len(candidates)
-		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, SkillScore: score, ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority})
+		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, StudentGrade: studentGrade, GradeBandMin: gradeBandMin, GradeBandMax: gradeBandMax, SkillScore: score, ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority})
 		metadata[key] = candidateMetadata{subjectID: subjectID, knowledgePointID: kpID, focus: focus}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
 	dependencyRows, err := db.Query(ctx, `
-SELECT dep.source_knowledge_point_id,dep.target_knowledge_point_id
-FROM cross_subject_dependencies dep
-LEFT JOIN student_skill_states source_state ON source_state.student_id=$1 AND source_state.knowledge_point_id=dep.source_knowledge_point_id
+	SELECT dep.source_knowledge_point_id,dep.target_knowledge_point_id
+	FROM cross_subject_dependencies dep
+	JOIN knowledge_points source_kp ON source_kp.id=dep.source_knowledge_point_id AND source_kp.status='RELEASED'
+	JOIN grade_bands source_grade ON source_grade.code=source_kp.grade_band_code
+	JOIN students st ON st.id=$1
+	LEFT JOIN student_skill_states source_state ON source_state.student_id=$1 AND source_state.knowledge_point_id=dep.source_knowledge_point_id
 LEFT JOIN student_skill_states target_state ON target_state.student_id=$1 AND target_state.knowledge_point_id=dep.target_knowledge_point_id
-WHERE source_state.state IN('LEARNING','ASSISTED','REGRESSED','REVIEW_DUE')
+	WHERE source_state.state IN('LEARNING','ASSISTED','REGRESSED','REVIEW_DUE')
+	  AND source_grade.min_grade<=st.grade_level
   AND COALESCE(target_state.state,'UNKNOWN') NOT IN('UNDERSTOOD','MASTERED')
 ORDER BY dep.strength DESC`, studentID)
 	if err != nil {

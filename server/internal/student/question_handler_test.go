@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/curriculum"
 )
@@ -31,7 +32,7 @@ type publicQuestionStub struct {
 	err      error
 }
 
-func (stub publicQuestionStub) ReleasedPublicQuestion(context.Context, uuid.UUID) (content.QuestionPublic, error) {
+func (stub publicQuestionStub) ReleasedPublicQuestionForStudent(context.Context, uuid.UUID, uuid.UUID) (content.QuestionPublic, error) {
 	return stub.question, stub.err
 }
 
@@ -48,7 +49,9 @@ func TestStudentQuestionResponseDoesNotDisclosePrivateAnswer(t *testing.T) {
 		ContentVersion:   "v1",
 	}})
 
+	studentUserID := uuid.New()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/student/questions/"+questionID.String(), nil)
+	request = request.WithContext(auth.WithPrincipal(request.Context(), auth.Principal{UserID: studentUserID.String(), Role: auth.RoleStudent}))
 	request.SetPathValue("id", questionID.String())
 	response := httptest.NewRecorder()
 	handler.Get(response, request)

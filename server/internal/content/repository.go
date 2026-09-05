@@ -12,7 +12,7 @@ import (
 var ErrQuestionNotFound = errors.New("question not found")
 
 type PublicQuestionReader interface {
-	ReleasedPublicQuestion(ctx context.Context, id uuid.UUID) (QuestionPublic, error)
+	ReleasedPublicQuestionForStudent(ctx context.Context, id, studentUserID uuid.UUID) (QuestionPublic, error)
 }
 
 type TeachingQuestionReader interface {
@@ -36,6 +36,33 @@ WHERE id = $1 AND status = 'RELEASED'`
 func (repository *Repository) ReleasedPublicQuestion(ctx context.Context, id uuid.UUID) (QuestionPublic, error) {
 	var question QuestionPublic
 	err := repository.pool.QueryRow(ctx, releasedPublicQuestionQuery, id).Scan(
+		&question.ID,
+		&question.KnowledgePointID,
+		&question.Difficulty,
+		&question.QuestionType,
+		&question.Prompt,
+		&question.Scene,
+		&question.InputSchema,
+		&question.ContentVersion,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return QuestionPublic{}, ErrQuestionNotFound
+	}
+	return question, err
+}
+
+const releasedPublicQuestionForStudentQuery = `
+SELECT q.id, q.knowledge_point_id, q.difficulty, q.question_type, q.prompt_public,
+       q.scene_public_json, q.input_schema_json, q.content_version
+FROM questions q
+JOIN knowledge_points knowledge_point ON knowledge_point.id=q.knowledge_point_id AND knowledge_point.status='RELEASED'
+JOIN grade_bands grade_band ON grade_band.code=knowledge_point.grade_band_code
+JOIN students student ON student.user_id=$2
+WHERE q.id=$1 AND q.status='RELEASED' AND grade_band.min_grade<=student.grade_level`
+
+func (repository *Repository) ReleasedPublicQuestionForStudent(ctx context.Context, id, studentUserID uuid.UUID) (QuestionPublic, error) {
+	var question QuestionPublic
+	err := repository.pool.QueryRow(ctx, releasedPublicQuestionForStudentQuery, id, studentUserID).Scan(
 		&question.ID,
 		&question.KnowledgePointID,
 		&question.Difficulty,
