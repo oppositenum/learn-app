@@ -276,6 +276,9 @@ SELECT $1, s.id, $2, $3, 'JUNIOR_SECONDARY', 'MATH-EQ-FIXED-COST', '固定费用
 FROM subjects s WHERE s.code = 'MATH'`, knowledgePointID, domainID, unitID); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(ctx, `INSERT INTO knowledge_misconception_links(knowledge_point_id,misconception_id) SELECT $1,id FROM misconceptions WHERE code='FIXED_COST_IGNORED' ON CONFLICT DO NOTHING`, knowledgePointID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `
 INSERT INTO questions (id, knowledge_point_id, difficulty, question_type, prompt_public, scene_public_json, input_schema_json, status, content_version)
 VALUES ($1, $3, 'L2', 'FREE_TEXT', '3杯同价饮料加6元配送费共36元，每杯多少钱？', '{"kind":"SHOPPING"}', '{"type":"string"}', 'DRAFT', 'v1'),

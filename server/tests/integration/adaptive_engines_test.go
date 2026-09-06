@@ -169,11 +169,15 @@ func TestFullStudentParentOwnerE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture := seedSecurityFixture(t, ctx, pool)
-	if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET socratic_fail_count=0,current_state='ASK',assistance_level=0,evidence_form='REVIEW' WHERE id=$1`, fixture.sessionID); err != nil {
-		t.Fatal(err)
-	}
 	var knowledgePointID uuid.UUID
 	if err := pool.QueryRow(ctx, `SELECT knowledge_point_id FROM questions WHERE id=$1`, fixture.releasedQuestionID).Scan(&knowledgePointID); err != nil {
+		t.Fatal(err)
+	}
+	reviewQueueID := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO review_queue(id,student_id,knowledge_point_id,source,due_at) VALUES($1,$2,$3,'MASTERY',now()-interval '1 second')`, reviewQueueID, fixture.studentID, knowledgePointID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET socratic_fail_count=0,current_state='ASK',assistance_level=0,evidence_form='REVIEW',review_queue_id=$2 WHERE id=$1`, fixture.sessionID, reviewQueueID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO student_skill_states(student_id,knowledge_point_id,state,independent_successes,life_context_successes,variant_successes,textbook_successes,next_review_at) VALUES($1,$2,'REVIEW_DUE',3,1,1,1,now())`, fixture.studentID, knowledgePointID); err != nil {

@@ -36,7 +36,15 @@ func TestMasteryRequiresFourRealClassroomEvidenceForms(t *testing.T) {
 			}
 		} else {
 			sessionID = uuid.New()
-			if _, err := pool.Exec(ctx, `INSERT INTO learning_sessions(id,student_id,subject_id,current_question_id,status,target_minutes,current_state,evidence_form)VALUES($1,$2,$3,$4,'ACTIVE',10,'ASK',$5)`, sessionID, fixture.studentID, subjectID, fixture.releasedQuestionID, form); err != nil {
+			var reviewQueueID any
+			if form == mastery.FormReview {
+				queueID := uuid.New()
+				if _, err := pool.Exec(ctx, `INSERT INTO review_queue(id,student_id,knowledge_point_id,source,due_at) VALUES($1,$2,$3,'MASTERY',now()-interval '1 second')`, queueID, fixture.studentID, knowledgePointID); err != nil {
+					t.Fatal(err)
+				}
+				reviewQueueID = queueID
+			}
+			if _, err := pool.Exec(ctx, `INSERT INTO learning_sessions(id,student_id,review_queue_id,subject_id,current_question_id,status,target_minutes,current_state,evidence_form)VALUES($1,$2,$6,$3,$4,'ACTIVE',10,'ASK',$5)`, sessionID, fixture.studentID, subjectID, fixture.releasedQuestionID, form, reviewQueueID); err != nil {
 				t.Fatal(err)
 			}
 		}

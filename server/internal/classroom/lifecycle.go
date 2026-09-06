@@ -32,16 +32,18 @@ type SessionTiming struct {
 }
 
 type lifecycleRow struct {
-	sessionID          uuid.UUID
-	studentID          uuid.UUID
-	planBlockID        *uuid.UUID
-	status             string
-	startedAt          time.Time
-	accumulatedSeconds int
-	lastResumedAt      *time.Time
-	lastActivityAt     time.Time
-	version            int64
-	timingVersion      int64
+	sessionID             uuid.UUID
+	studentID             uuid.UUID
+	planBlockID           *uuid.UUID
+	reviewQueueID         *uuid.UUID
+	reviewAttemptFailedAt *time.Time
+	status                string
+	startedAt             time.Time
+	accumulatedSeconds    int
+	lastResumedAt         *time.Time
+	lastActivityAt        time.Time
+	version               int64
+	timingVersion         int64
 }
 
 func (service *Service) PauseSession(ctx context.Context, userID, sessionID uuid.UUID) (SessionTiming, error) {
@@ -139,8 +141,16 @@ func (service *Service) transitionSession(ctx context.Context, userID, sessionID
 			}
 			row.version++
 			row.timingVersion++
+			resolvedReview, err := resolveFailedReviewOnAbandon(ctx, tx, row, now)
+			if err != nil {
+				return err
+			}
 			if row.planBlockID != nil {
-				if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status='AVAILABLE' WHERE id=$1 AND status='ACTIVE'`, *row.planBlockID); err != nil {
+				blockStatus := "AVAILABLE"
+				if resolvedReview {
+					blockStatus = "COMPLETED"
+				}
+				if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status=$2 WHERE id=$1 AND status='ACTIVE'`, *row.planBlockID, blockStatus); err != nil {
 					return err
 				}
 			}
@@ -194,9 +204,10 @@ WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND expires_at>$3`, authSessio
 		}
 
 		rows, err := tx.Query(ctx, `
-SELECT ls.id,ls.student_id,ls.plan_block_id,ls.status,ls.started_at,ls.accumulated_seconds,
-       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version,
-       ls.processing_token IS NOT NULL OR ls.processing_until IS NOT NULL
+	SELECT ls.id,ls.student_id,ls.plan_block_id,ls.review_queue_id,ls.review_attempt_failed_at,
+	       ls.status,ls.started_at,ls.accumulated_seconds,
+	       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version,
+	       ls.processing_token IS NOT NULL OR ls.processing_until IS NOT NULL
 FROM learning_sessions ls
 JOIN students student ON student.id=ls.student_id
 WHERE student.user_id=$1 AND ls.status IN ('ACTIVE','PAUSED')
@@ -213,7 +224,8 @@ FOR UPDATE OF ls`, userID)
 		for rows.Next() {
 			var session logoutRow
 			if err := rows.Scan(
-				&session.sessionID, &session.studentID, &session.planBlockID, &session.status, &session.startedAt,
+				&session.sessionID, &session.studentID, &session.planBlockID, &session.reviewQueueID,
+				&session.reviewAttemptFailedAt, &session.status, &session.startedAt,
 				&session.accumulatedSeconds, &session.lastResumedAt, &session.lastActivityAt, &session.version,
 				&session.timingVersion, &session.hasOperationLease,
 			); err != nil {
@@ -277,13 +289,15 @@ WHERE id=$1`, row.sessionID, total, observedAt); err != nil {
 func loadLifecycleRow(ctx context.Context, tx pgx.Tx, userID, sessionID uuid.UUID) (lifecycleRow, error) {
 	var row lifecycleRow
 	err := tx.QueryRow(ctx, `
-SELECT ls.id,ls.student_id,ls.plan_block_id,ls.status,ls.started_at,ls.accumulated_seconds,
-       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version
+	SELECT ls.id,ls.student_id,ls.plan_block_id,ls.review_queue_id,ls.review_attempt_failed_at,
+	       ls.status,ls.started_at,ls.accumulated_seconds,
+	       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version
 FROM learning_sessions ls
 JOIN students student ON student.id=ls.student_id
 WHERE ls.id=$1 AND student.user_id=$2
 FOR UPDATE OF ls`, sessionID, userID).Scan(
-		&row.sessionID, &row.studentID, &row.planBlockID, &row.status, &row.startedAt,
+		&row.sessionID, &row.studentID, &row.planBlockID, &row.reviewQueueID,
+		&row.reviewAttemptFailedAt, &row.status, &row.startedAt,
 		&row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.version, &row.timingVersion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -388,8 +402,9 @@ func (service *Service) recoverStaleSessions(ctx context.Context, userID *uuid.U
 		}
 		observedAt := service.now()
 		rows, err := tx.Query(ctx, `
-SELECT ls.id,ls.student_id,ls.plan_block_id,ls.status,ls.started_at,ls.accumulated_seconds,
-       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version
+	SELECT ls.id,ls.student_id,ls.plan_block_id,ls.review_queue_id,ls.review_attempt_failed_at,
+	       ls.status,ls.started_at,ls.accumulated_seconds,
+	       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version
 FROM learning_sessions ls
 JOIN students student ON student.id=ls.student_id
 WHERE ($1::uuid IS NULL OR student.user_id=$1)
@@ -404,7 +419,7 @@ FOR UPDATE OF ls`, userFilter, observedAt)
 		var sessions []lifecycleRow
 		for rows.Next() {
 			var row lifecycleRow
-			if err := rows.Scan(&row.sessionID, &row.studentID, &row.planBlockID, &row.status, &row.startedAt, &row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.version, &row.timingVersion); err != nil {
+			if err := rows.Scan(&row.sessionID, &row.studentID, &row.planBlockID, &row.reviewQueueID, &row.reviewAttemptFailedAt, &row.status, &row.startedAt, &row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.version, &row.timingVersion); err != nil {
 				rows.Close()
 				return err
 			}
@@ -447,8 +462,20 @@ FOR UPDATE OF ls`, userFilter, observedAt)
 			}
 			row.version += int64(versionIncrement)
 			row.timingVersion++
+			resolvedReview := false
+			if status == "ABANDONED" {
+				var err error
+				resolvedReview, err = resolveFailedReviewOnAbandon(ctx, tx, row, now)
+				if err != nil {
+					return err
+				}
+			}
 			if status == "ABANDONED" && row.planBlockID != nil {
-				if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status='AVAILABLE' WHERE id=$1 AND status='ACTIVE'`, *row.planBlockID); err != nil {
+				blockStatus := "AVAILABLE"
+				if resolvedReview {
+					blockStatus = "COMPLETED"
+				}
+				if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status=$2 WHERE id=$1 AND status='ACTIVE'`, *row.planBlockID, blockStatus); err != nil {
 					return err
 				}
 			}
