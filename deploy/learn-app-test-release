@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 077
+
+readonly app_dir="/opt/learn-app"
+readonly env_file="${app_dir}/.env.production"
+readonly compose_file="${app_dir}/compose.yaml"
+readonly state_file="${app_dir}/.test-release-state"
+readonly lock_file="/var/lock/learn-app-test-release.lock"
+
+previous_tag=""
+test_tag=""
+commit_sha=""
+backup_file=""
+tag_switched=0
+recovery_tag=""
+cleanup_path=""
+
+log() {
+  logger -t learn-app-test-release -- "$*"
+}
+
+fail() {
+  printf 'ERROR=%s\n' "$1" >&2
+  log "failed: $1"
+  return 1
+}
+
+require_file() {
+  [[ -f "$1" ]] || fail "required file is missing: $1"
+}
+
+compose() {
+  docker compose --env-file "$env_file" -f "$compose_file" "$@"
+}
+
+env_value() {
+  local key="$1"
+  local value
+  value="$(sed -n "s/^${key}=//p" "$env_file")"
+  [[ -n "$value" ]] || fail "${key} is missing from .env.production"
+  [[ "$(grep -c "^${key}=" "$env_file")" -eq 1 ]] || fail "${key} must appear exactly once"
+  printf '%s' "$value"
+}
+
+validate_tag() {
+  local value="$1"
+  [[ "$value" =~ ^test-[a-z0-9][a-z0-9.-]{1,78}-[0-9]{8}-[0-9a-f]{7,12}$ ]] || fail "invalid test image tag"
+}
+
+validate_sha() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9a-f]{40}$ ]] || fail "commit SHA must contain 40 lowercase hexadecimal characters"
+}
+
+validate_tag_sha_pair() {
+  local value_tag="$1"
+  local value_sha="$2"
+  local short_sha="${value_tag##*-}"
+  validate_tag "$value_tag"
+  validate_sha "$value_sha"
+  [[ "$value_sha" == "${short_sha}"* ]] || fail "test tag does not match commit SHA"
+}
+
+registry_name() {
+  local registry
+  registry="$(env_value REGISTRY)"
+  [[ "$registry" =~ ^[a-zA-Z0-9.-]+(:[0-9]+)?(/[a-zA-Z0-9._/-]+)?$ ]] || fail "REGISTRY has an unsafe value"
+  printf '%s' "$registry"
+}
+
+image_name() {
+  local component="$1"
+  local tag="$2"
+  [[ "$component" == "api" || "$component" == "web" ]] || fail "component must be api or web"
+  printf '%s/ai-learning-tutor-%s:%s' "$(registry_name)" "$component" "$tag"
+}
+
+inspect_image() {
+  local component="$1"
+  local tag="$2"
+  local sha="$3"
+  local image
+  local platform
+  local revision
+  image="$(image_name "$component" "$tag")"
+  platform="$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" || fail "${component} image is not loaded"
+  revision="$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" || fail "${component} image revision label is unavailable"
+  [[ "$platform" == "linux/amd64" ]] || fail "${component} image platform is ${platform}, expected linux/amd64"
+  [[ "$revision" == "$sha" ]] || fail "${component} image revision does not match requested commit"
+}
+
+state_value() {
+  local key="$1"
+  require_file "$state_file"
+  sed -n "s/^${key}=//p" "$state_file"
+}
+
+write_state() {
+  local status="$1"
+  local deployed_at="${2:-}"
+  local temporary
+  temporary="$(mktemp "${app_dir}/.test-release-state.XXXXXX")"
+  {
+    printf 'VERSION=1\n'
+    printf 'STATUS=%s\n' "$status"
+    printf 'PREVIOUS_TAG=%s\n' "$previous_tag"
+    printf 'TEST_TAG=%s\n' "$test_tag"
+    printf 'COMMIT_SHA=%s\n' "$commit_sha"
+    printf 'BACKUP_FILE=%s\n' "$backup_file"
+    printf 'DEPLOYED_AT=%s\n' "$deployed_at"
+  } >"$temporary"
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$state_file"
+}
+
+replace_image_tag() {
+  local replacement="$1"
+  local temporary
+  [[ "$replacement" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ ]] || fail "replacement image tag is unsafe"
+  [[ "$(grep -c '^APP_IMAGE_TAG=' "$env_file")" -eq 1 ]] || fail "APP_IMAGE_TAG must appear exactly once"
+  temporary="$(mktemp "${app_dir}/.env.production.XXXXXX")"
+  sed "s/^APP_IMAGE_TAG=.*/APP_IMAGE_TAG=${replacement}/" "$env_file" >"$temporary"
+  chown --reference="$env_file" "$temporary"
+  chmod --reference="$env_file" "$temporary"
+  mv -f "$temporary" "$env_file"
+}
+
+service_is_healthy() {
+  local service="$1"
+  local container_id
+  local running
+  local health
+  container_id="$(compose ps -q "$service")"
+  [[ -n "$container_id" ]] || return 1
+  running="$(docker inspect "$container_id" --format '{{.State.Running}}')"
+  health="$(docker inspect "$container_id" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}')"
+  [[ "$running" == "true" && "$health" == "healthy" ]]
+}
+
+require_free_space() {
+  local available_kib
+  available_kib="$(df -Pk "$app_dir" | awk 'NR == 2 { print $4 }')"
+  [[ "$available_kib" =~ ^[0-9]+$ ]] || fail "could not determine available disk space"
+  [[ "$available_kib" -ge 2097152 ]] || fail "test release requires at least 2 GiB of free disk space"
+}
+
+wait_for_stack() {
+  local attempt
+  for attempt in $(seq 1 60); do
+    if service_is_healthy postgres && service_is_healthy api && service_is_healthy web; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
+
+verify_runtime() {
+  local app_health
+  local api_health
+  local websocket_status
+  wait_for_stack || return 1
+  app_health="$(curl --silent --show-error --fail http://127.0.0.1:18000/app-health)" || return 1
+  [[ "$app_health" == "ok" ]] || return 1
+  api_health="$(compose exec -T api wget -q -O - http://127.0.0.1:8080/healthz)" || return 1
+  [[ "$api_health" == '{"status":"ok"}' ]] || return 1
+  websocket_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --header 'Connection: Upgrade' --header 'Upgrade: websocket' \
+    http://127.0.0.1:18000/ws/student/00000000-0000-0000-0000-000000000000 || true)"
+  [[ "$websocket_status" == "401" || "$websocket_status" == "403" ]]
+}
+
+restore_recovery_runtime() {
+  [[ "$tag_switched" -eq 1 && -n "$recovery_tag" ]] || return 0
+  log "restoring image tag ${recovery_tag} after failed operation"
+  replace_image_tag "$recovery_tag" || return 1
+  compose pull migrate api web || return 1
+  compose up -d || return 1
+  verify_runtime || return 1
+  tag_switched=0
+}
+
+on_error() {
+  local exit_code=$?
+  trap - ERR
+  if [[ -n "$cleanup_path" ]]; then
+    rm -f "$cleanup_path"
+  fi
+  if [[ "$tag_switched" -eq 1 ]]; then
+    if restore_recovery_runtime; then
+      write_state FAILED ""
+      printf 'AUTO_ROLLBACK=success\n' >&2
+    else
+      write_state FAILED_ROLLBACK ""
+      printf 'AUTO_ROLLBACK=failed\n' >&2
+    fi
+  fi
+  exit "$exit_code"
+}
+
+assert_no_active_test_release() {
+  if [[ -f "$state_file" && "$(state_value STATUS)" == "DEPLOYED" ]]; then
+    fail "a test release is already active; run rollback first"
+  fi
+}
+
+upload_image() {
+  local component="$1"
+  local tag="$2"
+  local sha="$3"
+  local image
+  local archive
+  local digest
+  local push_output
+  [[ "$component" == "api" || "$component" == "web" ]] || fail "component must be api or web"
+  validate_tag_sha_pair "$tag" "$sha"
+  assert_no_active_test_release
+  require_free_space
+  image="$(image_name "$component" "$tag")"
+  archive="$(mktemp "/var/tmp/learn-app-${component}.XXXXXX.tar")"
+  cleanup_path="$archive"
+  cat >"$archive"
+  [[ -s "$archive" ]] || fail "received an empty ${component} image archive"
+  docker load --input "$archive" >/dev/null
+  inspect_image "$component" "$tag" "$sha"
+  push_output="$(DOCKER_CONFIG=/root/.docker docker push "$image")"
+  digest="$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' <<<"$push_output" | tail -1)"
+  [[ -n "$digest" ]] || fail "registry digest is unavailable after pushing ${component}"
+  rm -f "$archive"
+  cleanup_path=""
+  log "uploaded ${component} image ${tag} for ${sha}"
+  printf 'COMPONENT=%s\n' "$component"
+  printf 'IMAGE_TAG=%s\n' "$tag"
+  printf 'COMMIT_SHA=%s\n' "$sha"
+  printf 'PLATFORM=linux/amd64\n'
+  printf 'DIGEST=%s\n' "$digest"
+}
+
+backup_database() {
+  local timestamp
+  local partial
+  mkdir -p "${app_dir}/backups"
+  timestamp="$(date -u +%Y%m%d-%H%M%S)"
+  backup_file="${app_dir}/backups/learning_tutor-before-${test_tag}-${timestamp}.dump"
+  partial="${backup_file}.partial"
+  cleanup_path="$partial"
+  compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' >"$partial"
+  [[ -s "$partial" ]] || fail "database backup is empty"
+  compose exec -T postgres pg_restore --list <"$partial" >/dev/null
+  mv -f "$partial" "$backup_file"
+  cleanup_path=""
+}
+
+deploy_release() {
+  test_tag="$1"
+  commit_sha="$2"
+  validate_tag_sha_pair "$test_tag" "$commit_sha"
+  assert_no_active_test_release
+  require_file "$env_file"
+  require_file "$compose_file"
+  service_is_healthy postgres || fail "postgres is not healthy before deployment"
+  service_is_healthy api || fail "api is not healthy before deployment"
+  service_is_healthy web || fail "web is not healthy before deployment"
+  require_free_space
+  inspect_image api "$test_tag" "$commit_sha"
+  inspect_image web "$test_tag" "$commit_sha"
+  previous_tag="$(env_value APP_IMAGE_TAG)"
+  [[ "$previous_tag" != "$test_tag" ]] || fail "requested test tag is already active"
+  backup_database
+  write_state DEPLOYING ""
+  recovery_tag="$previous_tag"
+  tag_switched=1
+  replace_image_tag "$test_tag"
+  compose pull migrate api web
+  compose up -d
+  verify_runtime || fail "deployed services did not become healthy"
+  compose logs --no-color --tail=30 migrate | grep -q 'database migrations applied' || fail "migration success marker is missing"
+  write_state DEPLOYED "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  tag_switched=0
+  recovery_tag=""
+  log "deployed ${test_tag} for ${commit_sha}; previous tag was ${previous_tag}"
+  printf 'STATUS=DEPLOYED\n'
+  printf 'PREVIOUS_TAG=%s\n' "$previous_tag"
+  printf 'TEST_TAG=%s\n' "$test_tag"
+  printf 'COMMIT_SHA=%s\n' "$commit_sha"
+  printf 'BACKUP_FILE=%s\n' "$backup_file"
+  printf 'POSTGRES_HEALTH=healthy\nAPI_HEALTH=healthy\nWEB_HEALTH=healthy\n'
+  printf 'APP_HEALTH=ok\nAPI_HEALTHZ={"status":"ok"}\nWEBSOCKET_GATE=authenticated\n'
+}
+
+rollback_release() {
+  local status
+  local current_tag
+  require_file "$state_file"
+  status="$(state_value STATUS)"
+  [[ "$status" == "DEPLOYED" ]] || fail "there is no active successful test release to roll back"
+  previous_tag="$(state_value PREVIOUS_TAG)"
+  test_tag="$(state_value TEST_TAG)"
+  commit_sha="$(state_value COMMIT_SHA)"
+  backup_file="$(state_value BACKUP_FILE)"
+  validate_tag_sha_pair "$test_tag" "$commit_sha"
+  [[ "$previous_tag" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ ]] || fail "saved previous tag is unsafe"
+  current_tag="$(env_value APP_IMAGE_TAG)"
+  [[ "$current_tag" == "$test_tag" ]] || fail "current tag differs from the recorded test release"
+  recovery_tag="$test_tag"
+  tag_switched=1
+  replace_image_tag "$previous_tag"
+  compose pull migrate api web
+  compose up -d
+  verify_runtime || fail "previous services did not become healthy"
+  tag_switched=0
+  recovery_tag=""
+  write_state ROLLED_BACK "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  docker image rm "$(image_name api "$test_tag")" "$(image_name web "$test_tag")" >/dev/null 2>&1 || true
+  log "rolled back ${test_tag} to ${previous_tag}"
+  printf 'STATUS=ROLLED_BACK\n'
+  printf 'RESTORED_TAG=%s\n' "$previous_tag"
+  printf 'REMOVED_TEST_TAG=%s\n' "$test_tag"
+  printf 'COMMIT_SHA=%s\n' "$commit_sha"
+  printf 'BACKUP_FILE=%s\n' "$backup_file"
+  printf 'POSTGRES_HEALTH=healthy\nAPI_HEALTH=healthy\nWEB_HEALTH=healthy\n'
+  printf 'APP_HEALTH=ok\nAPI_HEALTHZ={"status":"ok"}\n'
+  printf 'SCHEMA_ROLLBACK=not_performed\n'
+}
+
+show_status() {
+  printf 'CURRENT_TAG=%s\n' "$(env_value APP_IMAGE_TAG)"
+  if [[ -f "$state_file" ]]; then
+    printf 'TEST_RELEASE_STATUS=%s\n' "$(state_value STATUS)"
+    printf 'TEST_TAG=%s\n' "$(state_value TEST_TAG)"
+    printf 'COMMIT_SHA=%s\n' "$(state_value COMMIT_SHA)"
+    printf 'BACKUP_FILE=%s\n' "$(state_value BACKUP_FILE)"
+  else
+    printf 'TEST_RELEASE_STATUS=NONE\n'
+  fi
+  service_is_healthy postgres && printf 'POSTGRES_HEALTH=healthy\n' || printf 'POSTGRES_HEALTH=unhealthy\n'
+  service_is_healthy api && printf 'API_HEALTH=healthy\n' || printf 'API_HEALTH=unhealthy\n'
+  service_is_healthy web && printf 'WEB_HEALTH=healthy\n' || printf 'WEB_HEALTH=unhealthy\n'
+}
+
+main() {
+  local requested="${SSH_ORIGINAL_COMMAND:-}"
+  local -a tokens=()
+  local action=""
+  require_file "$env_file"
+  require_file "$compose_file"
+  [[ "$requested" != *$'\n'* && "$requested" != *$'\r'* ]] || fail "command must contain one line"
+  read -r -a tokens <<<"$requested"
+  action="${tokens[0]:-}"
+  exec 9>"$lock_file"
+  flock -n 9 || fail "another test release operation is already running"
+  trap on_error ERR
+  case "$action" in
+    upload)
+      [[ "${#tokens[@]}" -eq 4 ]] || fail "upload requires component, tag, and commit SHA"
+      upload_image "${tokens[1]}" "${tokens[2]}" "${tokens[3]}"
+      ;;
+    deploy)
+      [[ "${#tokens[@]}" -eq 3 ]] || fail "deploy requires tag and commit SHA"
+      deploy_release "${tokens[1]}" "${tokens[2]}"
+      ;;
+    rollback)
+      [[ "${#tokens[@]}" -eq 1 ]] || fail "rollback accepts no arguments"
+      rollback_release
+      ;;
+    status)
+      [[ "${#tokens[@]}" -eq 1 ]] || fail "status accepts no arguments"
+      show_status
+      ;;
+    *)
+      fail "command must be upload, deploy, rollback, or status"
+      ;;
+  esac
+}
+
+main "$@"

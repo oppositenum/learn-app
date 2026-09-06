@@ -1,0 +1,249 @@
+name: Test Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "待测试版本的完整 40 位 commit SHA"
+        required: true
+        type: string
+      release_name:
+        description: "测试名称，例如 b2-review-lifecycle"
+        required: true
+        default: "b2-review-lifecycle"
+        type: string
+      confirmation:
+        description: "输入 DEPLOY 确认发布到测试服务器"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: learn-app-test-environment
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Lock exact source revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      commit_sha: ${{ steps.source.outputs.commit_sha }}
+      image_tag: ${{ steps.source.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate and lock requested revision
+        id: source
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "${CONFIRMATION}" = "DEPLOY"
+          [[ "${REQUESTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RELEASE_NAME}" =~ ^[a-z0-9][a-z0-9.-]{1,48}$ ]]
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git cat-file -e "${REQUESTED_SHA}^{commit}"
+          git for-each-ref --format='%(refname)' --contains "${REQUESTED_SHA}" refs/remotes/origin/ | grep -q '^refs/remotes/origin/'
+          image_tag="test-${RELEASE_NAME}-$(date -u +%Y%m%d)-${REQUESTED_SHA:0:7}"
+          printf 'commit_sha=%s\n' "${REQUESTED_SHA}" >>"${GITHUB_OUTPUT}"
+          printf 'image_tag=%s\n' "${image_tag}" >>"${GITHUB_OUTPUT}"
+          {
+            echo '## 测试发布已锁定'
+            echo
+            echo "- Commit: \`${REQUESTED_SHA}\`"
+            echo "- Image tag: \`${image_tag}\`"
+            echo '- 目标平台：`linux/amd64`'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  go-unit:
+    name: Go unit and static checks
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./server/... ./schemas/...
+      - run: go test -count=1 ./server/internal/... ./server/cmd/... ./schemas/...
+
+  integration:
+    name: PostgreSQL integration gate
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: learning_tutor
+          POSTGRES_PASSWORD: learning_tutor
+          POSTGRES_DB: learning_tutor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U learning_tutor -d learning_tutor"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CI: "true"
+      TEST_DATABASE_URL: postgres://learning_tutor:learning_tutor@127.0.0.1:5432/learning_tutor?sslmode=disable
+      GOFLAGS: -json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run the target revision's integration gate
+        run: |
+          set -euo pipefail
+          threshold="$(sed -nE 's/.*length\) >= ([0-9]+) and.*/\1/p' .github/workflows/ci.yml | head -1)"
+          [[ "${threshold}" =~ ^[0-9]+$ ]]
+          report_path="${RUNNER_TEMP}/go-integration.json"
+          go test -count=1 ./server/tests/integration | tee "${report_path}"
+          jq -e -s --argjson threshold "${threshold}" '
+            ([.[] | select(.Action == "pass" and .Test != null and (.Test | contains("/") | not))] | length) >= $threshold and
+            ([.[] | select(.Action == "fail" and .Test != null and (.Test | contains("/") | not))] | length) == 0 and
+            ([.[] | select(.Action == "skip" and .Test != null)] | length) == 0 and
+            any(.[]; .Action == "pass" and .Test == "TestIntegrationDatabaseConfiguredInCI")
+          ' "${report_path}"
+          echo "Integration threshold: PASS >= ${threshold}, FAIL = 0, SKIP = 0" >>"${GITHUB_STEP_SUMMARY}"
+
+  web:
+    name: Web tests, lint, and build
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+
+  build:
+    name: Build immutable linux/amd64 images
+    needs: [resolve, go-unit, integration, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      image_tag: ${{ needs.resolve.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+      - name: Create isolated BuildKit builder
+        run: |
+          set -euo pipefail
+          docker buildx create --driver docker-container --name learn-app-test --use
+          docker buildx inspect --bootstrap
+      - name: Build API and Web archives
+        env:
+          COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          api_image="dywxreg.dywxgz.com/ai-learning-tutor-api:${IMAGE_TAG}"
+          web_image="dywxreg.dywxgz.com/ai-learning-tutor-web:${IMAGE_TAG}"
+          docker buildx build --platform linux/amd64 --provenance=false \
+            --label "org.opencontainers.image.revision=${COMMIT_SHA}" \
+            --tag "${api_image}" --file Dockerfile.api \
+            --output "type=docker,dest=${RUNNER_TEMP}/api-image.tar" .
+          docker buildx build --platform linux/amd64 --provenance=false \
+            --label "org.opencontainers.image.revision=${COMMIT_SHA}" \
+            --tag "${web_image}" --file apps/web/Dockerfile \
+            --output "type=docker,dest=${RUNNER_TEMP}/web-image.tar" .
+          docker load --input "${RUNNER_TEMP}/api-image.tar" >/dev/null
+          docker load --input "${RUNNER_TEMP}/web-image.tar" >/dev/null
+          test "$(docker image inspect "${api_image}" --format '{{.Os}}/{{.Architecture}}')" = "linux/amd64"
+          test "$(docker image inspect "${web_image}" --format '{{.Os}}/{{.Architecture}}')" = "linux/amd64"
+          test "$(docker image inspect "${api_image}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${COMMIT_SHA}"
+          test "$(docker image inspect "${web_image}" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "${COMMIT_SHA}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-release-images-${{ needs.resolve.outputs.commit_sha }}
+          path: |
+            ${{ runner.temp }}/api-image.tar
+            ${{ runner.temp }}/web-image.tar
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    name: Back up and deploy test server
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: test
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-release-images-${{ needs.resolve.outputs.commit_sha }}
+          path: ${{ runner.temp }}/test-release-images
+      - name: Configure restricted deployment key
+        env:
+          DEPLOY_KEY: ${{ secrets.TEST_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.TEST_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "${DEPLOY_KEY}"
+          test -n "${KNOWN_HOSTS}"
+          install -d -m 0700 "${HOME}/.ssh"
+          printf '%s\n' "${DEPLOY_KEY}" >"${HOME}/.ssh/learn-app-test-deploy"
+          printf '%s\n' "${KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
+          chmod 0600 "${HOME}/.ssh/learn-app-test-deploy" "${HOME}/.ssh/known_hosts"
+          ssh-keygen -y -f "${HOME}/.ssh/learn-app-test-deploy" >/dev/null
+      - name: Transfer, publish, and deploy exact images
+        env:
+          COMMIT_SHA: ${{ needs.resolve.outputs.commit_sha }}
+          IMAGE_TAG: ${{ needs.resolve.outputs.image_tag }}
+          DEPLOY_HOST: ${{ vars.TEST_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.TEST_DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          test -n "${DEPLOY_HOST}"
+          test -n "${DEPLOY_USER}"
+          ssh_options=(-i "${HOME}/.ssh/learn-app-test-deploy" -o BatchMode=yes -o ConnectTimeout=15 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15)
+          remote="${DEPLOY_USER}@${DEPLOY_HOST}"
+          ssh "${ssh_options[@]}" "${remote}" "status"
+          api_output="$(ssh "${ssh_options[@]}" "${remote}" "upload api ${IMAGE_TAG} ${COMMIT_SHA}" \
+            <"${RUNNER_TEMP}/test-release-images/api-image.tar")"
+          web_output="$(ssh "${ssh_options[@]}" "${remote}" "upload web ${IMAGE_TAG} ${COMMIT_SHA}" \
+            <"${RUNNER_TEMP}/test-release-images/web-image.tar")"
+          printf '%s\n' "${api_output}" "${web_output}"
+          deploy_output="$(ssh "${ssh_options[@]}" "${remote}" "deploy ${IMAGE_TAG} ${COMMIT_SHA}")"
+          printf '%s\n' "${deploy_output}"
+          {
+            echo '## 测试服务器发布成功'
+            echo
+            echo "- Commit: \`${COMMIT_SHA}\`"
+            echo "- Image tag: \`${IMAGE_TAG}\`"
+            echo '- 平台：`linux/amd64`'
+            echo
+            echo '```text'
+            printf '%s\n' "${api_output}" "${web_output}"
+            printf '%s\n' "${deploy_output}"
+            echo '```'
+            echo
+            echo '**请打开测试站点完成实际功能测试。测试结束后运行 Test Rollback，不要长期保留测试版本。**'
+          } >>"${GITHUB_STEP_SUMMARY}"

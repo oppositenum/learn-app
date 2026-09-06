@@ -178,3 +178,77 @@ Monitor at minimum:
 `/healthz` is a liveness endpoint. A complete release check must also log in,
 load a role-appropriate page, open a WebSocket, and verify that a Student API
 cannot serialize private answer fields.
+
+## 8. One-click test releases
+
+Repository maintainers can publish an unmerged, already reviewed commit to the
+test server without installing Docker locally. The two manual GitHub Actions
+workflows are deliberately separate:
+
+- **Test Deploy** reruns all Go, PostgreSQL, and Web gates for an exact 40-character
+  commit SHA, builds both `linux/amd64` images, backs up PostgreSQL, and starts
+  the test release.
+- **Test Rollback** restores the image tag that was active before Test Deploy.
+  It does not reverse forward-only database migrations.
+
+The test server receives images through a restricted SSH gateway. GitHub never
+receives the private registry password: the gateway loads the two verified
+images and uses the server's existing registry login to publish them. The key
+cannot open an interactive shell and accepts only `upload`, `deploy`,
+`rollback`, and `status` operations.
+
+### One-time administrator setup
+
+Create a dedicated Ed25519 key for the `test` GitHub Environment. Keep the
+private key out of the repository and install only its public half on the test
+server:
+
+```sh
+sudo ./deploy/install-test-release-gateway.sh /secure/path/test-deploy.pub
+```
+
+Configure these values in the GitHub Environment named `test`:
+
+```text
+Secret   TEST_DEPLOY_SSH_KEY      dedicated private key
+Secret   TEST_DEPLOY_KNOWN_HOSTS  pinned SSH known_hosts entry
+Variable TEST_DEPLOY_HOST         test-server hostname
+Variable TEST_DEPLOY_USER         learnapp-deploy
+```
+
+Do not reuse a personal or root SSH private key. Do not copy the server's
+Docker configuration into GitHub. The server-side registry login remains on
+the server.
+
+### Publish a version for functional testing
+
+Open **Actions -> Test Deploy -> Run workflow**, then enter:
+
+```text
+commit_sha   the reviewed full 40-character SHA
+release_name a short lowercase label such as b2-review-lifecycle
+confirmation DEPLOY
+```
+
+The workflow locks the exact revision before running tests. It generates one
+tag for both images, such as
+`test-b2-review-lifecycle-20260906-0a789bb`, and refuses deployment unless the
+target revision's own integration threshold passes with no failures or skips.
+
+After Actions reports success, use the browser to log in as each affected role,
+exercise the changed workflow, and confirm that its WebSocket connects. Health
+checks alone are not functional acceptance.
+
+### Restore the previous version
+
+After browser testing, open **Actions -> Test Rollback -> Run workflow**, enter
+`ROLLBACK`, and run it. The workflow verifies the restored API, Web, PostgreSQL,
+application health endpoint, and API health endpoint. Do not leave a test tag
+running after the test is complete.
+
+Every Test Deploy creates and validates a PostgreSQL custom-format backup before
+changing `APP_IMAGE_TAG`. A failed deployment automatically attempts to restore
+the previous application images. Because migrations are forward-only, a schema
+problem still requires an administrator to validate and restore the recorded
+backup deliberately; the workflow never drops or automatically restores the
+database.

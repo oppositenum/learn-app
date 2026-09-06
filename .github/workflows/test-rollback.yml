@@ -1,0 +1,63 @@
+name: Test Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "输入 ROLLBACK 确认恢复发布前版本"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: learn-app-test-environment
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Restore previous test-server images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: test
+    steps:
+      - name: Require explicit rollback confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: test "${CONFIRMATION}" = "ROLLBACK"
+      - name: Configure restricted deployment key
+        env:
+          DEPLOY_KEY: ${{ secrets.TEST_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.TEST_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "${DEPLOY_KEY}"
+          test -n "${KNOWN_HOSTS}"
+          install -d -m 0700 "${HOME}/.ssh"
+          printf '%s\n' "${DEPLOY_KEY}" >"${HOME}/.ssh/learn-app-test-deploy"
+          printf '%s\n' "${KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
+          chmod 0600 "${HOME}/.ssh/learn-app-test-deploy" "${HOME}/.ssh/known_hosts"
+          ssh-keygen -y -f "${HOME}/.ssh/learn-app-test-deploy" >/dev/null
+      - name: Restore and verify previous release
+        env:
+          DEPLOY_HOST: ${{ vars.TEST_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.TEST_DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          test -n "${DEPLOY_HOST}"
+          test -n "${DEPLOY_USER}"
+          ssh_options=(-i "${HOME}/.ssh/learn-app-test-deploy" -o BatchMode=yes -o ConnectTimeout=15 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15)
+          remote="${DEPLOY_USER}@${DEPLOY_HOST}"
+          ssh "${ssh_options[@]}" "${remote}" "status"
+          rollback_output="$(ssh "${ssh_options[@]}" "${remote}" "rollback")"
+          printf '%s\n' "${rollback_output}"
+          {
+            echo '## 测试服务器已恢复原版本'
+            echo
+            echo '```text'
+            printf '%s\n' "${rollback_output}"
+            echo '```'
+            echo
+            echo '数据库 migration 是 forward-only；本次仅恢复应用镜像，没有回退数据库 schema。'
+          } >>"${GITHUB_STEP_SUMMARY}"
