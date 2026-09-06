@@ -13,7 +13,7 @@ import (
 	aioutputs "github.com/oppositenum/ai-learning-tutor/schemas/ai_outputs"
 )
 
-var ErrAnswerRevealViolation = errors.New("teaching agent revealed an answer without authorization")
+var ErrTutorOutputAuditorUnavailable = errors.New("independent Tutor output auditor is unavailable")
 
 type StructuredClient interface {
 	GenerateStructured(ctx context.Context, request StructuredRequest) (StructuredResult, error)
@@ -21,11 +21,19 @@ type StructuredClient interface {
 
 type CodexProvider struct {
 	client   StructuredClient
+	auditor  TutorOutputAuditor
 	schemas  map[string]*jsonschema.Schema
 	rawFiles fs.FS
 }
 
-func NewCodexProvider(client StructuredClient) (*CodexProvider, error) {
+func NewCodexProvider(client StructuredClient, auditors ...TutorOutputAuditor) (*CodexProvider, error) {
+	if len(auditors) > 1 {
+		return nil, errors.New("only one Tutor output auditor may be configured")
+	}
+	var auditor TutorOutputAuditor
+	if len(auditors) == 1 {
+		auditor = auditors[0]
+	}
 	compiler := jsonschema.NewCompiler()
 	for _, filename := range []string{"analyze_answer.schema.json", "tutor_turn.schema.json"} {
 		contents, err := fs.ReadFile(aioutputs.Files, filename)
@@ -49,7 +57,7 @@ func NewCodexProvider(client StructuredClient) (*CodexProvider, error) {
 		}
 		schemas[filename] = schema
 	}
-	return &CodexProvider{client: client, schemas: schemas, rawFiles: aioutputs.Files}, nil
+	return &CodexProvider{client: client, auditor: auditor, schemas: schemas, rawFiles: aioutputs.Files}, nil
 }
 
 func (provider *CodexProvider) AnalyzeAnswer(ctx context.Context, request AnalyzeAnswerRequest) (AnalyzeAnswerResult, error) {
@@ -79,6 +87,9 @@ func (provider *CodexProvider) GenerateExplanation(ctx context.Context, request 
 const turnStyleInstructions = "Write the message in warm, conversational Chinese for a primary or junior-secondary student. Keep it brief. Plain text only: never use markdown syntax such as headings, asterisks, bullet or dash list markers."
 
 func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose, request GenerateTurnRequest, instructions string) (TutorTurn, error) {
+	if provider.auditor == nil {
+		return TutorTurn{}, ErrTutorOutputAuditorUnavailable
+	}
 	instructions = instructions + " " + turnStyleInstructions
 	requiredAction := string(request.TutorDecision.NextState)
 	if requiredAction != "" {
@@ -88,8 +99,11 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	if err := provider.generate(ctx, purpose, "tutor_turn.schema.json", request, instructions, request.PreviousResponseID, requiredAction, &turn); err != nil {
 		return TutorTurn{}, err
 	}
-	if turn.AnswerRevealed && !request.TutorDecision.AnswerRevealAllowed {
-		return TutorTurn{}, ErrAnswerRevealViolation
+	if err := provider.auditor.AuditTutorOutput(ctx, TutorOutputAuditRequest{
+		StudentID: request.StudentID, SessionID: request.SessionID, Question: request.Question,
+		PrivateAnswer: request.AuditPrivateAnswer, Candidate: turn, GeneratorResponseID: turn.ResponseID,
+	}); err != nil {
+		return TutorTurn{}, err
 	}
 	return turn, nil
 }

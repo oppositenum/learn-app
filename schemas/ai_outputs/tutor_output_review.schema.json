@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["result", "no_answer_leak", "reason_codes"],
+  "properties": {
+    "result": { "enum": ["PASS", "REJECT"] },
+    "no_answer_leak": { "type": "boolean" },
+    "reason_codes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "DIRECT_ANSWER",
+          "EQUIVALENT_ANSWER",
+          "FULL_SOLUTION",
+          "SEGMENT_ANSWER_LEAK",
+          "NONE"
+        ]
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "result": { "const": "PASS" },
+        "no_answer_leak": { "const": true },
+        "reason_codes": { "const": ["NONE"] }
+      }
+    },
+    {
+      "properties": {
+        "result": { "const": "REJECT" },
+        "no_answer_leak": { "const": false },
+        "reason_codes": {
+          "items": {
+            "enum": [
+              "DIRECT_ANSWER",
+              "EQUIVALENT_ANSWER",
+              "FULL_SOLUTION",
+              "SEGMENT_ANSWER_LEAK"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

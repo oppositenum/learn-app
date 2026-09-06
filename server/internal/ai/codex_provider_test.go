@@ -17,6 +17,18 @@ type structuredClientStub struct {
 	request StructuredRequest
 }
 
+type tutorOutputAuditorStub struct {
+	requests []TutorOutputAuditRequest
+	err      error
+}
+
+func (stub *tutorOutputAuditorStub) AuditTutorOutput(_ context.Context, request TutorOutputAuditRequest) error {
+	stub.requests = append(stub.requests, request)
+	return stub.err
+}
+
+func passingTutorOutputAuditor() *tutorOutputAuditorStub { return &tutorOutputAuditorStub{} }
+
 func (stub *structuredClientStub) GenerateStructured(_ context.Context, request StructuredRequest) (StructuredResult, error) {
 	stub.request = request
 	return stub.result, stub.err
@@ -30,7 +42,7 @@ func TestCodexProviderRejectsSchemaViolation(t *testing.T) {
         "segments":[],
         "unexpected":"must fail"
     }`)}}
-	provider, err := NewCodexProvider(client)
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
 	}
@@ -43,14 +55,16 @@ func TestCodexProviderRejectsSchemaViolation(t *testing.T) {
 	}
 }
 
-func TestCodexProviderBlocksUnauthorizedAnswerReveal(t *testing.T) {
+func TestCodexProviderDoesNotTrustAnswerRevealedWhenAuditorRejectsBody(t *testing.T) {
 	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{
         "message":"原题答案是10。",
         "action":"EXPLAIN",
-        "answer_revealed":true,
+		"answer_revealed":false,
         "segments":[]
     }`)}}
-	provider, err := NewCodexProvider(client)
+	auditErr := errors.New("deterministic answer match")
+	auditor := &tutorOutputAuditorStub{err: auditErr}
+	provider, err := NewCodexProvider(client, auditor)
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
 	}
@@ -58,8 +72,24 @@ func TestCodexProviderBlocksUnauthorizedAnswerReveal(t *testing.T) {
 	_, err = provider.GenerateExplanation(context.Background(), ExplainRequest{
 		TutorDecision: tutor.Decision{NextState: tutor.StateExplain, AnswerRevealAllowed: false},
 	})
-	if !errors.Is(err, ErrAnswerRevealViolation) {
-		t.Fatalf("expected ErrAnswerRevealViolation, got %v", err)
+	if !errors.Is(err, auditErr) || len(auditor.requests) != 1 || auditor.requests[0].Candidate.Message != "原题答案是10。" {
+		t.Fatalf("auditor did not reject self-reported-safe answer: err=%v requests=%+v", err, auditor.requests)
+	}
+}
+
+func TestCodexProviderFailsClosedWithoutTutorOutputAuditor(t *testing.T) {
+	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{
+		"message":"先看数量关系。","action":"PROBE","answer_revealed":false,"segments":[]
+	}`)}}
+	provider, err := NewCodexProvider(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateProbe}}); !errors.Is(err, ErrTutorOutputAuditorUnavailable) {
+		t.Fatalf("missing auditor did not fail closed: %v", err)
+	}
+	if client.request.SchemaName != "" {
+		t.Fatal("Tutor provider was called before the missing-auditor failure")
 	}
 }
 
@@ -73,7 +103,7 @@ func TestCodexProviderCarriesResponseContext(t *testing.T) {
             "segments":[]
         }`),
 	}}
-	provider, err := NewCodexProvider(client)
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
 	}
@@ -100,7 +130,7 @@ func TestCodexProviderConstrainsActionEnumToServerDecision(t *testing.T) {
         "answer_revealed":false,
         "segments":[]
     }`)}}
-	provider, err := NewCodexProvider(client)
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
 	}
@@ -128,7 +158,8 @@ func TestCodexProviderSendsOnlyPublicQuestionDataToTutorGeneration(t *testing.T)
         "answer_revealed":false,
         "segments":[]
     }`)}}
-	provider, err := NewCodexProvider(client)
+	auditor := passingTutorOutputAuditor()
+	provider, err := NewCodexProvider(client, auditor)
 	if err != nil {
 		t.Fatalf("new provider: %v", err)
 	}
@@ -138,6 +169,10 @@ func TestCodexProviderSendsOnlyPublicQuestionDataToTutorGeneration(t *testing.T)
 			Prompt:      "公开题面",
 			Scene:       json.RawMessage(`{"kind":"NUMBER_LINE"}`),
 			InputSchema: json.RawMessage(`{"type":"string"}`),
+		},
+		AuditPrivateAnswer: content.QuestionPrivateAnswer{
+			CorrectAnswer: json.RawMessage(`{"value":"private_answer_canary"}`),
+			FullSolution:  "private_full_solution_canary", TeacherReferenceAnswer: "private_teacher_reference_canary",
 		},
 		TutorDecision: tutor.Decision{NextState: tutor.StateProbe},
 	})
@@ -160,5 +195,52 @@ func TestCodexProviderSendsOnlyPublicQuestionDataToTutorGeneration(t *testing.T)
 		if strings.Contains(payload, forbidden) {
 			t.Fatalf("teaching request contains private answer field %q: %s", forbidden, client.request.Input)
 		}
+	}
+	if len(auditor.requests) != 1 || !strings.Contains(string(auditor.requests[0].PrivateAnswer.CorrectAnswer), "private_answer_canary") {
+		t.Fatalf("auditor did not receive private server context: %+v", auditor.requests)
+	}
+}
+
+func TestCodexProviderAuditsEveryStudentVisibleGenerationEntryPoint(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		action tutor.State
+		call   func(*CodexProvider, GenerateTurnRequest) error
+	}{
+		{name: "turn", action: tutor.StateHint, call: func(provider *CodexProvider, request GenerateTurnRequest) error {
+			_, err := provider.GenerateTurn(context.Background(), request)
+			return err
+		}},
+		{name: "analogy", action: tutor.StateAnalogy, call: func(provider *CodexProvider, request GenerateTurnRequest) error {
+			_, err := provider.GenerateAnalogy(context.Background(), AnalogyRequest(request))
+			return err
+		}},
+		{name: "parallel example", action: tutor.StateExplain, call: func(provider *CodexProvider, request GenerateTurnRequest) error {
+			_, err := provider.GenerateParallelExample(context.Background(), ExampleRequest(request))
+			return err
+		}},
+		{name: "explanation", action: tutor.StateVoiceExplain, call: func(provider *CodexProvider, request GenerateTurnRequest) error {
+			_, err := provider.GenerateExplanation(context.Background(), ExplainRequest(request))
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &structuredClientStub{result: StructuredResult{ResponseID: "resp-audited", OutputJSON: json.RawMessage(`{
+				"message":"先找题目条件。","action":"` + string(test.action) + `","answer_revealed":false,
+				"segments":[{"id":"s1","text":"先找条件。"}]
+			}`)}}
+			auditor := passingTutorOutputAuditor()
+			provider, err := NewCodexProvider(client, auditor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := GenerateTurnRequest{StudentID: "student", SessionID: "session", TutorDecision: tutor.Decision{NextState: test.action}}
+			if err := test.call(provider, request); err != nil {
+				t.Fatal(err)
+			}
+			if len(auditor.requests) != 1 || len(auditor.requests[0].Candidate.Segments) != 1 || auditor.requests[0].GeneratorResponseID != "resp-audited" {
+				t.Fatalf("entry point did not cross audit gate: %+v", auditor.requests)
+			}
+		})
 	}
 }
