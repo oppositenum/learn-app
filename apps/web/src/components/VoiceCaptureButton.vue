@@ -3,6 +3,7 @@ import { Mic, Square } from '@lucide/vue'
 import { onBeforeUnmount, ref } from 'vue'
 
 import { transcribeStudentAudio } from '../api/student'
+import { studentInteractionEvent } from '../lib/studentInteraction'
 
 const props = defineProps<{ sessionId: string }>()
 const emit = defineEmits<{ transcript: [value: string] }>()
@@ -26,11 +27,13 @@ async function toggle() {
     startedAt = performance.now()
     recorder.start()
     recording.value = true
+    window.dispatchEvent(new Event(studentInteractionEvent))
   } catch { error.value = '无法使用麦克风' }
 }
 
 async function handleStop() {
   recording.value = false
+  window.dispatchEvent(new Event(studentInteractionEvent))
   stream?.getTracks().forEach((track) => track.stop())
   const duration = Math.max(0.1, (performance.now() - startedAt) / 1000)
   const blob = new Blob(chunks, { type: recorder?.mimeType || 'audio/webm' })

@@ -16,12 +16,12 @@ const activeIndex = computed(() => segments.value.findIndex((segment) => positio
 const durationMS = computed(() => segments.value.at(-1)?.end_ms ?? 0)
 const classroomRoute = computed(() => route.params.id ? `/student/session/${String(route.params.id)}` : '/student')
 
-async function togglePlayback() { if (!player.value || !learning.voiceAudio) return; if (player.value.paused) await player.value.play(); else player.value.pause() }
-function replaySentence() { const segment = segments.value[Math.max(0, activeIndex.value)]; if (!player.value || !segment) return; player.value.currentTime = segment.start_ms / 1000; void player.value.play() }
+async function togglePlayback() { if (learning.status !== 'ACTIVE' || !player.value || !learning.voiceAudio) return; if (player.value.paused) await player.value.play(); else player.value.pause() }
+function replaySentence() { const segment = segments.value[Math.max(0, activeIndex.value)]; if (learning.status !== 'ACTIVE' || !player.value || !segment) return; player.value.currentTime = segment.start_ms / 1000; void player.value.play() }
 function syncPosition() { if (player.value) positionMS.value = Math.round(player.value.currentTime * 1000) }
 function formatTime(milliseconds: number) { const seconds = Math.floor(milliseconds / 1000); return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}` }
 async function returnToQuestion() {
-  if (!learning.sessionID) return
+	if (learning.status !== 'ACTIVE' || !learning.sessionID) return
   await learning.returnFromVoice(learning.sessionID)
   if (!learning.error) await router.push(classroomRoute.value)
 }
@@ -31,8 +31,8 @@ watch(() => route.params.id, async (value) => {
 	if (!sessionID) return
 	const loaded = learning.sessionID === sessionID || await learning.loadSession(sessionID)
 	if (!loaded || String(route.params.id) !== sessionID) return
-	if (document.visibilityState === 'visible' && learning.status === 'PAUSED') await learning.resumeSession()
-	if (String(route.params.id) === sessionID && !learning.error && learning.tutorAction !== 'VOICE_EXPLAIN') await router.replace(`/student/session/${sessionID}`)
+	if (learning.status === 'PAUSED') return
+	if (!learning.error && learning.tutorAction !== 'VOICE_EXPLAIN') await router.replace(`/student/session/${sessionID}`)
 }, { immediate: true })
 </script>
 
@@ -59,6 +59,30 @@ watch(() => route.params.id, async (value) => {
         <ArrowLeft :size="20" />
       </RouterLink>
       <section class="mt-8">
+        <div
+          v-if="learning.status === 'PAUSED'"
+          data-testid="paused-classroom-notice"
+          class="mb-7 border-y border-zinc-300 py-5"
+          role="status"
+          aria-live="polite"
+        >
+          <p class="font-medium">
+            课堂已暂停
+          </p>
+          <p class="mt-1 text-sm text-zinc-600">
+            回到课堂并点击“继续探索”后，才能继续播放讲解。
+          </p>
+          <RouterLink
+            :to="classroomRoute"
+            class="primary-button mt-4"
+          >
+            回到课堂继续探索
+            <ArrowLeft
+              :size="18"
+              aria-hidden="true"
+            />
+          </RouterLink>
+        </div>
         <div class="flex items-center gap-2 text-sm font-semibold text-teal-700">
           <Volume2
             :size="18"
@@ -111,7 +135,7 @@ watch(() => route.params.id, async (value) => {
           <button
             type="button"
             class="primary-button"
-            :disabled="!learning.voiceAudio"
+            :disabled="learning.status !== 'ACTIVE' || !learning.voiceAudio"
             @click="togglePlayback"
           >
             <component
@@ -124,7 +148,7 @@ watch(() => route.params.id, async (value) => {
           <button
             type="button"
             class="secondary-button"
-            :disabled="!learning.voiceAudio"
+            :disabled="learning.status !== 'ACTIVE' || !learning.voiceAudio"
             @click="replaySentence"
           >
             <RotateCcw
@@ -144,7 +168,7 @@ watch(() => route.params.id, async (value) => {
         <button
           type="button"
           class="secondary-button mt-3 w-full"
-          :disabled="learning.loading || !learning.sessionID"
+          :disabled="learning.status !== 'ACTIVE' || learning.loading || !learning.sessionID"
           @click="returnToQuestion"
         >
           我懂了，回原题

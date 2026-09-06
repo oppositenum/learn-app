@@ -34,11 +34,11 @@ function formatDuration(seconds: number) {
 }
 
 async function openSession(sessionID: string) {
-  const loaded = await learning.loadSession(sessionID)
-	if (loaded && String(route.params.id) === sessionID && document.visibilityState === 'visible' && learning.status === 'PAUSED') await learning.resumeSession()
+	await learning.loadSession(sessionID)
 }
 
 async function submit() {
+	if (learning.status !== 'ACTIVE') return
   const accepted = await learning.submitAnswer(String(route.params.id), answer.value)
   if (!accepted) return
   answer.value = ''
@@ -46,6 +46,7 @@ async function submit() {
 }
 
 async function support(type: 'HINT' | 'EXPLAIN') {
+	if (learning.status !== 'ACTIVE') return
   const accepted = await learning.requestSupport(String(route.params.id), type)
   if (accepted && type === 'EXPLAIN') await router.push(`/student/session/${String(route.params.id)}/supply`)
 }
@@ -141,8 +142,8 @@ onBeforeUnmount(() => window.clearInterval(timer))
           >{{ learning.status === 'PAUSED' ? '已暂停' : '' }}</span>
         </div>
         <div class="mt-3 flex items-center justify-center gap-5 text-xs text-zinc-500">
-          <span>本次 <strong class="inline-block min-w-12 font-semibold tabular-nums text-zinc-700">{{ formatDuration(currentSeconds) }}</strong></span>
-          <span>累计 <strong class="inline-block min-w-12 font-semibold tabular-nums text-zinc-700">{{ formatDuration(totalSeconds) }}</strong></span>
+          <span data-testid="segment-timer">本段用时 <strong class="inline-block min-w-12 font-semibold tabular-nums text-zinc-700">{{ formatDuration(currentSeconds) }}</strong></span>
+          <span data-testid="session-timer">本节累计 <strong class="inline-block min-w-12 font-semibold tabular-nums text-zinc-700">{{ formatDuration(totalSeconds) }}</strong></span>
         </div>
         <div
           v-if="learning.socraticRound > 0"
@@ -172,12 +173,10 @@ onBeforeUnmount(() => window.clearInterval(timer))
 
         <div
           v-if="showTutorTurn"
+          data-tutor-turn
           class="mt-6 border-l-2 border-teal-500 pl-4"
         >
-          <p class="text-sm font-semibold text-teal-800">
-            {{ tutorActionLabels[learning.tutorAction] }}
-          </p>
-          <p class="mt-1 whitespace-pre-line leading-7 text-zinc-700">
+          <p class="whitespace-pre-line leading-7 text-zinc-700">
             {{ currentTutorTurn?.text }}
           </p>
         </div>
@@ -189,23 +188,6 @@ onBeforeUnmount(() => window.clearInterval(timer))
         >
           {{ learning.error }}
         </p>
-
-        <div
-          v-if="learning.status === 'PAUSED' && !complete"
-          class="mt-7 border-y border-zinc-200 py-5"
-        >
-          <p class="font-medium">
-            这次探索已暂停
-          </p>
-          <button
-            type="button"
-            class="primary-button mt-3"
-            :disabled="learning.loading"
-            @click="learning.resumeSession()"
-          >
-            <RefreshCw :size="17" />继续探索
-          </button>
-        </div>
 
         <div
           v-if="learning.status === 'ABANDONED'"
@@ -222,72 +204,105 @@ onBeforeUnmount(() => window.clearInterval(timer))
           </RouterLink>
         </div>
 
-        <template v-if="!complete && learning.status === 'ACTIVE'">
-          <form
-            class="sticky bottom-0 mt-8 border-t border-zinc-200 bg-[#f5f5f1] py-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
-            @submit.prevent="submit"
+        <div
+          v-if="!complete && learning.status !== 'ABANDONED'"
+          data-testid="classroom-composer"
+          data-layout-contract="normal-flow"
+          class="classroom-composer mt-8 border-t border-zinc-200 bg-[#f5f5f1] py-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+        >
+          <div
+            v-if="learning.status === 'PAUSED'"
+            class="mb-5 border-b border-zinc-200 pb-5"
+            aria-live="polite"
           >
-            <label
-              for="student-answer"
-              class="text-sm font-semibold"
-            >把你的想法写下来</label>
-            <textarea
-              id="student-answer"
-              v-model="answer"
-              rows="3"
-              class="mt-2 w-full resize-none border border-zinc-300 bg-white p-4 text-base leading-7 outline-none transition-colors focus:border-teal-600 focus:ring-2 focus:ring-teal-100"
-              placeholder="不必只写答案，也可以说说你准备先算什么"
-            />
-            <div class="mt-3 flex items-center justify-between gap-3">
-              <VoiceCaptureButton
-                :session-id="String(route.params.id)"
-                @transcript="answer = $event"
-              />
-              <button
-                type="submit"
-                class="primary-button min-w-0 flex-1"
-                :disabled="!answer.trim() || learning.loading"
-              >
-                <Send
-                  :size="18"
-                  aria-hidden="true"
-                />
-                {{ learning.loading ? '分析中' : '提交想法' }}
-              </button>
-            </div>
-            <p
-              v-if="!answer.trim()"
-              class="mt-2 text-xs text-zinc-500"
-            >
-              先写下你的想法
+            <p class="font-medium">
+              这次探索已暂停
             </p>
-          </form>
-
-          <div class="mt-4 grid grid-cols-2 gap-3">
+            <p class="mt-1 text-sm text-zinc-600">
+              继续后可以接着回答
+            </p>
             <button
               type="button"
-              class="secondary-button"
+              data-testid="resume-session"
+              class="primary-button mt-3"
               :disabled="learning.loading"
-              @click="support('HINT')"
+              @click="learning.resumeSession()"
             >
-              <Lightbulb
-                :size="18"
-                aria-hidden="true"
-              />一点提示
-            </button>
-            <button
-              type="button"
-              class="secondary-button"
-              :disabled="learning.loading"
-              @click="support('EXPLAIN')"
-            >
-              <Volume2
-                :size="18"
-                aria-hidden="true"
-              />我不会
+              <RefreshCw :size="17" />{{ learning.loading ? '正在继续' : '继续探索' }}
             </button>
           </div>
-        </template>
+
+          <form
+            @submit.prevent="submit"
+          >
+            <fieldset
+              data-testid="answer-controls"
+              class="m-0 border-0 p-0 transition-opacity"
+              :class="learning.status === 'PAUSED' ? 'opacity-55' : ''"
+              :disabled="learning.status !== 'ACTIVE' || learning.loading"
+              :aria-disabled="learning.status !== 'ACTIVE' || learning.loading"
+            >
+              <label
+                for="student-answer"
+                class="text-sm font-semibold"
+              >把你的想法写下来</label>
+              <textarea
+                id="student-answer"
+                v-model="answer"
+                rows="3"
+                class="mt-2 w-full resize-none border border-zinc-300 bg-white p-4 text-base leading-7 outline-none transition-colors focus:border-teal-600 focus:ring-2 focus:ring-teal-100"
+                placeholder="不必只写答案，也可以说说你准备先算什么"
+              />
+              <div class="mt-3 flex items-center justify-between gap-3">
+                <VoiceCaptureButton
+                  :session-id="String(route.params.id)"
+                  @transcript="answer = $event"
+                />
+                <button
+                  type="submit"
+                  class="primary-button min-w-0 flex-1"
+                  :disabled="!answer.trim() || learning.loading"
+                >
+                  <Send
+                    :size="18"
+                    aria-hidden="true"
+                  />
+                  {{ learning.loading ? '分析中' : '提交想法' }}
+                </button>
+              </div>
+              <p
+                v-if="!answer.trim()"
+                class="mt-2 text-xs text-zinc-500"
+              >
+                先写下你的想法
+              </p>
+              <div class="mt-4 grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  class="secondary-button"
+                  :disabled="learning.loading"
+                  @click="support('HINT')"
+                >
+                  <Lightbulb
+                    :size="18"
+                    aria-hidden="true"
+                  />一点提示
+                </button>
+                <button
+                  type="button"
+                  class="secondary-button"
+                  :disabled="learning.loading"
+                  @click="support('EXPLAIN')"
+                >
+                  <Volume2
+                    :size="18"
+                    aria-hidden="true"
+                  />我不会
+                </button>
+              </div>
+            </fieldset>
+          </form>
+        </div>
 
         <section
           v-if="complete"

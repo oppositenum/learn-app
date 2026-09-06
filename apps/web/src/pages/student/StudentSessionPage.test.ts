@@ -1,0 +1,197 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
+import { afterEach, expect, test, vi } from 'vitest'
+
+import type { StudentSession } from '../../api/student'
+import { useLearningStore } from '../../stores/learning'
+import StudentSessionPage from './StudentSessionPage.vue'
+
+function session(overrides: Partial<StudentSession> = {}): StudentSession {
+  return {
+    id: 'session-1',
+    version: 1,
+    timing_version: 1,
+    subject_code: 'MATH',
+    subject_name: '数学',
+    knowledge_point: '分数通分',
+    difficulty: 'L1',
+    question_id: 'question-1',
+    prompt: '三分之一和四分之一的小格一样大吗？',
+    scene: {},
+    input_schema: {},
+    started_at: '2026-08-26T12:00:00Z',
+    target_minutes: 20,
+    status: 'PAUSED',
+    active_seconds: 20,
+    current_active_seconds: 0,
+    timing_observed_at: '2026-08-26T12:00:20Z',
+    state: 'EXPLAIN',
+    socratic_round: 2,
+    timeline: [{ sequence: 1, actor: 'TUTOR', action: 'EXPLAIN', message: '先观察句子里的动作。', at: '2026-08-26T12:00:10Z' }],
+    ...overrides,
+  }
+}
+
+function response(body: unknown, status = 200): Response {
+  return { ok: status >= 200 && status < 300, status, json: async () => body } as Response
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((next) => { resolve = next })
+  return { promise, resolve }
+}
+
+async function mountPage(fetch: typeof globalThis.fetch) {
+  setActivePinia(createPinia())
+  vi.stubGlobal('fetch', fetch)
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/student', component: { template: '<div>首页</div>' } },
+      { path: '/student/session/:id', component: StudentSessionPage },
+      { path: '/student/session/:id/supply', component: { template: '<div>补给站</div>' } },
+      { path: '/student/session/:id/voice', component: { template: '<div>语音讲解</div>' } },
+    ],
+  })
+  await router.push('/student/session/session-1')
+  await router.isReady()
+  const wrapper = mount(StudentSessionPage, { global: { plugins: [router] } })
+  await flushPromises()
+  return { learning: useLearningStore(), router, wrapper }
+}
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
+	Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 })
+})
+
+test('keeps paused answer controls in the DOM and waits for an explicit resume', async () => {
+  const requests: string[] = []
+  const { wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    requests.push(String(input))
+    return response(session())
+  }))
+
+  expect(requests).toEqual(['/api/v1/student/sessions/session-1'])
+  expect(requests.some((path) => path.endsWith('/resume'))).toBe(false)
+  expect(wrapper.get('[data-testid="classroom-composer"]').attributes('data-layout-contract')).toBe('normal-flow')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes()).toMatchObject({ disabled: '', 'aria-disabled': 'true' })
+  expect(wrapper.find('#student-answer').exists()).toBe(true)
+  expect(wrapper.get('[data-testid="resume-session"]').attributes('disabled')).toBeUndefined()
+  expect(wrapper.get('[data-testid="resume-session"]').text()).toContain('继续探索')
+  wrapper.unmount()
+})
+
+test('deduplicates an explicit resume and enables answers only after it succeeds', async () => {
+  const resume = deferred<Response>()
+  const requests: string[] = []
+  const { learning, wrapper } = await mountPage(vi.fn((input: string | URL | Request) => {
+    const path = String(input)
+    requests.push(path)
+    if (path.endsWith('/resume')) return resume.promise
+    return Promise.resolve(response(session()))
+  }))
+
+  const button = wrapper.get('[data-testid="resume-session"]')
+  const firstClick = button.trigger('click')
+  const secondClick = button.trigger('click')
+  await Promise.resolve()
+
+  expect(requests.filter((path) => path.endsWith('/resume'))).toHaveLength(1)
+  expect(learning.status).toBe('PAUSED')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBe('')
+	await wrapper.get('form').trigger('submit')
+	expect(requests.some((path) => path.endsWith('/answers'))).toBe(false)
+
+  resume.resolve(response({
+    session_id: 'session-1',
+    version: 1,
+    timing_version: 2,
+    status: 'ACTIVE',
+    active_seconds: 20,
+    current_active_seconds: 0,
+    active_since: '2026-08-26T12:00:21Z',
+    timing_observed_at: '2026-08-26T12:00:21Z',
+  }))
+  await Promise.all([firstClick, secondClick])
+  await flushPromises()
+
+  expect(learning.status).toBe('ACTIVE')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(wrapper.find('[data-testid="resume-session"]').exists()).toBe(false)
+	expect(wrapper.get('#student-answer').attributes('disabled')).toBeUndefined()
+	expect(wrapper.get('[aria-label="使用语音回答"]').attributes('disabled')).toBeUndefined()
+	for (const label of ['一点提示', '我不会']) {
+		const action = wrapper.findAll('button').find((candidate) => candidate.text().includes(label))
+		expect(action?.attributes('disabled')).toBeUndefined()
+	}
+  wrapper.unmount()
+})
+
+test('keeps a readable recovery action after failure and allows retry', async () => {
+  let resumeRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (!path.endsWith('/resume')) return response(session())
+    resumeRequests++
+    if (resumeRequests === 1) return response(null, 500)
+    return response({
+      session_id: 'session-1',
+      version: 1,
+      timing_version: 2,
+      status: 'ACTIVE',
+      active_seconds: 20,
+      current_active_seconds: 0,
+      active_since: '2026-08-26T12:00:21Z',
+      timing_observed_at: '2026-08-26T12:00:21Z',
+    })
+  }))
+
+  await wrapper.get('[data-testid="resume-session"]').trigger('click')
+  await flushPromises()
+
+  expect(learning.status).toBe('PAUSED')
+  expect(wrapper.get('[role="alert"]').text()).toContain('学习数据暂时不可用（500）')
+  expect(wrapper.get('[data-testid="resume-session"]').attributes('disabled')).toBeUndefined()
+
+  await wrapper.get('[data-testid="resume-session"]').trigger('click')
+  await flushPromises()
+
+  expect(resumeRequests).toBe(2)
+  expect(learning.status).toBe('ACTIVE')
+  expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  wrapper.unmount()
+})
+
+test('uses unambiguous timers and renders the Tutor action title once', async () => {
+  const { wrapper } = await mountPage(vi.fn(async () => response(session())))
+
+  expect(wrapper.text()).toContain('本段用时')
+  expect(wrapper.text()).toContain('本节累计')
+  expect(wrapper.get('[data-testid="segment-timer"]').text()).toMatch(/^本段用时\s/)
+  expect(wrapper.get('[data-testid="session-timer"]').text()).toMatch(/^本节累计\s/)
+  expect(wrapper.text().match(/用相似例子讲一遍/g)).toHaveLength(1)
+  wrapper.unmount()
+})
+
+test('keeps a variable-height composer after the Tutor turn in normal document flow', async () => {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 320 })
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 720 })
+  const { wrapper } = await mountPage(vi.fn(async () => response(session())))
+  const tutor = wrapper.get('[data-tutor-turn]')
+  const composer = wrapper.get('[data-testid="classroom-composer"]')
+
+  expect(tutor.element.compareDocumentPosition(composer.element) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+  expect(composer.attributes('data-layout-contract')).toBe('normal-flow')
+  expect(composer.classes()).not.toContain('sticky')
+  expect(composer.classes()).not.toContain('fixed')
+  expect(composer.classes()).not.toContain('absolute')
+  expect(composer.text()).toContain('这次探索已暂停')
+  expect(composer.get('[data-testid="answer-controls"]').attributes('disabled')).toBe('')
+  wrapper.unmount()
+})

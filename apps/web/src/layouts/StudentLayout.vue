@@ -3,6 +3,7 @@ import { Home, Sparkles, UserRound } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { studentInteractionEvent, studentInteractionFreshnessMS } from '../lib/studentInteraction'
 import { roleHome, useAuthSession } from '../stores/auth'
 import { useLearningStore } from '../stores/learning'
 
@@ -11,16 +12,33 @@ const router = useRouter()
 const auth = useAuthSession()
 const learning = useLearningStore()
 const showNavigation = computed(() => !route.meta.hideStudentNav)
-let autoPausedSessionID = ''
+const heartbeatIntervalMS = 30_000
 let stopNavigationGuard: (() => void) | undefined
 let heartbeatTimer = 0
 let backgroundPausePending = false
 let backgroundPauseOperation: Promise<boolean> | null = null
 let hiddenReconciliation = Promise.resolve()
 let visibleReconciliation: Promise<void> | null = null
+let interactionSessionID = ''
+let lastInteractionAt = Number.NEGATIVE_INFINITY
 
 function sameClassroomScope(target: typeof route, source: typeof route) {
   return Boolean(target.meta.classroom && source.meta.classroom && String(target.params.id) === String(source.params.id))
+}
+
+function isDocumentVisible() {
+	return document.visibilityState === 'visible'
+}
+
+function recordStudentInteraction() {
+	if (!route.meta.classroom || !learning.sessionID) return
+	interactionSessionID = learning.sessionID
+	lastInteractionAt = Date.now()
+}
+
+function hasFreshStudentInteraction() {
+	return interactionSessionID === learning.sessionID
+		&& Date.now() - lastInteractionAt <= studentInteractionFreshnessMS
 }
 
 function pauseForBackground() {
@@ -54,30 +72,23 @@ async function syncStudentIdentity() {
 async function reconcileHidden() {
 	if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
 	backgroundPausePending = true
-	autoPausedSessionID = learning.sessionID
 	const paused = await pauseForBackground()
 	backgroundPausePending = !paused
 }
 
 async function reconcileVisible() {
-	if (document.visibilityState !== 'visible') return
+	if (!isDocumentVisible()) return
 	if (backgroundPauseOperation) await backgroundPauseOperation.catch(() => false)
-	if (document.visibilityState !== 'visible') return
+	if (!isDocumentVisible()) return
 	if (!await syncStudentIdentity()) return
-	if (document.visibilityState !== 'visible') return
-	if (route.meta.classroom && learning.sessionID) await learning.refreshSession()
-	if (document.visibilityState !== 'visible') return
-	backgroundPausePending = false
-	if (autoPausedSessionID && autoPausedSessionID === learning.sessionID && route.meta.classroom && learning.status === 'PAUSED') {
-		const resumed = await learning.resumeForVisibility()
-		if (document.visibilityState !== 'visible') {
-			await reconcileHidden()
-			return
-		}
-		if (resumed) autoPausedSessionID = ''
-	} else if (autoPausedSessionID === learning.sessionID && learning.status === 'ACTIVE') {
-		autoPausedSessionID = ''
+	if (!isDocumentVisible()) return
+	if (route.meta.classroom && learning.sessionID) {
+		await learning.waitForPendingResume()
+		if (!isDocumentVisible()) return
+		if (!await learning.refreshSession()) return
 	}
+	if (!isDocumentVisible()) return
+	backgroundPausePending = false
 }
 
 function queueVisibleReconciliation() {
@@ -89,29 +100,37 @@ function queueVisibleReconciliation() {
 	return visibleReconciliation
 }
 
+function queueBackgroundReconciliation() {
+	hiddenReconciliation = hiddenReconciliation.then(() => reconcileHidden(), () => reconcileHidden())
+	return hiddenReconciliation
+}
+
 function handleVisibility() {
-	if (document.visibilityState === 'visible') {
+	if (isDocumentVisible()) {
 		void queueVisibleReconciliation()
 		return
 	}
-	hiddenReconciliation = hiddenReconciliation.then(() => reconcileHidden(), () => reconcileHidden())
+	void queueBackgroundReconciliation()
 }
 
 function handlePageHide() {
 	if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
-  const sessionID = learning.sessionID
-  autoPausedSessionID = sessionID
 	void pauseForBackground().catch(() => undefined)
 }
 
 function handlePageShow(event: PageTransitionEvent) {
-	if (event.persisted && document.visibilityState === 'visible') void queueVisibleReconciliation()
+	if (!event.persisted || !isDocumentVisible()) return
+	void queueVisibleReconciliation()
 }
 
 const stopLearningWatch = watch(
 	() => [learning.sessionID, learning.status, learning.loading, learning.preparing],
 	() => {
-		if (backgroundPausePending || document.visibilityState === 'hidden') handleVisibility()
+		if (!isDocumentVisible()) {
+			void queueBackgroundReconciliation()
+			return
+		}
+		if (backgroundPausePending) void queueVisibleReconciliation()
 	},
 )
 
@@ -119,9 +138,18 @@ onMounted(() => {
   document.addEventListener('visibilitychange', handleVisibility)
   window.addEventListener('pagehide', handlePageHide)
   window.addEventListener('pageshow', handlePageShow)
+  window.addEventListener('keydown', recordStudentInteraction)
+  window.addEventListener('pointerdown', recordStudentInteraction, { passive: true })
+  document.addEventListener('scroll', recordStudentInteraction, { capture: true, passive: true })
+  window.addEventListener(studentInteractionEvent, recordStudentInteraction)
   heartbeatTimer = window.setInterval(() => {
-    if (route.meta.classroom && document.visibilityState === 'visible') void learning.heartbeat()
-  }, 30_000)
+		if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
+		if (isDocumentVisible() && hasFreshStudentInteraction()) {
+			void learning.heartbeat()
+			return
+		}
+		if (!hasFreshStudentInteraction()) void learning.refreshSession()
+  }, heartbeatIntervalMS)
 	stopNavigationGuard = router.beforeEach(async (to, from) => {
 		if (!from.meta.classroom || sameClassroomScope(to as typeof route, from as typeof route)) return true
 		await learning.waitForPendingResume()
@@ -135,6 +163,10 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', handleVisibility)
   window.removeEventListener('pagehide', handlePageHide)
   window.removeEventListener('pageshow', handlePageShow)
+	window.removeEventListener('keydown', recordStudentInteraction)
+	window.removeEventListener('pointerdown', recordStudentInteraction)
+	document.removeEventListener('scroll', recordStudentInteraction, true)
+	window.removeEventListener(studentInteractionEvent, recordStudentInteraction)
 	window.clearInterval(heartbeatTimer)
 	stopNavigationGuard?.()
 	stopLearningWatch()

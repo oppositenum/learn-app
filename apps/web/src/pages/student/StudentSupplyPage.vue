@@ -10,15 +10,18 @@ const route = useRoute()
 const router = useRouter()
 const classroomRoute = computed(() => route.params.id ? `/student/session/${String(route.params.id)}` : '/student')
 const explanation = computed(() => learning.timeline.filter((item) => item.actor === 'TUTOR').at(-1)?.text || '补给内容正在由当前课堂生成。')
-async function anotherExample() { if (learning.sessionID) await learning.requestSupport(learning.sessionID, 'EXPLAIN') }
+async function anotherExample() {
+	if (learning.status !== 'ACTIVE' || !learning.sessionID) return
+	await learning.requestSupport(learning.sessionID, 'EXPLAIN')
+}
 
 watch(() => route.params.id, async (value) => {
   const sessionID = String(value || '')
 	if (!sessionID) return
 	const loaded = learning.sessionID === sessionID || await learning.loadSession(sessionID)
 	if (!loaded || String(route.params.id) !== sessionID) return
-	if (document.visibilityState === 'visible' && learning.status === 'PAUSED') await learning.resumeSession()
-	if (String(route.params.id) === sessionID && !learning.error && learning.tutorAction !== 'EXPLAIN') await router.replace(`/student/session/${sessionID}`)
+	if (learning.status === 'PAUSED') return
+	if (!learning.error && learning.tutorAction !== 'EXPLAIN') await router.replace(`/student/session/${sessionID}`)
 }, { immediate: true })
 </script>
 
@@ -46,6 +49,30 @@ watch(() => route.params.id, async (value) => {
       </RouterLink>
 
       <section class="mt-8">
+        <div
+          v-if="learning.status === 'PAUSED'"
+          data-testid="paused-classroom-notice"
+          class="mb-7 border-y border-zinc-300 py-5"
+          role="status"
+          aria-live="polite"
+        >
+          <p class="font-medium">
+            课堂已暂停
+          </p>
+          <p class="mt-1 text-sm text-zinc-600">
+            回到课堂并点击“继续探索”后，才能继续使用知识补给。
+          </p>
+          <RouterLink
+            :to="classroomRoute"
+            class="primary-button mt-4"
+          >
+            回到课堂继续探索
+            <ArrowRight
+              :size="18"
+              aria-hidden="true"
+            />
+          </RouterLink>
+        </div>
         <p class="text-sm font-semibold text-sky-700">
           知识补给站
         </p>
@@ -63,7 +90,7 @@ watch(() => route.params.id, async (value) => {
         <button
           type="button"
           class="secondary-button mt-5 w-full"
-          :disabled="learning.loading || !learning.sessionID"
+          :disabled="learning.status !== 'ACTIVE' || learning.loading || !learning.sessionID"
           @click="anotherExample"
         >
           <RotateCcw
