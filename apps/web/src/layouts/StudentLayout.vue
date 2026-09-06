@@ -20,8 +20,6 @@ let backgroundPauseOperation: Promise<boolean> | null = null
 let hiddenReconciliation = Promise.resolve()
 let visibleReconciliation: Promise<void> | null = null
 let windowIsBlurred = false
-let pauseOnForegroundReturn = false
-let focusLossObservedByWatchdog = false
 
 function sameClassroomScope(target: typeof route, source: typeof route) {
   return Boolean(target.meta.classroom && source.meta.classroom && String(target.params.id) === String(source.params.id))
@@ -82,13 +80,6 @@ async function reconcileVisible() {
 		if (!await learning.refreshSession()) return
 	}
 	if (!isVisibleForeground()) return
-	if (pauseOnForegroundReturn && learning.status === 'ACTIVE') {
-		backgroundPausePending = true
-		const paused = await pauseForBackground()
-		backgroundPausePending = !paused
-		if (!paused) return
-	}
-	if (pauseOnForegroundReturn && learning.status !== 'ACTIVE') pauseOnForegroundReturn = false
 	backgroundPausePending = false
 }
 
@@ -109,43 +100,32 @@ function queueBackgroundReconciliation() {
 function handleVisibility() {
 	if (document.visibilityState === 'visible' && documentIsFocused()) {
 		windowIsBlurred = false
-		focusLossObservedByWatchdog = false
-		pauseOnForegroundReturn = true
 		void queueVisibleReconciliation()
 		return
 	}
 	windowIsBlurred = true
-	focusLossObservedByWatchdog = true
-	pauseOnForegroundReturn = true
 	void queueBackgroundReconciliation()
 }
 
 function handleWindowBlur() {
 	windowIsBlurred = true
-	pauseOnForegroundReturn = true
 	void queueBackgroundReconciliation()
 }
 
 function handleWindowFocus() {
 	windowIsBlurred = false
-	focusLossObservedByWatchdog = false
-	pauseOnForegroundReturn = true
 	if (route.meta.classroom && document.visibilityState === 'visible') void queueVisibleReconciliation()
 }
 
 function handlePageHide() {
 	if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
 	windowIsBlurred = true
-	focusLossObservedByWatchdog = true
-	pauseOnForegroundReturn = true
 	void pauseForBackground().catch(() => undefined)
 }
 
 function handlePageShow(event: PageTransitionEvent) {
 	if (!event.persisted || document.visibilityState !== 'visible' || !documentIsFocused()) return
 	windowIsBlurred = false
-	focusLossObservedByWatchdog = false
-	pauseOnForegroundReturn = true
 	void queueVisibleReconciliation()
 }
 
@@ -153,16 +133,8 @@ function reconcileDocumentFocus() {
 	if (!route.meta.classroom || !learning.sessionID) return
 	if (document.visibilityState !== 'visible' || !documentIsFocused()) {
 		windowIsBlurred = true
-		focusLossObservedByWatchdog = true
-		pauseOnForegroundReturn = true
 		void queueBackgroundReconciliation()
-		return
 	}
-	if (windowIsBlurred && focusLossObservedByWatchdog) {
-		handleWindowFocus()
-		return
-	}
-	if (pauseOnForegroundReturn || backgroundPausePending) void queueVisibleReconciliation()
 }
 
 const stopLearningWatch = watch(
@@ -172,7 +144,7 @@ const stopLearningWatch = watch(
 			void queueBackgroundReconciliation()
 			return
 		}
-		if (backgroundPausePending || pauseOnForegroundReturn) void queueVisibleReconciliation()
+		if (backgroundPausePending) void queueVisibleReconciliation()
 	},
 )
 
