@@ -105,7 +105,7 @@ const (
 
 type sessionRow struct {
 	studentID, questionID, knowledgePointID, subjectID uuid.UUID
-	planBlockID                                        *uuid.UUID
+	planBlockID, reviewQueueID                         *uuid.UUID
 	state                                              tutor.State
 	fails                                              int
 	answer                                             string
@@ -123,6 +123,7 @@ type sessionRow struct {
 	status                                             string
 	processingToken                                    *uuid.UUID
 	processingUntil                                    *time.Time
+	reviewAttemptFailedAt                              *time.Time
 }
 
 type preparedAgent struct {
@@ -256,6 +257,9 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 		}
 		if !correct {
 			if err := recordMisconception(ctx, tx, row, now, misconceptionCode); err != nil {
+				return err
+			}
+			if err := recordReviewFailure(ctx, tx, row, sessionID, now); err != nil {
 				return err
 			}
 		}
@@ -662,7 +666,7 @@ func (service *Service) operationLeaseValid(token *uuid.UUID, until *time.Time, 
 
 func loadSessionRow(ctx context.Context, tx pgx.Tx, userID, sessionID uuid.UUID) (sessionRow, error) {
 	var row sessionRow
-	err := tx.QueryRow(ctx, `SELECT ls.student_id,ls.current_question_id,q.knowledge_point_id,ls.subject_id,ls.plan_block_id,ls.current_state,ls.socratic_fail_count,a.teacher_reference_answer,a.misconceptions_private_json,ls.version,ls.timing_version,COALESCE(ls.teaching_response_id,''),ls.evidence_form,ls.original_task_id,ls.active_task_id,ls.started_at,ls.accumulated_seconds,ls.last_resumed_at,ls.last_activity_at,ls.assistance_level,ls.status,ls.processing_token,ls.processing_until FROM learning_sessions ls JOIN students st ON st.id=ls.student_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED' JOIN question_private_answers a ON a.question_id=q.id WHERE ls.id=$1 AND st.user_id=$2 FOR UPDATE OF ls`, sessionID, userID).Scan(&row.studentID, &row.questionID, &row.knowledgePointID, &row.subjectID, &row.planBlockID, &row.state, &row.fails, &row.answer, &row.misconceptions, &row.version, &row.timingVersion, &row.responseID, &row.evidenceForm, &row.originalTaskID, &row.activeTaskID, &row.startedAt, &row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.assistanceLevel, &row.status, &row.processingToken, &row.processingUntil)
+	err := tx.QueryRow(ctx, `SELECT ls.student_id,ls.current_question_id,q.knowledge_point_id,ls.subject_id,ls.plan_block_id,ls.review_queue_id,ls.current_state,ls.socratic_fail_count,a.teacher_reference_answer,a.misconceptions_private_json,ls.version,ls.timing_version,COALESCE(ls.teaching_response_id,''),ls.evidence_form,ls.original_task_id,ls.active_task_id,ls.started_at,ls.accumulated_seconds,ls.last_resumed_at,ls.last_activity_at,ls.assistance_level,ls.status,ls.processing_token,ls.processing_until,ls.review_attempt_failed_at FROM learning_sessions ls JOIN students st ON st.id=ls.student_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED' JOIN question_private_answers a ON a.question_id=q.id WHERE ls.id=$1 AND st.user_id=$2 FOR UPDATE OF ls`, sessionID, userID).Scan(&row.studentID, &row.questionID, &row.knowledgePointID, &row.subjectID, &row.planBlockID, &row.reviewQueueID, &row.state, &row.fails, &row.answer, &row.misconceptions, &row.version, &row.timingVersion, &row.responseID, &row.evidenceForm, &row.originalTaskID, &row.activeTaskID, &row.startedAt, &row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.assistanceLevel, &row.status, &row.processingToken, &row.processingUntil, &row.reviewAttemptFailedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return row, ErrSessionNotFound
 	}
@@ -811,16 +815,14 @@ func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow,
 	}
 	independent := row.assistanceLevel == 0
 	skill = mastery.NewEngine().Apply(skill, mastery.Evidence{Correct: true, Independent: independent, Form: row.evidenceForm, At: now})
-	if row.evidenceForm == mastery.FormReview && independent {
-		if _, err := tx.Exec(ctx, `UPDATE review_queue SET status='COMPLETED' WHERE student_id=$1 AND knowledge_point_id=$2 AND status='PENDING' AND due_at<=$3`, row.studentID, row.knowledgePointID, now); err != nil {
-			return SubmitResult{}, nil, err
-		}
+	if err := resolveSuccessfulReview(ctx, tx, row, skill, independent, now); err != nil {
+		return SubmitResult{}, nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE student_misconceptions SET successful_corrections=successful_corrections+1,status='MONITORING',last_seen_at=$3 WHERE student_id=$1 AND knowledge_point_id=$2 AND status='ACTIVE'`, row.studentID, row.knowledgePointID, now); err != nil {
 		return SubmitResult{}, nil, err
 	}
 	score := mastery.NewEngine().Score(skill)
-	if _, err := tx.Exec(ctx, `INSERT INTO student_skill_states (student_id,knowledge_point_id,state,score_internal,independent_successes,assisted_successes,life_context_successes,variant_successes,textbook_successes,review_successes,consecutive_review_failures,next_review_at,last_seen_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (student_id,knowledge_point_id) DO UPDATE SET state=EXCLUDED.state,score_internal=EXCLUDED.score_internal,independent_successes=EXCLUDED.independent_successes,assisted_successes=EXCLUDED.assisted_successes,life_context_successes=EXCLUDED.life_context_successes,variant_successes=EXCLUDED.variant_successes,textbook_successes=EXCLUDED.textbook_successes,review_successes=EXCLUDED.review_successes,consecutive_review_failures=EXCLUDED.consecutive_review_failures,next_review_at=EXCLUDED.next_review_at,last_seen_at=EXCLUDED.last_seen_at,version=student_skill_states.version+1`, row.studentID, row.knowledgePointID, skill.State, score, skill.IndependentSuccesses, skill.AssistedSuccesses, skill.LifeContextSuccesses, skill.VariantSuccesses, skill.TextbookSuccesses, skill.ReviewSuccesses, skill.ConsecutiveReviewFailures, skill.NextReviewAt, now); err != nil {
+	if err := saveSkill(ctx, tx, row.studentID, row.knowledgePointID, skill, score, now); err != nil {
 		return SubmitResult{}, nil, err
 	}
 	rewardType, rewardSource := reward.Effort, sessionID.String()

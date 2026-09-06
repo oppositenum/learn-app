@@ -84,13 +84,13 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 		var minutes int
 		var mode, blockStatus string
 		var subjectCode, knowledgePointName, prompt string
-		var originalTaskID *uuid.UUID
+		var originalTaskID, reviewQueueID *uuid.UUID
 		if err := tx.QueryRow(request.Context(), `SELECT id FROM students WHERE user_id=$1 FOR NO KEY UPDATE`, userID).Scan(&studentID); err != nil {
 			return err
 		}
 		now := handler.now()
 		err := tx.QueryRow(request.Context(), `
-		SELECT p.student_id,b.subject_id,b.knowledge_point_id,b.minutes,b.mode,b.status,b.original_task_id,q.id,s.code,kp.name,q.prompt_public
+			SELECT p.student_id,b.subject_id,b.knowledge_point_id,b.minutes,b.mode,b.status,b.original_task_id,b.review_queue_id,q.id,s.code,kp.name,q.prompt_public
 	FROM learning_plan_blocks b JOIN learning_plans p ON p.id=b.plan_id
 	JOIN students st ON st.id=p.student_id
 	JOIN subjects s ON s.id=b.subject_id
@@ -100,7 +100,7 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 		WHERE b.id=$1 AND st.user_id=$2 AND p.plan_date=$3::date AND p.status IN('PROPOSED','ACTIVE')
 		  AND grade_band.min_grade<=st.grade_level
 		  AND (b.mode<>'CURRENT_GRADE' OR st.grade_level<=grade_band.max_grade)
-				ORDER BY q.difficulty,q.id LIMIT 1 FOR UPDATE OF p`, body.PlanBlockID, userID, learningDate(now)).Scan(&studentID, &subjectID, &knowledgePointID, &minutes, &mode, &blockStatus, &originalTaskID, &questionID, &subjectCode, &knowledgePointName, &prompt)
+				ORDER BY q.difficulty,q.id LIMIT 1 FOR UPDATE OF p,b`, body.PlanBlockID, userID, learningDate(now)).Scan(&studentID, &subjectID, &knowledgePointID, &minutes, &mode, &blockStatus, &originalTaskID, &reviewQueueID, &questionID, &subjectCode, &knowledgePointName, &prompt)
 		if err != nil {
 			return err
 		}
@@ -116,6 +116,19 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 		if blockStatus != "AVAILABLE" {
 			return ErrAnotherSessionOpen
 		}
+		if mode == "REVIEW" {
+			if reviewQueueID == nil {
+				return pgx.ErrNoRows
+			}
+			var lockedQueueID uuid.UUID
+			if err := tx.QueryRow(request.Context(), `
+SELECT id FROM review_queue
+WHERE id=$1 AND student_id=$2 AND knowledge_point_id=$3
+  AND status='PENDING' AND due_at<=$4
+FOR UPDATE`, *reviewQueueID, studentID, knowledgePointID, now).Scan(&lockedQueueID); err != nil {
+				return err
+			}
+		}
 		sessionID = uuid.New()
 		evidenceForm := "LIFE"
 		switch mode {
@@ -126,7 +139,7 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 		case "MICRO_BACKTRACK":
 			evidenceForm = "TEXTBOOK"
 		}
-		if _, err := tx.Exec(request.Context(), `INSERT INTO learning_sessions(id,student_id,plan_block_id,subject_id,current_question_id,started_at,status,target_minutes,current_state,original_task_id,active_task_id,evidence_form,last_resumed_at,last_activity_at)VALUES($1,$2,$3,$4,$5,$10,'ACTIVE',$6,'ASK',$7,$8,$9,$10,$10)`, sessionID, studentID, body.PlanBlockID, subjectID, questionID, minutes, originalTaskID, knowledgePointID, evidenceForm, now); err != nil {
+		if _, err := tx.Exec(request.Context(), `INSERT INTO learning_sessions(id,student_id,plan_block_id,review_queue_id,subject_id,current_question_id,started_at,status,target_minutes,current_state,original_task_id,active_task_id,evidence_form,last_resumed_at,last_activity_at)VALUES($1,$2,$3,$4,$5,$6,$11,'ACTIVE',$7,'ASK',$8,$9,$10,$11,$11)`, sessionID, studentID, body.PlanBlockID, reviewQueueID, subjectID, questionID, minutes, originalTaskID, knowledgePointID, evidenceForm, now); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(request.Context(), `UPDATE learning_plan_blocks SET status='ACTIVE' WHERE id=$1`, body.PlanBlockID); err != nil {
