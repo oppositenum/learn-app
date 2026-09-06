@@ -186,7 +186,7 @@ test server without installing Docker locally. The two manual GitHub Actions
 workflows are deliberately separate:
 
 The maintainer-facing Chinese instructions are in
-[`测试环境一键发布.md`](%E6%B5%8B%E8%AF%95%E7%8E%AF%E5%A2%83%E4%B8%80%E9%94%AE%E5%8F%91%E5%B8%83.md).
+[`一键发布.md`](%E4%B8%80%E9%94%AE%E5%8F%91%E5%B8%83.md).
 
 - **Test Deploy** reruns all Go, PostgreSQL, and Web gates for an exact 40-character
   commit SHA, builds both `linux/amd64` images, backs up PostgreSQL, and starts

@@ -61,6 +61,9 @@ The full deployment, first-Owner provisioning, price-catalog gate, backup,
 update, and rollback procedure is documented in
 [`docs/deployment/docker.md`](docs/deployment/docker.md).
 
+For routine pre-merge releases to the test server, follow the maintainer-facing
+Chinese guide [`docs/deployment/一键发布.md`](docs/deployment/%E4%B8%80%E9%94%AE%E5%8F%91%E5%B8%83.md).
+
 Provision local or deployment accounts explicitly after migration. Passwords are read only from `PROVISION_PASSWORD` and are never accepted as command-line arguments:
 
 ```sh
