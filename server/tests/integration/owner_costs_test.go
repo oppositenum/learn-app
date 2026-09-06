@@ -73,7 +73,10 @@ VALUES
 
 	service := classroom.NewService(pool, nil, nil, nil)
 	router := api.NewRouter(api.Dependencies{Authenticate: auth.NewSessionAuthenticator(pool).Middleware, Classroom: classroom.NewHandler(service, pool, parent.NewRepository(pool))})
-	today := time.Now().Format("2006-01-02")
+	var today string
+	if err := pool.QueryRow(ctx, `SELECT current_date::text`).Scan(&today); err != nil {
+		t.Fatal(err)
+	}
 	filters := []struct {
 		name, query  string
 		wantRequests int64
