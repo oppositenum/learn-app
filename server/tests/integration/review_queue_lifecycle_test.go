@@ -46,7 +46,7 @@ WHERE session.id=$1`, fixture.sessionID).Scan(&studentUserID, &subjectID, &knowl
 		if _, err := tx.Exec(ctx, `
 INSERT INTO review_queue(id,student_id,knowledge_point_id,source,due_at,priority)
 VALUES($1,$2,$3,'MASTERY',$5::timestamptz-interval '1 hour',50),
-      ($4,$2,$3,'MISCONCEPTION',$5::timestamptz+interval '72 hours',80)`, queueID, fixture.studentID, knowledgePointID, otherQueueID, now); err != nil {
+      ($4,$2,$3,'PARENT_PRIORITY',$5::timestamptz+interval '72 hours',70)`, queueID, fixture.studentID, knowledgePointID, otherQueueID, now); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -120,11 +120,12 @@ func TestB2ReviewQueueAssistedThenIndependentLifecycle(t *testing.T) {
 	}
 	var otherStatus string
 	var otherAttempts int
-	if err := pool.QueryRow(ctx, `SELECT status,attempts FROM review_queue WHERE id=$1`, fixture.otherQueueID).Scan(&otherStatus, &otherAttempts); err != nil {
+	var otherDue time.Time
+	if err := pool.QueryRow(ctx, `SELECT status,attempts,due_at FROM review_queue WHERE id=$1`, fixture.otherQueueID).Scan(&otherStatus, &otherAttempts, &otherDue); err != nil {
 		t.Fatal(err)
 	}
-	if otherStatus != "PENDING" || otherAttempts != 0 {
-		t.Fatalf("unbound same-knowledge queue changed: %s/%d", otherStatus, otherAttempts)
+	if otherStatus != "PENDING" || otherAttempts != 0 || !otherDue.Equal(fixture.now.Add(72*time.Hour)) {
+		t.Fatalf("unbound same-knowledge queue changed: %s/%d due=%s", otherStatus, otherAttempts, otherDue)
 	}
 
 	var nextQueueID uuid.UUID
@@ -164,8 +165,8 @@ func TestB2ReviewQueueAssistedThenIndependentLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var reviewBlockID uuid.UUID
-	if err := pool.QueryRow(ctx, `SELECT id FROM learning_plan_blocks WHERE plan_id=$1 AND knowledge_point_id=$2 AND mode='REVIEW' AND review_queue_id=$3`, afterPlan.ID, fixture.knowledgePointID, nextQueueID).Scan(&reviewBlockID); err != nil {
+	var reviewBlockID, plannedQueueID uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT id,review_queue_id FROM learning_plan_blocks WHERE plan_id=$1 AND knowledge_point_id=$2 AND mode='REVIEW'`, afterPlan.ID, fixture.knowledgePointID).Scan(&reviewBlockID, &plannedQueueID); err != nil {
 		t.Fatalf("due queue was not bound into the plan: %v", err)
 	}
 
@@ -180,7 +181,7 @@ func TestB2ReviewQueueAssistedThenIndependentLifecycle(t *testing.T) {
 		_, err := tx.Exec(ctx, `
 INSERT INTO learning_sessions(id,student_id,plan_block_id,review_queue_id,subject_id,current_question_id,status,target_minutes,current_state,evidence_form,started_at,last_resumed_at,last_activity_at)
 VALUES($1,$2,$3,$4,$5,$6,'ACTIVE',20,'ASK','REVIEW',$7,$7,$7)`,
-			secondSessionID, fixture.studentID, reviewBlockID, nextQueueID, fixture.subjectID, fixture.releasedQuestionID, wantNext)
+			secondSessionID, fixture.studentID, reviewBlockID, plannedQueueID, fixture.subjectID, fixture.releasedQuestionID, wantNext)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -193,7 +194,7 @@ VALUES($1,$2,$3,$4,$5,$6,'ACTIVE',20,'ASK','REVIEW',$7,$7,$7)`,
 	if result.MasteryState != mastery.Mastered {
 		t.Fatalf("independent review state=%s", result.MasteryState)
 	}
-	if err := pool.QueryRow(ctx, `SELECT result,attempts FROM review_queue WHERE id=$1`, nextQueueID).Scan(&reviewResult, &attempts); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT result,attempts FROM review_queue WHERE id=$1`, plannedQueueID).Scan(&reviewResult, &attempts); err != nil {
 		t.Fatal(err)
 	}
 	if reviewResult != "INDEPENDENT_SUCCESS" || attempts != 1 {

@@ -2,6 +2,7 @@ package classroom
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -256,7 +257,7 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 			eventSequence++
 		}
 		if !correct {
-			if err := recordMisconception(ctx, tx, row, now, misconceptionCode); err != nil {
+			if err := recordMisconceptions(ctx, tx, row, sessionID, now, misconceptionCodes(analysisMisconceptions)); err != nil {
 				return err
 			}
 			if err := recordReviewFailure(ctx, tx, row, sessionID, now); err != nil {
@@ -1041,32 +1042,79 @@ func misconceptionPayload(correct bool, values json.RawMessage) json.RawMessage 
 	return values
 }
 func firstMisconception(values json.RawMessage) string {
-	var codes []string
-	if json.Unmarshal(values, &codes) == nil && len(codes) > 0 && codes[0] != "" {
+	codes := misconceptionCodes(values)
+	if len(codes) > 0 {
 		return codes[0]
 	}
 	return "REASONING_GAP"
 }
-func recordMisconception(ctx context.Context, tx pgx.Tx, row sessionRow, now time.Time, code string) error {
-	var id uuid.UUID
-	err := tx.QueryRow(ctx, `SELECT id FROM misconceptions WHERE code=$1`, code).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
+
+func misconceptionCodes(values json.RawMessage) []string {
+	var reported []string
+	if json.Unmarshal(values, &reported) != nil {
 		return nil
 	}
-	if err != nil {
-		return err
+	seen := make(map[string]struct{}, len(reported))
+	codes := make([]string, 0, len(reported))
+	for _, code := range reported {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			continue
+		}
+		if _, exists := seen[code]; exists {
+			continue
+		}
+		seen[code] = struct{}{}
+		codes = append(codes, code)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO student_misconceptions(student_id,knowledge_point_id,misconception_id,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$4) ON CONFLICT(student_id,knowledge_point_id,misconception_id) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at,occurrences=student_misconceptions.occurrences+1,status='ACTIVE'`, row.studentID, row.knowledgePointID, id, now); err != nil {
-		return err
+	return codes
+}
+
+func recordMisconceptions(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID uuid.UUID, now time.Time, codes []string) error {
+	recorded := false
+	for _, code := range codes {
+		var id uuid.UUID
+		var allowed bool
+		err := tx.QueryRow(ctx, `
+SELECT misconception.id,link.knowledge_point_id IS NOT NULL
+FROM misconceptions misconception
+LEFT JOIN knowledge_misconception_links link
+  ON link.misconception_id=misconception.id AND link.knowledge_point_id=$2
+WHERE misconception.code=$1`, code, row.knowledgePointID).Scan(&id, &allowed)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if err := recordMisconceptionQualityEvent(ctx, tx, row, sessionID, now, code, nil, "UNKNOWN_CODE"); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			if err := recordMisconceptionQualityEvent(ctx, tx, row, sessionID, now, code, &id, "CROSS_KNOWLEDGE_POINT"); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO student_misconceptions(student_id,knowledge_point_id,misconception_id,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$4) ON CONFLICT(student_id,knowledge_point_id,misconception_id) DO UPDATE SET last_seen_at=EXCLUDED.last_seen_at,occurrences=student_misconceptions.occurrences+1,status='ACTIVE'`, row.studentID, row.knowledgePointID, id, now); err != nil {
+			return err
+		}
+		recorded = true
 	}
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM review_queue WHERE student_id=$1 AND knowledge_point_id=$2 AND source='MISCONCEPTION' AND status='PENDING')`, row.studentID, row.knowledgePointID).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
+	if !recorded {
 		return nil
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO review_queue(id,student_id,knowledge_point_id,source,due_at,priority) VALUES($1,$2,$3,'MISCONCEPTION',$4,80)`, uuid.New(), row.studentID, row.knowledgePointID, now.Add(24*time.Hour))
+	_, err := tx.Exec(ctx, `
+INSERT INTO review_queue(id,student_id,knowledge_point_id,source,due_at,priority)
+VALUES($1,$2,$3,'MISCONCEPTION',$4,80)
+ON CONFLICT(student_id,knowledge_point_id,source) WHERE status='PENDING'
+DO UPDATE SET due_at=LEAST(review_queue.due_at,EXCLUDED.due_at),priority=GREATEST(review_queue.priority,EXCLUDED.priority)`, uuid.New(), row.studentID, row.knowledgePointID, now.Add(24*time.Hour))
+	return err
+}
+
+func recordMisconceptionQualityEvent(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID uuid.UUID, now time.Time, code string, recognizedID *uuid.UUID, reason string) error {
+	hash := sha256.Sum256([]byte(code))
+	_, err := tx.Exec(ctx, `INSERT INTO misconception_quality_events(id,student_id,session_id,knowledge_point_id,code_hash,recognized_misconception_id,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, uuid.New(), row.studentID, sessionID, row.knowledgePointID, fmt.Sprintf("%x", hash), recognizedID, reason, now)
 	return err
 }
 func tutorMessage(state tutor.State) string {
