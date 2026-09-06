@@ -143,7 +143,12 @@ onMounted(() => {
   document.addEventListener('scroll', recordStudentInteraction, { capture: true, passive: true })
   window.addEventListener(studentInteractionEvent, recordStudentInteraction)
   heartbeatTimer = window.setInterval(() => {
-		if (route.meta.classroom && isDocumentVisible() && hasFreshStudentInteraction()) void learning.heartbeat()
+		if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
+		if (isDocumentVisible() && hasFreshStudentInteraction()) {
+			void learning.heartbeat()
+			return
+		}
+		if (!hasFreshStudentInteraction()) void learning.refreshSession()
   }, heartbeatIntervalMS)
 	stopNavigationGuard = router.beforeEach(async (to, from) => {
 		if (!from.meta.classroom || sameClassroomScope(to as typeof route, from as typeof route)) return true

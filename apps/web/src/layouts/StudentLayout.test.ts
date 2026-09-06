@@ -292,7 +292,7 @@ test('does not send heartbeat before an explicit resume', async () => {
 	vi.useRealTimers()
 })
 
-test('sends heartbeats only while interaction is fresh and restarts after later interaction', async () => {
+test('routes fresh interaction to heartbeat and stale intervals to read-only refresh', async () => {
 	vi.useFakeTimers()
 	vi.setSystemTime(new Date('2026-08-26T12:00:00Z'))
 	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
@@ -310,6 +310,15 @@ test('sends heartbeats only while interaction is fresh and restarts after later 
 			active_since: '2026-08-26T12:00:00Z',
 			timing_observed_at: '2026-08-26T12:00:20Z',
 		})
+		if (path.endsWith('/sessions/session-1')) return jsonResponse(session({
+			version: 2,
+			timing_version: 3,
+			status: 'ACTIVE',
+			active_seconds: 20,
+			current_active_seconds: 10,
+			active_since: '2026-08-26T12:00:00Z',
+			timing_observed_at: '2026-08-26T12:01:00Z',
+		}))
 		throw new Error(`unexpected request: ${path}`)
 	}))
 	const { wrapper } = await classroomHarness()
@@ -320,12 +329,61 @@ test('sends heartbeats only while interaction is fresh and restarts after later 
 
 	await vi.advanceTimersByTimeAsync(studentInteractionFreshnessMS - 30_000 + 1)
 	await vi.advanceTimersByTimeAsync(30_000)
-	expect(requests).toHaveLength(1)
+	expect(requests).toEqual([
+		'/api/v1/student/sessions/session-1/heartbeat',
+		'/api/v1/student/sessions/session-1',
+	])
+	expect(requests.filter((path) => path.endsWith('/heartbeat'))).toHaveLength(1)
+	expect(requests.some((path) => path.endsWith('/pause'))).toBe(false)
+	expect(requests.some((path) => path.endsWith('/resume'))).toBe(false)
 
 	window.dispatchEvent(new Event('pointerdown'))
 	await vi.advanceTimersByTimeAsync(30_000)
-	expect(requests).toHaveLength(2)
-	expect(requests.every((path) => path.endsWith('/heartbeat'))).toBe(true)
+	expect(requests).toEqual([
+		'/api/v1/student/sessions/session-1/heartbeat',
+		'/api/v1/student/sessions/session-1',
+		'/api/v1/student/sessions/session-1/heartbeat',
+	])
+	wrapper.unmount()
+})
+
+test('applies authoritative paused timing from idle refresh and stops polling', async () => {
+	vi.useFakeTimers()
+	vi.setSystemTime(new Date('2026-08-26T12:00:00Z'))
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/sessions/session-1')) return jsonResponse(session({
+			version: 2,
+			timing_version: 2,
+			status: 'PAUSED',
+			active_seconds: 4143,
+			current_active_seconds: 0,
+			active_since: undefined,
+			timing_observed_at: '2026-08-26T12:02:30Z',
+		}))
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const { learning, wrapper } = await classroomHarness()
+	learning.applySession(session({
+		active_seconds: 4122,
+		current_active_seconds: 152,
+	}))
+
+	await vi.advanceTimersByTimeAsync(30_000)
+
+	expect(requests).toEqual(['/api/v1/student/sessions/session-1'])
+	expect(requests.some((path) => path.endsWith('/heartbeat'))).toBe(false)
+	expect(requests.some((path) => path.endsWith('/pause'))).toBe(false)
+	expect(requests.some((path) => path.endsWith('/resume'))).toBe(false)
+	expect(learning.status).toBe('PAUSED')
+	expect(learning.activeSeconds).toBe(4143)
+	expect(learning.currentActiveSeconds).toBe(0)
+
+	await vi.advanceTimersByTimeAsync(90_000)
+	expect(requests).toEqual(['/api/v1/student/sessions/session-1'])
 	wrapper.unmount()
 })
 
