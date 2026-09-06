@@ -11,7 +11,6 @@ const router = useRouter()
 const auth = useAuthSession()
 const learning = useLearningStore()
 const showNavigation = computed(() => !route.meta.hideStudentNav)
-let autoPausedSessionID = ''
 let stopNavigationGuard: (() => void) | undefined
 let heartbeatTimer = 0
 let backgroundPausePending = false
@@ -54,7 +53,6 @@ async function syncStudentIdentity() {
 async function reconcileHidden() {
 	if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
 	backgroundPausePending = true
-	autoPausedSessionID = learning.sessionID
 	const paused = await pauseForBackground()
 	backgroundPausePending = !paused
 }
@@ -68,16 +66,6 @@ async function reconcileVisible() {
 	if (route.meta.classroom && learning.sessionID) await learning.refreshSession()
 	if (document.visibilityState !== 'visible') return
 	backgroundPausePending = false
-	if (autoPausedSessionID && autoPausedSessionID === learning.sessionID && route.meta.classroom && learning.status === 'PAUSED') {
-		const resumed = await learning.resumeForVisibility()
-		if (document.visibilityState !== 'visible') {
-			await reconcileHidden()
-			return
-		}
-		if (resumed) autoPausedSessionID = ''
-	} else if (autoPausedSessionID === learning.sessionID && learning.status === 'ACTIVE') {
-		autoPausedSessionID = ''
-	}
 }
 
 function queueVisibleReconciliation() {
@@ -99,8 +87,6 @@ function handleVisibility() {
 
 function handlePageHide() {
 	if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
-  const sessionID = learning.sessionID
-  autoPausedSessionID = sessionID
 	void pauseForBackground().catch(() => undefined)
 }
 

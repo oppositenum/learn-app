@@ -330,29 +330,6 @@ export const useLearningStore = defineStore('learning', {
 				return false
 			}
 			},
-		resumeForVisibility() {
-			if (pendingResumeOperation) return pendingResumeOperation
-			if (!this.sessionID || this.status !== 'PAUSED') return Promise.resolve(this.status === 'ACTIVE')
-			const sessionID = this.sessionID
-			const sequence = ++this.timingSequence
-			const operation = (async () => {
-				try {
-          const timing = await resumeStudentSession(sessionID)
-          if (sequence !== this.timingSequence || sessionID !== this.sessionID) return false
-					const applied = this.applyTiming(timing)
-					if (timing.version > this.snapshotVersion) await this.refreshSession(sessionID)
-					return applied || timing.status === 'ACTIVE'
-				} catch (error) {
-					if (error instanceof ApiError && (error.status === 404 || error.status === 409)) await this.refreshSession(sessionID)
-					return false
-				}
-			})()
-			pendingResumeOperation = operation
-			void operation.finally(() => {
-				if (pendingResumeOperation === operation) pendingResumeOperation = null
-			})
-			return operation
-		},
 		waitForPendingResume() {
 			return pendingResumeOperation ?? Promise.resolve(false)
 		},
