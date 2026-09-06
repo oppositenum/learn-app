@@ -17,6 +17,7 @@ let backgroundPausePending = false
 let backgroundPauseOperation: Promise<boolean> | null = null
 let hiddenReconciliation = Promise.resolve()
 let visibleReconciliation: Promise<void> | null = null
+let windowIsBlurred = false
 
 function sameClassroomScope(target: typeof route, source: typeof route) {
   return Boolean(target.meta.classroom && source.meta.classroom && String(target.params.id) === String(source.params.id))
@@ -58,13 +59,13 @@ async function reconcileHidden() {
 }
 
 async function reconcileVisible() {
-	if (document.visibilityState !== 'visible') return
+	if (document.visibilityState !== 'visible' || windowIsBlurred) return
 	if (backgroundPauseOperation) await backgroundPauseOperation.catch(() => false)
-	if (document.visibilityState !== 'visible') return
+	if (document.visibilityState !== 'visible' || windowIsBlurred) return
 	if (!await syncStudentIdentity()) return
-	if (document.visibilityState !== 'visible') return
+	if (document.visibilityState !== 'visible' || windowIsBlurred) return
 	if (route.meta.classroom && learning.sessionID) await learning.refreshSession()
-	if (document.visibilityState !== 'visible') return
+	if (document.visibilityState !== 'visible' || windowIsBlurred) return
 	backgroundPausePending = false
 }
 
@@ -77,12 +78,27 @@ function queueVisibleReconciliation() {
 	return visibleReconciliation
 }
 
+function queueBackgroundReconciliation() {
+	hiddenReconciliation = hiddenReconciliation.then(() => reconcileHidden(), () => reconcileHidden())
+	return hiddenReconciliation
+}
+
 function handleVisibility() {
-	if (document.visibilityState === 'visible') {
+	if (document.visibilityState === 'visible' && !windowIsBlurred) {
 		void queueVisibleReconciliation()
 		return
 	}
-	hiddenReconciliation = hiddenReconciliation.then(() => reconcileHidden(), () => reconcileHidden())
+	void queueBackgroundReconciliation()
+}
+
+function handleWindowBlur() {
+	windowIsBlurred = true
+	void queueBackgroundReconciliation()
+}
+
+function handleWindowFocus() {
+	windowIsBlurred = false
+	if (route.meta.classroom && document.visibilityState === 'visible') void queueVisibleReconciliation()
 }
 
 function handlePageHide() {
@@ -103,10 +119,12 @@ const stopLearningWatch = watch(
 
 onMounted(() => {
   document.addEventListener('visibilitychange', handleVisibility)
+  window.addEventListener('blur', handleWindowBlur)
+  window.addEventListener('focus', handleWindowFocus)
   window.addEventListener('pagehide', handlePageHide)
   window.addEventListener('pageshow', handlePageShow)
   heartbeatTimer = window.setInterval(() => {
-    if (route.meta.classroom && document.visibilityState === 'visible') void learning.heartbeat()
+    if (route.meta.classroom && document.visibilityState === 'visible' && !windowIsBlurred) void learning.heartbeat()
   }, 30_000)
 	stopNavigationGuard = router.beforeEach(async (to, from) => {
 		if (!from.meta.classroom || sameClassroomScope(to as typeof route, from as typeof route)) return true
@@ -119,6 +137,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', handleVisibility)
+  window.removeEventListener('blur', handleWindowBlur)
+  window.removeEventListener('focus', handleWindowFocus)
   window.removeEventListener('pagehide', handlePageHide)
   window.removeEventListener('pageshow', handlePageShow)
 	window.clearInterval(heartbeatTimer)
