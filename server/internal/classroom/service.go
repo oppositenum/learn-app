@@ -1090,7 +1090,7 @@ func tutorMessage(state tutor.State) string {
 
 func assistanceForState(state tutor.State) int {
 	switch state {
-	case tutor.StateProbe, tutor.StateHint, tutor.StateBreak:
+	case tutor.StateProbe, tutor.StateHint:
 		return 1
 	case tutor.StateScaffold:
 		return 2
