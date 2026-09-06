@@ -1,8 +1,9 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, ref } from 'vue'
 
-import VoiceCaptureButton from './VoiceCaptureButton.vue'
 import { transcribeStudentAudio } from '../api/student'
+import { studentInteractionEvent } from '../lib/studentInteraction'
+import VoiceCaptureButton from './VoiceCaptureButton.vue'
 
 vi.mock('../api/student', () => ({ transcribeStudentAudio: vi.fn(async () => '我先减去配送费') }))
 
@@ -22,6 +23,8 @@ class FakeMediaRecorder extends EventTarget {
 describe('VoiceCaptureButton', () => {
 	it('places the transcript in editable text without submitting', async () => {
 		const stop = vi.fn()
+		const interactions = vi.fn()
+		window.addEventListener(studentInteractionEvent, interactions)
 		Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop }] })) } })
 		vi.stubGlobal('MediaRecorder', FakeMediaRecorder)
 		const wrapper = mount(defineComponent({
@@ -37,5 +40,7 @@ describe('VoiceCaptureButton', () => {
 		expect((wrapper.vm as unknown as { submits: number }).submits).toBe(0)
 		expect(transcribeStudentAudio).toHaveBeenCalledOnce()
 		expect(stop).toHaveBeenCalledOnce()
+		expect(interactions).toHaveBeenCalledTimes(2)
+		window.removeEventListener(studentInteractionEvent, interactions)
 	})
 })

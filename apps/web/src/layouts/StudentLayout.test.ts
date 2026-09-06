@@ -4,6 +4,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import type { StudentSession } from '../api/student'
+import { studentInteractionEvent, studentInteractionFreshnessMS } from '../lib/studentInteraction'
 import { useAuthSession } from '../stores/auth'
 import { useLearningStore } from '../stores/learning'
 import StudentLayout from './StudentLayout.vue'
@@ -36,7 +37,6 @@ function session(overrides: Partial<StudentSession> = {}): StudentSession {
 }
 
 async function classroomHarness() {
-  const documentHasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
   const pinia = createPinia()
   setActivePinia(pinia)
   const router = createRouter({
@@ -55,7 +55,7 @@ async function classroomHarness() {
 	useAuthSession().user.value = { user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }
   learning.applySession(session())
   const wrapper = mount(StudentLayout, { global: { plugins: [pinia, router] } })
-  return { documentHasFocus, learning, router, wrapper }
+  return { learning, router, wrapper }
 }
 
 afterEach(() => {
@@ -91,88 +91,6 @@ test('pauses immediately when hidden while answer analysis is loading', async ()
   expect(learning.status).toBe('PAUSED')
   expect(learning.loading).toBe(true)
   wrapper.unmount()
-})
-
-test('pauses on window blur while the page remains visible and never resumes on focus', async () => {
-	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
-	const requests: string[] = []
-	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
-		const path = String(input)
-		requests.push(path)
-		if (path.endsWith('/pause')) return jsonResponse({
-			session_id: 'session-1',
-			version: 1,
-			timing_version: 2,
-			status: 'PAUSED',
-			active_seconds: 20,
-			current_active_seconds: 0,
-			timing_observed_at: '2026-08-26T12:00:20Z',
-		})
-		if (path.endsWith('/auth/me')) return jsonResponse({ user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' })
-		if (path.endsWith('/sessions/session-1')) return jsonResponse(session({
-			timing_version: 2,
-			status: 'PAUSED',
-			active_seconds: 20,
-			current_active_seconds: 0,
-			timing_observed_at: '2026-08-26T12:00:20Z',
-		}))
-		throw new Error(`unexpected request: ${path}`)
-	}))
-	const { learning, wrapper } = await classroomHarness()
-
-	window.dispatchEvent(new Event('blur'))
-	await flushPromises()
-
-	expect(document.visibilityState).toBe('visible')
-	expect(requests).toEqual(['/api/v1/student/sessions/session-1/pause'])
-	expect(learning.status).toBe('PAUSED')
-
-	window.dispatchEvent(new Event('focus'))
-	await flushPromises()
-
-	expect(requests).toEqual([
-		'/api/v1/student/sessions/session-1/pause',
-		'/api/v1/auth/me',
-		'/api/v1/student/sessions/session-1',
-	])
-	expect(requests.some((path) => path.endsWith('/resume'))).toBe(false)
-	expect(learning.status).toBe('PAUSED')
-	wrapper.unmount()
-})
-
-test('does not send heartbeat while a visible-window blur pause is pending', async () => {
-	vi.useFakeTimers()
-	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
-	const pause = deferred<Response>()
-	const requests: string[] = []
-	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
-		const path = String(input)
-		requests.push(path)
-		if (path.endsWith('/pause')) return pause.promise
-		throw new Error(`unexpected request: ${path}`)
-	}))
-	const { learning, wrapper } = await classroomHarness()
-
-	window.dispatchEvent(new Event('blur'))
-	await Promise.resolve()
-	await vi.advanceTimersByTimeAsync(30_000)
-
-	expect(requests).toEqual(['/api/v1/student/sessions/session-1/pause'])
-	expect(requests.some((path) => path.endsWith('/heartbeat'))).toBe(false)
-
-	pause.resolve(jsonResponse({
-		session_id: 'session-1',
-		version: 1,
-		timing_version: 2,
-		status: 'PAUSED',
-		active_seconds: 20,
-		current_active_seconds: 0,
-		timing_observed_at: '2026-08-26T12:00:20Z',
-	}))
-	await flushPromises()
-
-	expect(learning.status).toBe('PAUSED')
-	wrapper.unmount()
 })
 
 test('pageshow reconciles a terminal session from the server without resuming', async () => {
@@ -374,43 +292,76 @@ test('does not send heartbeat before an explicit resume', async () => {
 	vi.useRealTimers()
 })
 
-test('focus watchdog pauses once without heartbeat when native background events are missed', async () => {
+test('sends heartbeats only while interaction is fresh and restarts after later interaction', async () => {
 	vi.useFakeTimers()
+	vi.setSystemTime(new Date('2026-08-26T12:00:00Z'))
 	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
 	const requests: string[] = []
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
 		const path = String(input)
 		requests.push(path)
-		if (path.endsWith('/pause')) return jsonResponse({
+		if (path.endsWith('/heartbeat')) return jsonResponse({
 			session_id: 'session-1',
 			version: 1,
-			timing_version: 2,
-			status: 'PAUSED',
+			timing_version: requests.length + 1,
+			status: 'ACTIVE',
 			active_seconds: 20,
-			current_active_seconds: 0,
+			current_active_seconds: 10,
+			active_since: '2026-08-26T12:00:00Z',
 			timing_observed_at: '2026-08-26T12:00:20Z',
 		})
 		throw new Error(`unexpected request: ${path}`)
 	}))
-	const { documentHasFocus, learning, wrapper } = await classroomHarness()
+	const { wrapper } = await classroomHarness()
 
-	documentHasFocus.mockReturnValue(false)
-	await vi.advanceTimersByTimeAsync(1_000)
-	await flushPromises()
-
-	expect(document.visibilityState).toBe('visible')
-	expect(requests).toEqual(['/api/v1/student/sessions/session-1/pause'])
-	expect(learning.status).toBe('PAUSED')
-
+	window.dispatchEvent(new KeyboardEvent('keydown', { key: 'a' }))
 	await vi.advanceTimersByTimeAsync(30_000)
-	await flushPromises()
+	expect(requests).toEqual(['/api/v1/student/sessions/session-1/heartbeat'])
 
-	expect(requests.filter((path) => path.endsWith('/pause'))).toHaveLength(1)
-	expect(requests.some((path) => path.endsWith('/heartbeat'))).toBe(false)
+	await vi.advanceTimersByTimeAsync(studentInteractionFreshnessMS - 30_000 + 1)
+	await vi.advanceTimersByTimeAsync(30_000)
+	expect(requests).toHaveLength(1)
+
+	window.dispatchEvent(new Event('pointerdown'))
+	await vi.advanceTimersByTimeAsync(30_000)
+	expect(requests).toHaveLength(2)
+	expect(requests.every((path) => path.endsWith('/heartbeat'))).toBe(true)
 	wrapper.unmount()
 })
 
-test('focus return only synchronizes an active server session when blur was missed', async () => {
+test('scroll and voice interactions each refresh heartbeat eligibility', async () => {
+	vi.useFakeTimers()
+	vi.setSystemTime(new Date('2026-08-26T12:00:00Z'))
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/heartbeat')) return jsonResponse({
+			session_id: 'session-1',
+			version: 1,
+			timing_version: requests.length + 1,
+			status: 'ACTIVE',
+			active_seconds: 20,
+			current_active_seconds: 10,
+			active_since: '2026-08-26T12:00:00Z',
+			timing_observed_at: '2026-08-26T12:00:20Z',
+		})
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const { wrapper } = await classroomHarness()
+
+	document.dispatchEvent(new Event('scroll'))
+	await vi.advanceTimersByTimeAsync(30_000)
+	window.dispatchEvent(new Event(studentInteractionEvent))
+	await vi.advanceTimersByTimeAsync(30_000)
+
+	expect(requests).toHaveLength(2)
+	expect(requests.every((path) => path.endsWith('/heartbeat'))).toBe(true)
+	wrapper.unmount()
+})
+
+test('visible reconciliation only synchronizes an active server session', async () => {
 	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
 	const requests: string[] = []
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
@@ -429,7 +380,7 @@ test('focus return only synchronizes an active server session when blur was miss
 	}))
 	const { learning, wrapper } = await classroomHarness()
 
-	window.dispatchEvent(new Event('focus'))
+	document.dispatchEvent(new Event('visibilitychange'))
 	await flushPromises()
 
 	expect(requests).toEqual([
@@ -442,7 +393,7 @@ test('focus return only synchronizes an active server session when blur was miss
 	wrapper.unmount()
 })
 
-test('focus return preserves active state after a concurrent explicit resume settles', async () => {
+test('visible reconciliation preserves active state after a concurrent explicit resume settles', async () => {
 	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
 	const resume = deferred<Response>()
 	const requests: string[] = []
@@ -471,7 +422,7 @@ test('focus return preserves active state after a concurrent explicit resume set
 	}))
 
 	const resumeOperation = learning.resumeSession()
-	window.dispatchEvent(new Event('focus'))
+	document.dispatchEvent(new Event('visibilitychange'))
 	await Promise.resolve()
 	expect(requests).toEqual([
 		'/api/v1/student/sessions/session-1/resume',
@@ -499,54 +450,6 @@ test('focus return preserves active state after a concurrent explicit resume set
 	expect(requests.filter((path) => path.endsWith('/resume'))).toHaveLength(1)
 	expect(requests.some((path) => path.endsWith('/pause'))).toBe(false)
 	expect(learning.status).toBe('ACTIVE')
-	wrapper.unmount()
-})
-
-test('focus return after a watchdog pause only synchronizes the paused session', async () => {
-	vi.useFakeTimers()
-	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
-	const requests: string[] = []
-	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
-		const path = String(input)
-		requests.push(path)
-		if (path.endsWith('/pause')) return jsonResponse({
-			session_id: 'session-1',
-			version: 1,
-			timing_version: 2,
-			status: 'PAUSED',
-			active_seconds: 20,
-			current_active_seconds: 0,
-			timing_observed_at: '2026-08-26T12:00:20Z',
-		})
-		if (path.endsWith('/auth/me')) return jsonResponse({ user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' })
-		if (path.endsWith('/sessions/session-1')) return jsonResponse(session({
-			timing_version: 2,
-			status: 'PAUSED',
-			active_seconds: 20,
-			current_active_seconds: 0,
-			timing_observed_at: '2026-08-26T12:00:20Z',
-		}))
-		throw new Error(`unexpected request: ${path}`)
-	}))
-	const { documentHasFocus, learning, wrapper } = await classroomHarness()
-
-	documentHasFocus.mockReturnValue(false)
-	await vi.advanceTimersByTimeAsync(1_000)
-	await flushPromises()
-	expect(requests).toEqual(['/api/v1/student/sessions/session-1/pause'])
-
-	documentHasFocus.mockReturnValue(true)
-	window.dispatchEvent(new Event('focus'))
-	await flushPromises()
-
-	expect(requests).toEqual([
-		'/api/v1/student/sessions/session-1/pause',
-		'/api/v1/auth/me',
-		'/api/v1/student/sessions/session-1',
-	])
-	expect(requests.filter((path) => path.endsWith('/pause'))).toHaveLength(1)
-	expect(requests.some((path) => path.endsWith('/resume'))).toBe(false)
-	expect(learning.status).toBe('PAUSED')
 	wrapper.unmount()
 })
 
