@@ -67,12 +67,19 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 		return
 	}
 	if err := handler.service.RecoverStaleSessions(request.Context(), userID); err != nil {
+		if errors.Is(err, auth.ErrSessionRevoked) {
+			http.Error(writer, "authentication required", http.StatusUnauthorized)
+			return
+		}
 		http.Error(writer, "session could not start", http.StatusInternalServerError)
 		return
 	}
 	var sessionID uuid.UUID
 	var startedEvents []realtime.Event
 	err = pgx.BeginFunc(request.Context(), handler.pool, func(tx pgx.Tx) error {
+		if err := auth.LockPrincipalSession(request.Context(), tx, userID); err != nil {
+			return err
+		}
 		var studentID, subjectID, knowledgePointID, questionID uuid.UUID
 		var minutes int
 		var mode, blockStatus string
@@ -150,6 +157,10 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 	}
 	if errors.Is(err, ErrAnotherSessionOpen) {
 		http.Error(writer, "finish or leave the current session before starting another", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, auth.ErrSessionRevoked) {
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
 		return
 	}
 	if err != nil {
@@ -350,6 +361,10 @@ func (handler *Handler) writeLifecycleResult(writer http.ResponseWriter, request
 	}
 	if errors.Is(err, ErrSessionNotActive) {
 		http.Error(writer, "session can no longer change", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, auth.ErrSessionRevoked) {
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
 		return
 	}
 	if err != nil {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BookOpen, Home, Sparkles, UserRound } from '@lucide/vue'
+import { Home, Sparkles, UserRound } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -158,16 +158,6 @@ onBeforeUnmount(() => {
           aria-hidden="true"
         />
         <span>首页</span>
-      </RouterLink>
-      <RouterLink
-        to="/student"
-        class="nav-item"
-      >
-        <BookOpen
-          :size="20"
-          aria-hidden="true"
-        />
-        <span>学习</span>
       </RouterLink>
       <RouterLink
         to="/student/growth"

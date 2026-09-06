@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 )
 
@@ -75,6 +76,9 @@ func (service *Service) transitionSession(ctx context.Context, userID, sessionID
 	var result SessionTiming
 	var published *realtime.Event
 	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		if err := auth.LockPrincipalSession(ctx, tx, userID); err != nil {
+			return err
+		}
 		row, err := loadLifecycleRow(ctx, tx, userID, sessionID)
 		if err != nil {
 			return err
@@ -172,6 +176,102 @@ func (service *Service) transitionSession(ctx context.Context, userID, sessionID
 		_ = service.hub.Publish(*published)
 	}
 	return result, nil
+}
+
+func (service *Service) RevokeAuthenticationAndPauseLearning(ctx context.Context, userID, authSessionID uuid.UUID) error {
+	var published []realtime.Event
+	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		now := service.now()
+		command, err := tx.Exec(ctx, `
+UPDATE sessions
+SET revoked_at=$3
+WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND expires_at>$3`, authSessionID, userID, now)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() != 1 {
+			return auth.ErrSessionRevoked
+		}
+
+		rows, err := tx.Query(ctx, `
+SELECT ls.id,ls.student_id,ls.plan_block_id,ls.status,ls.started_at,ls.accumulated_seconds,
+       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version,
+       ls.processing_token IS NOT NULL OR ls.processing_until IS NOT NULL
+FROM learning_sessions ls
+JOIN students student ON student.id=ls.student_id
+WHERE student.user_id=$1 AND ls.status IN ('ACTIVE','PAUSED')
+ORDER BY ls.started_at DESC
+FOR UPDATE OF ls`, userID)
+		if err != nil {
+			return err
+		}
+		type logoutRow struct {
+			lifecycleRow
+			hasOperationLease bool
+		}
+		var sessions []logoutRow
+		for rows.Next() {
+			var session logoutRow
+			if err := rows.Scan(
+				&session.sessionID, &session.studentID, &session.planBlockID, &session.status, &session.startedAt,
+				&session.accumulatedSeconds, &session.lastResumedAt, &session.lastActivityAt, &session.version,
+				&session.timingVersion, &session.hasOperationLease,
+			); err != nil {
+				rows.Close()
+				return err
+			}
+			sessions = append(sessions, session)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		for _, session := range sessions {
+			row := session.lifecycleRow
+			if row.status == "PAUSED" {
+				if session.hasOperationLease {
+					if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET processing_token=NULL,processing_until=NULL,version=version+1 WHERE id=$1`, row.sessionID); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
+			observedAt := latestTime(now, row.lastActivityAt)
+			activeThrough := observedAt
+			if observedAt.Sub(row.lastActivityAt) >= stalePauseAfter {
+				activeThrough = row.lastActivityAt
+			}
+			total := checkpointTotal(row, activeThrough)
+			if _, err := tx.Exec(ctx, `
+UPDATE learning_sessions
+SET status='PAUSED',accumulated_seconds=$2,actual_seconds=$2,last_resumed_at=NULL,
+    last_activity_at=$3,processing_token=NULL,processing_until=NULL,
+    version=version+1,timing_version=timing_version+1
+WHERE id=$1`, row.sessionID, total, observedAt); err != nil {
+				return err
+			}
+			row.version++
+			row.timingVersion++
+			row.status, row.accumulatedSeconds, row.lastResumedAt, row.lastActivityAt = "PAUSED", total, nil, observedAt
+			event, err := lifecycleEvent(ctx, tx, row, realtime.EventSessionPaused, "PAUSED", total, observedAt)
+			if err != nil {
+				return err
+			}
+			published = append(published, event)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, event := range published {
+		if service.hub != nil {
+			_ = service.hub.Publish(event)
+		}
+	}
+	return nil
 }
 
 func loadLifecycleRow(ctx context.Context, tx pgx.Tx, userID, sessionID uuid.UUID) (lifecycleRow, error) {
@@ -277,6 +377,11 @@ func (service *Service) RunStaleSessionRecovery(ctx context.Context, interval ti
 func (service *Service) recoverStaleSessions(ctx context.Context, userID *uuid.UUID) error {
 	var published []realtime.Event
 	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		if userID != nil {
+			if err := auth.LockPrincipalSession(ctx, tx, *userID); err != nil {
+				return err
+			}
+		}
 		var userFilter any
 		if userID != nil {
 			userFilter = *userID
@@ -377,17 +482,28 @@ func latestTime(value, floor time.Time) time.Time {
 func (service *Service) beginSessionOperation(ctx context.Context, userID, sessionID uuid.UUID) (uuid.UUID, error) {
 	now := service.now()
 	token := uuid.New()
-	command, err := service.pool.Exec(ctx, `
-UPDATE learning_sessions session
-SET processing_token=$3,processing_until=$4,last_activity_at=GREATEST(last_activity_at,$5)
-FROM students student
-WHERE session.id=$1 AND student.id=session.student_id AND student.user_id=$2
-  AND session.status='ACTIVE'
-  AND (session.processing_until IS NULL OR session.processing_until<=$5)`, sessionID, userID, token, now.Add(sessionLeaseTime), now)
+	var changed bool
+	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		if err := auth.LockPrincipalSession(ctx, tx, userID); err != nil {
+			return err
+		}
+		command, err := tx.Exec(ctx, `
+	UPDATE learning_sessions session
+	SET processing_token=$3,processing_until=$4,last_activity_at=GREATEST(last_activity_at,$5)
+	FROM students student
+	WHERE session.id=$1 AND student.id=session.student_id AND student.user_id=$2
+	  AND session.status='ACTIVE'
+	  AND (session.processing_until IS NULL OR session.processing_until<=$5)`, sessionID, userID, token, now.Add(sessionLeaseTime), now)
+		if err != nil {
+			return err
+		}
+		changed = command.RowsAffected() == 1
+		return nil
+	})
 	if err != nil {
 		return uuid.Nil, err
 	}
-	if command.RowsAffected() != 1 {
+	if !changed {
 		return uuid.Nil, ErrClassroomChanged
 	}
 	return token, nil

@@ -128,9 +128,9 @@ func newDatabaseHandler(pool *pgxpool.Pool) http.Handler {
 	}
 	pipelineService := contentpipeline.NewService(pipelineRepository, contentpipeline.Validator{}, reviewService).WithGenerator(contentGenerator)
 	contentPipeline := contentpipeline.NewHandler(pipelineService)
-	identityHandler := auth.NewHandler(pool)
+	identityHandler := auth.NewHandler(pool, classrooms)
 	if value := strings.TrimSpace(os.Getenv("SESSION_COOKIE_SECURE")); value == "1" || strings.EqualFold(value, "true") {
-		identityHandler = auth.NewHandlerWithSecureCookies(pool)
+		identityHandler = auth.NewHandlerWithSecureCookies(pool, classrooms)
 	}
 	return api.NewRouter(api.Dependencies{
 		Authenticate:    authenticator.Middleware,

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -22,12 +23,25 @@ type Handler struct {
 	pool          *pgxpool.Pool
 	now           func() time.Time
 	secureCookies bool
+	logoutCutover LogoutCutover
 }
 
-func NewHandler(pool *pgxpool.Pool) *Handler { return &Handler{pool: pool, now: time.Now} }
+type LogoutCutover interface {
+	RevokeAuthenticationAndPauseLearning(context.Context, uuid.UUID, uuid.UUID) error
+}
 
-func NewHandlerWithSecureCookies(pool *pgxpool.Pool) *Handler {
-	return &Handler{pool: pool, now: time.Now, secureCookies: true}
+func NewHandler(pool *pgxpool.Pool, cutovers ...LogoutCutover) *Handler {
+	handler := &Handler{pool: pool, now: time.Now}
+	if len(cutovers) > 0 {
+		handler.logoutCutover = cutovers[0]
+	}
+	return handler
+}
+
+func NewHandlerWithSecureCookies(pool *pgxpool.Pool, cutovers ...LogoutCutover) *Handler {
+	handler := NewHandler(pool, cutovers...)
+	handler.secureCookies = true
+	return handler
 }
 
 func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request) {
@@ -100,9 +114,34 @@ func (handler *Handler) Me(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (handler *Handler) Logout(writer http.ResponseWriter, request *http.Request) {
-	if token, ok := requestToken(request); ok {
-		tokenHash := sha256.Sum256([]byte(token))
-		_, _ = handler.pool.Exec(request.Context(), `UPDATE sessions SET revoked_at=now() WHERE token_hash=$1 AND revoked_at IS NULL`, tokenHash[:])
+	principal, ok := PrincipalFromContext(request.Context())
+	if !ok {
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	userID, userErr := uuid.Parse(principal.UserID)
+	authSessionID, sessionErr := uuid.Parse(principal.AuthSessionID)
+	if userErr != nil || sessionErr != nil {
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	var err error
+	if handler.logoutCutover != nil {
+		err = handler.logoutCutover.RevokeAuthenticationAndPauseLearning(request.Context(), userID, authSessionID)
+	} else {
+		command, execErr := handler.pool.Exec(request.Context(), `UPDATE sessions SET revoked_at=now() WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL`, authSessionID, userID)
+		err = execErr
+		if err == nil && command.RowsAffected() != 1 {
+			err = ErrSessionRevoked
+		}
+	}
+	if errors.Is(err, ErrSessionRevoked) {
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		http.Error(writer, "logout unavailable", http.StatusInternalServerError)
+		return
 	}
 	http.SetCookie(writer, &http.Cookie{Name: "session_token", Value: "", Path: "/", HttpOnly: true, Secure: handler.secureCookies || request.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: -1, Expires: time.Unix(1, 0)})
 	writer.WriteHeader(http.StatusNoContent)

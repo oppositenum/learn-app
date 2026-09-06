@@ -40,9 +40,12 @@ async function classroomHarness() {
   setActivePinia(pinia)
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [
-      { path: '/student', component: { template: '<div>首页</div>' } },
-      { path: '/student/session/:id', component: { template: '<div>课堂</div>' }, meta: { classroom: true, hideStudentNav: true } },
+		routes: [
+			{ path: '/login', component: { template: '<div>登录</div>' } },
+			{ path: '/student', component: { template: '<div>首页</div>' } },
+			{ path: '/student/growth', component: { template: '<div>成长</div>' } },
+			{ path: '/student/profile', component: { template: '<div>我的</div>' } },
+			{ path: '/student/session/:id', component: { template: '<div>课堂</div>' }, meta: { classroom: true, hideStudentNav: true } },
     ],
   })
   await router.push('/student/session/session-1')
@@ -381,6 +384,30 @@ test('waits for an in-flight resume and pauses before leaving the classroom', as
 	expect(router.currentRoute.value.path).toBe('/student')
 	expect(learning.status).toBe('PAUSED')
 	wrapper.unmount()
+})
+
+test('stops old-session lifecycle writes after a cross-tab identity invalidation', async () => {
+	vi.useFakeTimers()
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const fetch = vi.fn(async (input: string | URL | Request) => {
+		void input
+		return { ok: false, status: 401 } as Response
+	})
+	vi.stubGlobal('fetch', fetch)
+	const { learning, wrapper } = await classroomHarness()
+
+	useAuthSession().invalidateExternalChange()
+	document.dispatchEvent(new Event('visibilitychange'))
+	window.dispatchEvent(new Event('pagehide'))
+	await vi.advanceTimersByTimeAsync(30_000)
+	await learning.heartbeat()
+	await learning.pauseForVisibility()
+	await learning.resumeForVisibility()
+
+	expect(learning.sessionID).toBe('')
+	expect(fetch.mock.calls.map(([input]) => String(input)).filter((path) => path.includes('/student/sessions'))).toEqual([])
+	wrapper.unmount()
+	vi.useRealTimers()
 })
 
 function jsonResponse(body: unknown): Response {
