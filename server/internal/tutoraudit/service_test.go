@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -130,9 +131,10 @@ func TestServiceFailsClosedOnReviewerTimeoutAndKeepsMinimalAudit(t *testing.T) {
 
 func TestServiceDistinguishesRetryExhaustionFromImmediateReviewerFailure(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		reviewErr  error
-		reasonCode string
+		name           string
+		reviewErr      error
+		reviewerResult string
+		reasonCode     string
 	}{
 		{
 			name: "retry exhausted",
@@ -140,9 +142,16 @@ func TestServiceDistinguishesRetryExhaustionFromImmediateReviewerFailure(t *test
 				attempts: 3,
 				err:      &ai.ResponsesAPIError{StatusCode: 429},
 			},
-			reasonCode: "RETRY_EXHAUSTED",
+			reviewerResult: "ERROR",
+			reasonCode:     "RETRY_EXHAUSTED",
 		},
-		{name: "immediate failure", reviewErr: errors.New("price unavailable"), reasonCode: "ERROR"},
+		{name: "immediate failure", reviewErr: errors.New("price unavailable"), reviewerResult: "ERROR", reasonCode: "ERROR"},
+		{
+			name:           "inconsistent verdict",
+			reviewErr:      fmt.Errorf("%w: inconsistent verdict", ErrInvalidReviewOutput),
+			reviewerResult: "INVALID_SCHEMA",
+			reasonCode:     "INVALID_SCHEMA",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reviewer := passingReviewer()
@@ -156,7 +165,7 @@ func TestServiceDistinguishesRetryExhaustionFromImmediateReviewerFailure(t *test
 			if !errors.Is(err, ai.ErrTutorOutputReviewUnavailable) || !errors.Is(err, ErrReviewerUnavailable) {
 				t.Fatalf("failure was not mapped to reviewer unavailability: %v", err)
 			}
-			if len(recorder.records) != 1 || recorder.records[0].ReviewerResult != "ERROR" || recorder.records[0].FinalResult != "REJECT" || recorder.records[0].ReasonCode != test.reasonCode {
+			if len(recorder.records) != 1 || recorder.records[0].ReviewerResult != test.reviewerResult || recorder.records[0].FinalResult != "REJECT" || recorder.records[0].ReasonCode != test.reasonCode {
 				t.Fatalf("audit record=%+v", recorder.records)
 			}
 		})

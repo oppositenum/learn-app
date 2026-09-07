@@ -111,5 +111,8 @@ func (reviewer *OpenAIReviewer) ReviewTutorOutput(ctx context.Context, request a
 	if err := json.Unmarshal(result.OutputJSON, &review); err != nil {
 		return Review{}, evidence, fmt.Errorf("%w: decode typed output: %v", ErrInvalidReviewOutput, err)
 	}
+	if err := validateReviewVerdict(review); err != nil {
+		return Review{}, evidence, fmt.Errorf("%w: inconsistent verdict: %v", ErrInvalidReviewOutput, err)
+	}
 	return review, evidence, nil
 }

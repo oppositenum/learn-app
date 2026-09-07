@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	aioutputs "github.com/oppositenum/ai-learning-tutor/schemas/ai_outputs"
 )
 
 const defaultOpenAIBaseURL = "https://api.openai.com/v1"
@@ -122,6 +124,9 @@ type responsesResponse struct {
 
 func (client *OpenAIResponsesClient) GenerateStructured(ctx context.Context, request StructuredRequest) (StructuredResult, error) {
 	startedAt := time.Now()
+	if err := aioutputs.ValidateProviderSchemaCompatibility(request.Schema); err != nil {
+		return StructuredResult{}, fmt.Errorf("check response schema provider compatibility: %w", err)
+	}
 	var schema any
 	if err := json.Unmarshal(request.Schema, &schema); err != nil {
 		return StructuredResult{}, fmt.Errorf("decode response schema: %w", err)

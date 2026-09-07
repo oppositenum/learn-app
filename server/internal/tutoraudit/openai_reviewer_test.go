@@ -69,6 +69,24 @@ func TestOpenAIReviewerReportsActualProviderModelForProvenance(t *testing.T) {
 	}
 }
 
+func TestOpenAIReviewerAcceptsConsistentRejectVerdict(t *testing.T) {
+	client := &structuredClientStub{result: ai.StructuredResult{
+		Usage:      ai.ModelUsage{Provider: "openai", Model: "reviewer-v1"},
+		OutputJSON: json.RawMessage(`{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER","FULL_SOLUTION"]}`),
+	}}
+	reviewer, err := NewOpenAIReviewer(client, "openai", "reviewer-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, _, err := reviewer.ReviewTutorOutput(context.Background(), validAuditRequest("先找出固定费用。"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.Result != ReviewReject || review.NoAnswerLeak || len(review.ReasonCodes) != 2 {
+		t.Fatalf("reject verdict=%+v", review)
+	}
+}
+
 func TestOpenAIReviewerActualGeneratorIdentityFailsServiceProvenance(t *testing.T) {
 	client := &structuredClientStub{result: ai.StructuredResult{
 		Usage:      ai.ModelUsage{Provider: "openai", Model: "generator-v1"},
@@ -101,17 +119,30 @@ func TestOpenAIReviewerRejectsInvalidSchemaWithRequestEvidence(t *testing.T) {
 	}
 }
 
-func TestOpenAIReviewerRejectsInconsistentPassingSchema(t *testing.T) {
-	client := &structuredClientStub{result: ai.StructuredResult{
-		Usage:      ai.ModelUsage{Provider: "openai", Model: "reviewer-v1"},
-		OutputJSON: json.RawMessage(`{"result":"PASS","no_answer_leak":true,"reason_codes":["DIRECT_ANSWER"]}`),
-	}}
-	reviewer, err := NewOpenAIReviewer(client, "openai", "reviewer-v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, evidence, err := reviewer.ReviewTutorOutput(context.Background(), validAuditRequest("先找出固定费用。"))
-	if !errors.Is(err, ErrInvalidReviewOutput) || evidence.RequestID == "" {
-		t.Fatalf("inconsistent schema err=%v evidence=%+v", err, evidence)
+func TestOpenAIReviewerRejectsInconsistentVerdictsInServerCode(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		output string
+	}{
+		{name: "PASS contradiction", output: `{"result":"PASS","no_answer_leak":false,"reason_codes":["NONE"]}`},
+		{name: "REJECT contradiction", output: `{"result":"REJECT","no_answer_leak":true,"reason_codes":["DIRECT_ANSWER"]}`},
+		{name: "illegal reason code", output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":["NONE"]}`},
+		{name: "empty reason codes", output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":[]}`},
+		{name: "duplicate reason codes", output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER","DIRECT_ANSWER"]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &structuredClientStub{result: ai.StructuredResult{
+				Usage:      ai.ModelUsage{Provider: "openai", Model: "reviewer-v1"},
+				OutputJSON: json.RawMessage(test.output),
+			}}
+			reviewer, err := NewOpenAIReviewer(client, "openai", "reviewer-v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, evidence, err := reviewer.ReviewTutorOutput(context.Background(), validAuditRequest("先找出固定费用。"))
+			if !errors.Is(err, ErrInvalidReviewOutput) || evidence.RequestID == "" || !strings.Contains(err.Error(), "inconsistent verdict") {
+				t.Fatalf("inconsistent verdict err=%v evidence=%+v", err, evidence)
+			}
+		})
 	}
 }

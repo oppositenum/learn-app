@@ -141,6 +141,38 @@ func reviewApproves(review Review) bool {
 	return review.Result == ReviewPass && review.NoAnswerLeak && len(review.ReasonCodes) == 1 && review.ReasonCodes[0] == "NONE"
 }
 
+func validateReviewVerdict(review Review) error {
+	if review.Result == ReviewPass {
+		if !review.NoAnswerLeak || len(review.ReasonCodes) != 1 || review.ReasonCodes[0] != "NONE" {
+			return errors.New("PASS must have no_answer_leak=true and reason_codes=[NONE]")
+		}
+		return nil
+	}
+	if review.Result != ReviewReject {
+		return fmt.Errorf("unsupported result %q", review.Result)
+	}
+	if review.NoAnswerLeak {
+		return errors.New("REJECT must have no_answer_leak=false")
+	}
+	if len(review.ReasonCodes) == 0 || len(review.ReasonCodes) > 8 {
+		return errors.New("REJECT must have between one and eight reason codes")
+	}
+	allowed := map[string]struct{}{
+		"DIRECT_ANSWER": {}, "EQUIVALENT_ANSWER": {}, "FULL_SOLUTION": {}, "SEGMENT_ANSWER_LEAK": {},
+	}
+	seen := make(map[string]struct{}, len(review.ReasonCodes))
+	for _, code := range review.ReasonCodes {
+		if _, ok := allowed[code]; !ok {
+			return fmt.Errorf("REJECT has unsupported reason code %q", code)
+		}
+		if _, duplicate := seen[code]; duplicate {
+			return fmt.Errorf("REJECT has duplicate reason code %q", code)
+		}
+		seen[code] = struct{}{}
+	}
+	return nil
+}
+
 func reviewFailureReason(err error, reviewerResult string) string {
 	if errors.Is(err, ErrReviewerRetriesExhausted) {
 		return "RETRY_EXHAUSTED"

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -91,6 +92,28 @@ func TestOpenAIResponsesClientRecordsUsageBeforeOutputExtraction(t *testing.T) {
 	}
 	if recorder.records[0].Latency < 0 || recorder.records[0].CreatedAt.After(time.Now()) {
 		t.Fatalf("invalid usage timing: %+v", recorder.records[0])
+	}
+}
+
+func TestOpenAIResponsesClientRejectsIncompatibleSchemaBeforeNetwork(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+	}))
+	defer server.Close()
+	client, err := NewOpenAIResponsesClient(server.Client(), server.URL, "test-key", "reviewer-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GenerateStructured(context.Background(), StructuredRequest{
+		SchemaName: "incompatible.schema.json",
+		Schema:     json.RawMessage(`{"type":"object","oneOf":[]}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), `keyword "oneOf"`) {
+		t.Fatalf("incompatible schema error=%v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("provider received %d request(s) for an incompatible schema", calls)
 	}
 }
 
