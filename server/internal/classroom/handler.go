@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/parent"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
@@ -82,6 +83,11 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 	}
 	if errors.Is(err, auth.ErrSessionRevoked) {
 		http.Error(writer, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
+		log.Printf("classroom submit failed: %v", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorOutputReviewUnavailableCode})
 		return
 	}
 	if err != nil {
@@ -173,6 +179,11 @@ func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http
 	}
 	if errors.Is(err, auth.ErrSessionRevoked) {
 		http.Error(writer, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
+		log.Printf("classroom support failed: %v", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorOutputReviewUnavailableCode})
 		return
 	}
 	if err != nil {

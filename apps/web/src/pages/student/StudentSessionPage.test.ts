@@ -168,6 +168,106 @@ test('keeps a readable recovery action after failure and allows retry', async ()
   wrapper.unmount()
 })
 
+test('keeps the answer and retry controls after a temporary Tutor review failure', async () => {
+  let supportRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/support')) {
+      supportRequests++
+      if (supportRequests === 1) return response({ code: 'TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE' }, 503)
+      return response({
+        session_id: 'session-1',
+        version: 2,
+        timing_version: 2,
+        action: 'HINT',
+        socratic_round: 2,
+        message: '先找一找两种分数共同的小格。',
+        status: 'ACTIVE',
+        active_seconds: 20,
+        current_active_seconds: 3,
+        timing_observed_at: '2026-08-26T12:00:23Z',
+      })
+    }
+    return response(session({
+      version: supportRequests >= 2 ? 2 : 1,
+      timing_version: supportRequests >= 2 ? 2 : 1,
+      status: 'ACTIVE',
+      state: supportRequests >= 2 ? 'HINT' : 'ASK',
+      current_active_seconds: supportRequests >= 2 ? 3 : 0,
+    }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('我先把小格分成一样大')
+  const hint = () => wrapper.findAll('button').find((button) => button.text().includes('一点提示'))!
+
+  await hint().trigger('click')
+  await flushPromises()
+
+  expect(learning.error).toBe('老师正在想，等一下再试一次')
+  expect(wrapper.get('[role="alert"]').text()).toBe('老师正在想，等一下再试一次')
+  expect(textarea.element.value).toBe('我先把小格分成一样大')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(hint().attributes('disabled')).toBeUndefined()
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+
+  await hint().trigger('click')
+  await flushPromises()
+
+  expect(supportRequests).toBe(2)
+  expect(learning.error).toBe('')
+  expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  expect(textarea.element.value).toBe('我先把小格分成一样大')
+  expect(hint().attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})
+
+test('keeps a submitted answer available when Tutor review is temporarily unavailable', async () => {
+  let answerRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/answers')) {
+      answerRequests++
+      if (answerRequests === 1) return response({ code: 'TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE' }, 503)
+      return response({
+        session_id: 'session-1',
+        version: 2,
+        timing_version: 2,
+        action: 'PROBE',
+        socratic_round: 3,
+        message: '你准备怎样让两种小格一样大？',
+        status: 'ACTIVE',
+        active_seconds: 20,
+        current_active_seconds: 4,
+        timing_observed_at: '2026-08-26T12:00:24Z',
+      })
+    }
+    return response(session({
+      version: answerRequests >= 2 ? 2 : 1,
+      timing_version: answerRequests >= 2 ? 2 : 1,
+      status: 'ACTIVE',
+      state: answerRequests >= 2 ? 'PROBE' : 'ASK',
+      current_active_seconds: answerRequests >= 2 ? 4 : 0,
+    }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('我觉得要先通分')
+
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(learning.error).toBe('老师正在想，等一下再试一次')
+  expect(textarea.element.value).toBe('我觉得要先通分')
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(answerRequests).toBe(2)
+  expect(learning.error).toBe('')
+  expect(textarea.element.value).toBe('')
+  wrapper.unmount()
+})
+
 test('uses unambiguous timers and renders the Tutor action title once', async () => {
   const { wrapper } = await mountPage(vi.fn(async () => response(session())))
 

@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -131,5 +132,74 @@ func TestOpenAIResponsesClientFallsBackWhenChainingIsRejected(t *testing.T) {
 	}
 	if calls != 3 {
 		t.Fatalf("chaining rejection should be remembered, got calls=%d", calls)
+	}
+}
+
+func TestOpenAIResponsesClientClassifiesRetryableStatuses(t *testing.T) {
+	for _, test := range []struct {
+		status    int
+		retryable bool
+	}{
+		{status: http.StatusBadRequest},
+		{status: http.StatusUnauthorized},
+		{status: http.StatusTooManyRequests, retryable: true},
+		{status: http.StatusInternalServerError, retryable: true},
+		{status: http.StatusServiceUnavailable, retryable: true},
+	} {
+		t.Run(http.StatusText(test.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(test.status)
+				_, _ = writer.Write([]byte(`{"error":{"code":"test_failure"}}`))
+			}))
+			defer server.Close()
+			client, err := NewOpenAIResponsesClient(server.Client(), server.URL, "test-key", "reviewer-model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.GenerateStructured(context.Background(), StructuredRequest{
+				SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+			})
+			var responseErr *ResponsesAPIError
+			if !errors.As(err, &responseErr) || responseErr.StatusCode != test.status {
+				t.Fatalf("response error=%v", err)
+			}
+			if got := IsRetryableResponsesError(err); got != test.retryable {
+				t.Fatalf("retryable=%v want=%v", got, test.retryable)
+			}
+		})
+	}
+}
+
+func TestOpenAIResponsesClientCapturesRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Retry-After", "7")
+		writer.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	client, err := NewOpenAIResponsesClient(server.Client(), server.URL, "test-key", "reviewer-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GenerateStructured(context.Background(), StructuredRequest{
+		SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+	})
+	if retryAfter, ok := ResponsesRetryAfter(err); !ok || retryAfter != 7*time.Second {
+		t.Fatalf("Retry-After=%v present=%v", retryAfter, ok)
+	}
+}
+
+func TestParseRetryAfterHTTPDateAndInvalidValues(t *testing.T) {
+	now := time.Date(2026, time.September, 7, 12, 0, 0, 0, time.UTC)
+	when := now.Add(9 * time.Second).Format(http.TimeFormat)
+	if delay, ok := parseRetryAfter(when, now); !ok || delay != 9*time.Second {
+		t.Fatalf("HTTP-date delay=%v present=%v", delay, ok)
+	}
+	if delay, ok := parseRetryAfter(now.Add(-time.Second).Format(http.TimeFormat), now); !ok || delay != 0 {
+		t.Fatalf("past HTTP-date delay=%v present=%v", delay, ok)
+	}
+	for _, value := range []string{"", "not-a-date", "-1", "9223372036854775807"} {
+		if delay, ok := parseRetryAfter(value, now); ok || delay != 0 {
+			t.Fatalf("invalid %q delay=%v present=%v", value, delay, ok)
+		}
 	}
 }

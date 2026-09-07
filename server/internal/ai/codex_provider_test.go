@@ -6,31 +6,40 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 )
 
 type structuredClientStub struct {
-	result  StructuredResult
-	err     error
-	request StructuredRequest
+	result      StructuredResult
+	err         error
+	request     StructuredRequest
+	calls       int
+	deadline    time.Time
+	hasDeadline bool
 }
 
 type tutorOutputAuditorStub struct {
-	requests []TutorOutputAuditRequest
-	err      error
+	requests    []TutorOutputAuditRequest
+	err         error
+	deadline    time.Time
+	hasDeadline bool
 }
 
-func (stub *tutorOutputAuditorStub) AuditTutorOutput(_ context.Context, request TutorOutputAuditRequest) error {
+func (stub *tutorOutputAuditorStub) AuditTutorOutput(ctx context.Context, request TutorOutputAuditRequest) error {
 	stub.requests = append(stub.requests, request)
+	stub.deadline, stub.hasDeadline = ctx.Deadline()
 	return stub.err
 }
 
 func passingTutorOutputAuditor() *tutorOutputAuditorStub { return &tutorOutputAuditorStub{} }
 
-func (stub *structuredClientStub) GenerateStructured(_ context.Context, request StructuredRequest) (StructuredResult, error) {
+func (stub *structuredClientStub) GenerateStructured(ctx context.Context, request StructuredRequest) (StructuredResult, error) {
 	stub.request = request
+	stub.calls++
+	stub.deadline, stub.hasDeadline = ctx.Deadline()
 	return stub.result, stub.err
 }
 
@@ -242,5 +251,32 @@ func TestCodexProviderAuditsEveryStudentVisibleGenerationEntryPoint(t *testing.T
 				t.Fatalf("entry point did not cross audit gate: %+v", auditor.requests)
 			}
 		})
+	}
+}
+
+func TestCodexProviderBoundsTutorGenerationAndAuditWithOneOperationDeadline(t *testing.T) {
+	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{
+		"message":"先找题目条件。","action":"HINT","answer_revealed":false,"segments":[]
+	}`)}}
+	auditor := passingTutorOutputAuditor()
+	provider, err := NewCodexProvider(client, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+		TutorDecision: tutor.Decision{NextState: tutor.StateHint},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	remaining := client.deadline.Sub(started)
+	if !client.hasDeadline || !auditor.hasDeadline || !client.deadline.Equal(auditor.deadline) {
+		t.Fatalf("generation deadline=%v/%v audit deadline=%v/%v", client.deadline, client.hasDeadline, auditor.deadline, auditor.hasDeadline)
+	}
+	if remaining <= 84*time.Second || remaining > tutorOutputOperationTimeout+100*time.Millisecond {
+		t.Fatalf("operation deadline remaining=%v", remaining)
+	}
+	if client.calls != 1 {
+		t.Fatalf("Tutor generation calls=%d want=1", client.calls)
 	}
 }

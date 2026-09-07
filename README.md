@@ -81,7 +81,9 @@ The command prints generated user/student identifiers, but never prints the pass
 
 Speech routes are enabled only when `OPENAI_API_KEY`, `OPENAI_STT_MODEL`, `OPENAI_TTS_MODEL`, and `OPENAI_TTS_VOICE` are all set. Every AI/STT/TTS provider must declare its provider/model billing identity. Add matching effective rows to `ai_price_catalog`; the server checks them before provider network calls, and prices are never hardcoded in business logic.
 
-Tutor output requires both `OPENAI_TUTOR_MODEL` and the dedicated `OPENAI_TUTOR_OUTPUT_REVIEW_MODEL`. Their `provider:model` identities must differ; a missing or non-independent reviewer fails closed before student-visible output is persisted, published, or sent to TTS. Both models require effective `ai_price_catalog` rows, and the independent review call is metered under `TUTOR_OUTPUT_REVIEW` even when its structured result is later rejected. `OPENAI_CONTENT_REVIEW_MODEL` remains a separate content-pipeline responsibility and must not be reused for Tutor output review.
+Tutor output requires both `OPENAI_TUTOR_MODEL` and the dedicated `OPENAI_TUTOR_OUTPUT_REVIEW_MODEL`. Their `provider:model` identities must differ; a missing or non-independent reviewer fails closed before student-visible output is persisted, published, or sent to TTS. Both models require effective `ai_price_catalog` rows, and the independent review call is metered under `TUTOR_OUTPUT_REVIEW` even when its structured result is later rejected. Reviewer HTTP 429 and 5xx responses use a bounded reviewer-only retry policy; exhaustion remains fail closed and returns a stable child-safe error without discarding typed Student input. `OPENAI_CONTENT_REVIEW_MODEL` remains a separate content-pipeline responsibility and must not be reused for Tutor output review.
+
+Cost-accounting limitation for B6: the test gateway was observed to inject about 4,390 reviewer input tokens, including 3,840 cached tokens, and the observed review cost was about 4.8 times the Tutor generation cost for that sample. The catalog has no cache-write price field, so GPT-5.6+ cache-write cost can be understated; current cost totals must not be described as fully exact, and Terra's $2.50/1M cache-write reference price must not be stored in an audio price field.
 
 Owner AI question generation is enabled with `OPENAI_CONTENT_GENERATION_MODEL`. The configured provider/model must have an effective `ai_price_catalog` row before any request is sent. Generation accepts only released, source-linked curriculum knowledge points and licensed content sources, creates server-owned `DRAFT` assets, and never skips deterministic validation, independent review, or Owner release. The Owner UI filters the catalog by subject, grade band, domain, unit metadata, name, and stable code. Configure a different provider/model for `OPENAI_CONTENT_REVIEW_MODEL`; generated content cannot be independently reviewed by the same provider/model that created it.
 
@@ -99,6 +101,6 @@ npm run build
 
 The integration command must target real PostgreSQL. A skipped integration test does not count as passing.
 
-Integration gate baseline: top-level PASS >= 71, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
+Integration gate baseline: top-level PASS >= 73, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
 
 HTTP and WebSocket contracts are documented under [`docs/api/`](docs/api/).

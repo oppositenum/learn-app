@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -14,6 +15,8 @@ import (
 )
 
 var ErrTutorOutputAuditorUnavailable = errors.New("independent Tutor output auditor is unavailable")
+
+const tutorOutputOperationTimeout = 85 * time.Second
 
 type StructuredClient interface {
 	GenerateStructured(ctx context.Context, request StructuredRequest) (StructuredResult, error)
@@ -90,6 +93,8 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	if provider.auditor == nil {
 		return TutorTurn{}, ErrTutorOutputAuditorUnavailable
 	}
+	ctx, cancel := context.WithTimeout(ctx, tutorOutputOperationTimeout)
+	defer cancel()
 	instructions = instructions + " " + turnStyleInstructions
 	requiredAction := string(request.TutorDecision.NextState)
 	if requiredAction != "" {

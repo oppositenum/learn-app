@@ -101,10 +101,14 @@ func newDatabaseHandler(pool *pgxpool.Pool) http.Handler {
 		if err != nil {
 			log.Fatalf("configure Tutor output reviewer: %v", err)
 		}
+		retryingReviewer, err := tutoraudit.NewRetryingReviewer(reviewer)
+		if err != nil {
+			log.Fatalf("configure Tutor output reviewer retry policy: %v", err)
+		}
 		auditor, err := tutoraudit.NewService(
 			"openai:"+tutorModel,
 			"openai:"+reviewerModel,
-			reviewer,
+			retryingReviewer,
 			tutoraudit.NewPostgresRecorder(pool),
 		)
 		if err != nil {

@@ -114,7 +114,7 @@ func TestServiceFailsClosedOnReviewerTimeoutAndKeepsMinimalAudit(t *testing.T) {
 	}
 	requestContext, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := service.AuditTutorOutput(requestContext, validAuditRequest("先找出固定费用。")); !errors.Is(err, ErrReviewerUnavailable) {
+	if err := service.AuditTutorOutput(requestContext, validAuditRequest("先找出固定费用。")); !errors.Is(err, ErrReviewerUnavailable) || !errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
 		t.Fatalf("reviewer timeout did not fail closed: %v", err)
 	}
 	if len(recorder.records) != 1 || recorder.ctxErr != nil || recorder.records[0].ReviewerResult != "TIMEOUT" || recorder.records[0].FinalResult != "REJECT" {
@@ -125,6 +125,41 @@ func TestServiceFailsClosedOnReviewerTimeoutAndKeepsMinimalAudit(t *testing.T) {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("minimal audit record contains private or candidate body %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+func TestServiceDistinguishesRetryExhaustionFromImmediateReviewerFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		reviewErr  error
+		reasonCode string
+	}{
+		{
+			name: "retry exhausted",
+			reviewErr: &retryExhaustedError{
+				attempts: 3,
+				err:      &ai.ResponsesAPIError{StatusCode: 429},
+			},
+			reasonCode: "RETRY_EXHAUSTED",
+		},
+		{name: "immediate failure", reviewErr: errors.New("price unavailable"), reasonCode: "ERROR"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reviewer := passingReviewer()
+			reviewer.err = test.reviewErr
+			recorder := &recorderStub{}
+			service, err := NewService("openai:generator-v1", "openai:reviewer-v1", reviewer, recorder)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = service.AuditTutorOutput(context.Background(), validAuditRequest("先找出固定费用。"))
+			if !errors.Is(err, ai.ErrTutorOutputReviewUnavailable) || !errors.Is(err, ErrReviewerUnavailable) {
+				t.Fatalf("failure was not mapped to reviewer unavailability: %v", err)
+			}
+			if len(recorder.records) != 1 || recorder.records[0].ReviewerResult != "ERROR" || recorder.records[0].FinalResult != "REJECT" || recorder.records[0].ReasonCode != test.reasonCode {
+				t.Fatalf("audit record=%+v", recorder.records)
+			}
+		})
 	}
 }
 

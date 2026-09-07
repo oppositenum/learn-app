@@ -27,15 +27,33 @@ import (
 )
 
 type responseQueueServer struct {
-	server  *httptest.Server
-	mu      sync.Mutex
-	outputs map[string][]string
-	calls   map[string]int
+	server    *httptest.Server
+	mu        sync.Mutex
+	responses map[string][]queuedResponse
+	calls     map[string]int
+}
+
+type queuedResponse struct {
+	status     int
+	output     string
+	body       string
+	retryAfter string
 }
 
 func newResponseQueueServer(t *testing.T, outputs map[string][]string) *responseQueueServer {
 	t.Helper()
-	queue := &responseQueueServer{outputs: outputs, calls: map[string]int{}}
+	responses := make(map[string][]queuedResponse, len(outputs))
+	for model, modelOutputs := range outputs {
+		for _, output := range modelOutputs {
+			responses[model] = append(responses[model], queuedResponse{status: http.StatusOK, output: output})
+		}
+	}
+	return newScriptedResponseQueueServer(t, responses)
+}
+
+func newScriptedResponseQueueServer(t *testing.T, responses map[string][]queuedResponse) *responseQueueServer {
+	t.Helper()
+	queue := &responseQueueServer{responses: responses, calls: map[string]int{}}
 	queue.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || request.URL.Path != "/responses" {
 			http.NotFound(writer, request)
@@ -51,11 +69,21 @@ func newResponseQueueServer(t *testing.T, outputs map[string][]string) *response
 		queue.mu.Lock()
 		index := queue.calls[body.Model]
 		queue.calls[body.Model]++
-		modelOutputs := queue.outputs[body.Model]
+		modelResponses := queue.responses[body.Model]
 		queue.mu.Unlock()
-		if index >= len(modelOutputs) {
+		if index >= len(modelResponses) {
 			t.Errorf("unexpected provider call model=%s index=%d", body.Model, index)
 			http.Error(writer, "unexpected provider call", http.StatusInternalServerError)
+			return
+		}
+		queued := modelResponses[index]
+		if queued.status != 0 && (queued.status < 200 || queued.status >= 300) {
+			if queued.retryAfter != "" {
+				writer.Header().Set("Retry-After", queued.retryAfter)
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(queued.status)
+			_, _ = writer.Write([]byte(queued.body))
 			return
 		}
 		response := map[string]any{
@@ -63,7 +91,7 @@ func newResponseQueueServer(t *testing.T, outputs map[string][]string) *response
 			"model": body.Model,
 			"output": []any{map[string]any{
 				"type":    "message",
-				"content": []any{map[string]any{"type": "output_text", "text": modelOutputs[index]}},
+				"content": []any{map[string]any{"type": "output_text", "text": queued.output}},
 			}},
 			"usage": map[string]any{"input_tokens": 100, "output_tokens": 25, "input_tokens_details": map[string]any{"cached_tokens": 20}},
 		}
@@ -103,10 +131,14 @@ func configureAuditedCodexAgent(t *testing.T, pool *pgxpool.Pool, queue *respons
 	if err != nil {
 		t.Fatal(err)
 	}
+	retryingReviewer, err := tutoraudit.NewRetryingReviewer(reviewer)
+	if err != nil {
+		t.Fatal(err)
+	}
 	auditor, err := tutoraudit.NewService(
 		"openai:"+tutorModel,
 		"openai:"+reviewerModel,
-		reviewer,
+		retryingReviewer,
 		tutoraudit.NewPostgresRecorder(pool),
 	)
 	if err != nil {
@@ -356,5 +388,116 @@ func TestB3BUnpricedReviewerIsBlockedBeforeNetworkAndFailsClosed(t *testing.T) {
 	}
 	if queue.callCount(reviewerModel) != 0 || reviewUsage != 0 || auditRows != 1 {
 		t.Fatalf("unpriced reviewer calls=%d usage=%d audits=%d", queue.callCount(reviewerModel), reviewUsage, auditRows)
+	}
+}
+
+func TestB3BReviewer429RetryRecoversWithSinglePricedUsage(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	tutorModel, reviewerModel := "b3b-retry-tutor", "b3b-retry-reviewer"
+	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
+	queue := newScriptedResponseQueueServer(t, map[string][]queuedResponse{
+		tutorModel: {{status: http.StatusOK, output: `{"message":"先找出固定费用。","action":"HINT","answer_revealed":false,"segments":[]}`}},
+		reviewerModel: {
+			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
+			{status: http.StatusOK, output: `{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"]}`},
+		},
+	})
+	service := classroom.NewService(pool, nil, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
+	router := api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Classroom:    classroom.NewHandler(service, pool, parent.NewRepository(pool)),
+	})
+
+	response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/support", fixture.studentToken, map[string]any{"type": "HINT"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("recovered response=%d %q", response.Code, response.Body.String())
+	}
+	if queue.callCount(tutorModel) != 1 || queue.callCount(reviewerModel) != 2 {
+		t.Fatalf("provider calls tutor=%d reviewer=%d", queue.callCount(tutorModel), queue.callCount(reviewerModel))
+	}
+	var reviewerUsage, generationUsage, auditRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose='TUTOR_OUTPUT_REVIEW' AND price_catalog_id IS NOT NULL AND estimated_cost_usd=0.000140000`, fixture.sessionID).Scan(&reviewerUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose='SOCRATIC_TURN' AND price_catalog_id IS NOT NULL`, fixture.sessionID).Scan(&generationUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_output_audits WHERE session_id=$1 AND deterministic_result='PASS' AND reviewer_result='PASS' AND final_result='PASS' AND reason_code='APPROVED'`, fixture.sessionID).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if reviewerUsage != 1 || generationUsage != 1 || auditRows != 1 {
+		t.Fatalf("recovery evidence reviewer_usage=%d generation_usage=%d audits=%d", reviewerUsage, generationUsage, auditRows)
+	}
+}
+
+func TestB3BReviewerRetryExhaustionReturnsChildSafe503WithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	tutorModel, reviewerModel := "b3b-exhaust-tutor", "b3b-exhaust-reviewer"
+	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
+	queue := newScriptedResponseQueueServer(t, map[string][]queuedResponse{
+		tutorModel: {{status: http.StatusOK, output: `{"message":"先找出固定费用。","action":"HINT","answer_revealed":false,"segments":[]}`}},
+		reviewerModel: {
+			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
+			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
+			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
+		},
+	})
+	hub := realtime.NewHub()
+	studentEvents, stop := hub.Subscribe(fixture.studentID.String(), auth.RoleStudent)
+	defer stop()
+	voice := &forbiddenAuditVoice{}
+	service := classroom.NewService(pool, hub, voice, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
+	router := api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Classroom:    classroom.NewHandler(service, pool, parent.NewRepository(pool)),
+	})
+	before := readProtectedClassroomSnapshot(t, ctx, pool, fixture)
+
+	response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/support", fixture.studentToken, map[string]any{"type": "HINT"})
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("retry exhaustion response=%d content-type=%q body=%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload) != 1 || payload["code"] != ai.TutorOutputReviewUnavailableCode {
+		t.Fatalf("child-safe payload=%q decode_error=%v", response.Body.String(), err)
+	}
+	for _, forbidden := range []string{fixture.privateCanary, tutorModel, reviewerModel, "gateway", "concurrency"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("child-safe response contains internal value %q: %s", forbidden, response.Body.String())
+		}
+	}
+	if after := readProtectedClassroomSnapshot(t, ctx, pool, fixture); after != before {
+		t.Fatalf("retry exhaustion mutated classroom:\nbefore=%+v\nafter=%+v", before, after)
+	}
+	if voice.calls != 0 {
+		t.Fatalf("TTS calls=%d want=0", voice.calls)
+	}
+	select {
+	case event := <-studentEvents:
+		t.Fatalf("retry exhaustion reached Student WebSocket: %s", event)
+	default:
+	}
+	var reviewerUsage, generationUsage, auditRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose='TUTOR_OUTPUT_REVIEW'`, fixture.sessionID).Scan(&reviewerUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose='SOCRATIC_TURN' AND price_catalog_id IS NOT NULL`, fixture.sessionID).Scan(&generationUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_output_audits WHERE session_id=$1 AND deterministic_result='PASS' AND reviewer_result='ERROR' AND final_result='REJECT' AND reason_code='RETRY_EXHAUSTED'`, fixture.sessionID).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if queue.callCount(tutorModel) != 1 || queue.callCount(reviewerModel) != 3 || reviewerUsage != 0 || generationUsage != 1 || auditRows != 1 {
+		t.Fatalf("exhaustion evidence calls=%d/%d usage=%d/%d audits=%d", queue.callCount(tutorModel), queue.callCount(reviewerModel), reviewerUsage, generationUsage, auditRows)
 	}
 }

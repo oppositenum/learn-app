@@ -104,8 +104,8 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 
 	if reviewErr != nil {
 		reviewerResult = reviewFailureResult(reviewErr)
-		reasonCode = reviewerResult
-		finalErr = fmt.Errorf("%w: %v", ErrReviewerUnavailable, reviewErr)
+		reasonCode = reviewFailureReason(reviewErr, reviewerResult)
+		finalErr = fmt.Errorf("%w: %w: %w", ai.ErrTutorOutputReviewUnavailable, ErrReviewerUnavailable, reviewErr)
 	} else if evidence.Provider+":"+evidence.Model != service.reviewerIdentity || strings.TrimSpace(evidence.RequestID) == "" {
 		reviewerResult = "INVALID_PROVENANCE"
 		reasonCode = reviewerResult
@@ -139,6 +139,13 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 
 func reviewApproves(review Review) bool {
 	return review.Result == ReviewPass && review.NoAnswerLeak && len(review.ReasonCodes) == 1 && review.ReasonCodes[0] == "NONE"
+}
+
+func reviewFailureReason(err error, reviewerResult string) string {
+	if errors.Is(err, ErrReviewerRetriesExhausted) {
+		return "RETRY_EXHAUSTED"
+	}
+	return reviewerResult
 }
 
 func reviewFailureResult(err error) string {

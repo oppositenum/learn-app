@@ -1,6 +1,13 @@
 package ai
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+const TutorOutputReviewUnavailableCode = "TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE"
+
+var ErrTutorOutputReviewUnavailable = errors.New("Tutor output review is temporarily unavailable")
 
 type TeachingAgent interface {
 	AnalyzeAnswer(ctx context.Context, request AnalyzeAnswerRequest) (AnalyzeAnswerResult, error)
