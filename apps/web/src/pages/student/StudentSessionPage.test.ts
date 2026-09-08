@@ -268,6 +268,60 @@ test('keeps a submitted answer available when Tutor review is temporarily unavai
   wrapper.unmount()
 })
 
+test('keeps controls and typed text available when a HINT must be rephrased', async () => {
+  let supportRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/support')) {
+      supportRequests++
+      return response({ code: 'TUTOR_OUTPUT_REPHRASE_REQUIRED' }, 422)
+    }
+    return response(session({ status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('我正在整理自己的思路')
+  const hint = wrapper.findAll('button').find((button) => button.text().includes('一点提示'))!
+
+  await hint.trigger('click')
+  await flushPromises()
+
+  expect(supportRequests).toBe(1)
+  expect(learning.error).toBe('刚才的提示不太合适，老师换个问法。请再点一次『一点提示』')
+  expect(wrapper.get('[role="alert"]').text()).toBe('刚才的提示不太合适，老师换个问法。请再点一次『一点提示』')
+  expect(wrapper.text()).not.toContain('学习数据暂时不可用（422）')
+  expect(textarea.element.value).toBe('我正在整理自己的思路')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(hint.attributes('disabled')).toBeUndefined()
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})
+
+test('keeps a submitted answer and controls available when the response must be rephrased', async () => {
+  let answerRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/answers')) {
+      answerRequests++
+      return response({ code: 'TUTOR_OUTPUT_REPHRASE_REQUIRED' }, 422)
+    }
+    return response(session({ status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('这是我还要继续检查的想法')
+
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(answerRequests).toBe(1)
+  expect(learning.error).toBe('刚才的回应不太合适，老师换个问法。请再提交一次')
+  expect(wrapper.get('[role="alert"]').text()).toBe('刚才的回应不太合适，老师换个问法。请再提交一次')
+  expect(wrapper.text()).not.toContain('课堂暂时无法提交（422）')
+  expect(textarea.element.value).toBe('这是我还要继续检查的想法')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})
+
 test('uses unambiguous timers and renders the Tutor action title once', async () => {
   const { wrapper } = await mountPage(vi.fn(async () => response(session())))
 

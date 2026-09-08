@@ -5,9 +5,15 @@ import (
 	"errors"
 )
 
-const TutorOutputReviewUnavailableCode = "TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE"
+const (
+	TutorOutputReviewUnavailableCode = "TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE"
+	TutorOutputRephraseRequiredCode  = "TUTOR_OUTPUT_REPHRASE_REQUIRED"
+)
 
-var ErrTutorOutputReviewUnavailable = errors.New("Tutor output review is temporarily unavailable")
+var (
+	ErrTutorOutputReviewUnavailable = errors.New("Tutor output review is temporarily unavailable")
+	ErrTutorOutputRephraseRequired  = errors.New("Tutor output must be rephrased before publication")
+)
 
 type TeachingAgent interface {
 	AnalyzeAnswer(ctx context.Context, request AnalyzeAnswerRequest) (AnalyzeAnswerResult, error)

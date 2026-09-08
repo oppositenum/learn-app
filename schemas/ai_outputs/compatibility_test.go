@@ -2,6 +2,7 @@ package aioutputs
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"reflect"
@@ -118,4 +119,29 @@ func TestTutorOutputReviewSchemaIsProviderCompatible(t *testing.T) {
 	if err := ValidateProviderSchemaCompatibility(raw); err != nil {
 		t.Fatal(err)
 	}
+	var document any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{
+		"type": true, "properties": true, "required": true,
+		"additionalProperties": true, "enum": true, "items": true,
+	}
+	var inspect func(any, bool)
+	inspect = func(value any, propertyMap bool) {
+		switch current := value.(type) {
+		case map[string]any:
+			for key, child := range current {
+				if !propertyMap && !allowed[key] {
+					t.Errorf("Tutor output review schema uses non-allowlisted keyword %q", key)
+				}
+				inspect(child, key == "properties")
+			}
+		case []any:
+			for _, child := range current {
+				inspect(child, false)
+			}
+		}
+	}
+	inspect(document, false)
 }

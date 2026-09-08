@@ -12,6 +12,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	aioutputs "github.com/oppositenum/ai-learning-tutor/schemas/ai_outputs"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 )
 
 var ErrTutorOutputAuditorUnavailable = errors.New("independent Tutor output auditor is unavailable")
@@ -87,7 +88,9 @@ func (provider *CodexProvider) GenerateExplanation(ctx context.Context, request 
 	return provider.generateTurn(ctx, PurposeExplanation, GenerateTurnRequest(request), "Give a concise explanation or voice script using a parallel example. Do not reveal the original answer unless the server explicitly authorizes it.")
 }
 
-const turnStyleInstructions = "Write the message in warm, conversational Chinese for a primary or junior-secondary student. Keep it brief. Plain text only: never use markdown syntax such as headings, asterisks, bullet or dash list markers."
+const turnStyleInstructions = "Write the message in warm, conversational Chinese for a primary or junior-secondary student. Keep it brief. Plain text only: never use markdown syntax such as headings, asterisks, bullet or dash list markers. Never directly quote, repeat, or equivalently paraphrase a sentence or phrase that uniquely supports the correct answer. Do not locate evidence for the student. Never provide the answer or a complete solution."
+
+const hintInstructions = "For a HINT, provide only an observation direction, a reasoning method, or a next-step question."
 
 func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose, request GenerateTurnRequest, instructions string) (TutorTurn, error) {
 	if provider.auditor == nil {
@@ -97,6 +100,9 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	defer cancel()
 	instructions = instructions + " " + turnStyleInstructions
 	requiredAction := string(request.TutorDecision.NextState)
+	if request.TutorDecision.NextState == tutor.StateHint {
+		instructions = instructions + " " + hintInstructions
+	}
 	if requiredAction != "" {
 		instructions = fmt.Sprintf(`%s Set the "action" output field to exactly %q.`, instructions, requiredAction)
 	}

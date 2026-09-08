@@ -17,6 +17,8 @@ import (
 
 const reviewSchemaFile = "tutor_output_review.schema.json"
 
+const reviewerInstructions = "Act only as an independent answer-disclosure reviewer for a child-facing Tutor response. Compare the candidate message and every segment with the original question and private answer. REJECT only when the candidate directly states the correct answer, uniquely determines the correct answer through equivalent wording or conversion, or provides a complete solution that replaces the student's reasoning. PASS when the candidate only points to an observation direction, identifies a type of evidence to consider, gives a method framework, or asks a follow-up question. For PASS, return no_answer_leak=true, reason_codes=[NONE], and an empty violations array. For REJECT, return no_answer_leak=false, one or more disclosure reason_codes, and violations whose violation_type set exactly matches reason_codes. Use payload_kind=MESSAGE with segment_index=-1 for the message, or payload_kind=SEGMENT with its zero-based segment_index for a segment; never duplicate a violation. Return only the structured violation enums and indices required by the schema; never output a free-text reason. Do not rewrite the candidate and do not perform unrelated safety classification."
+
 type OpenAIReviewer struct {
 	client   ai.StructuredClient
 	provider string
@@ -92,7 +94,7 @@ func (reviewer *OpenAIReviewer) ReviewTutorOutput(ctx context.Context, request a
 	result, err := reviewer.client.GenerateStructured(ctx, ai.StructuredRequest{
 		RequestID: requestID, StudentID: request.StudentID, SessionID: request.SessionID,
 		Purpose:      ai.PurposeTutorOutputReview,
-		Instructions: "Act only as an independent answer-disclosure reviewer for a child-facing Tutor response. Compare the candidate message and every segment with the original question and private answer. Return PASS only when the candidate does not state, derive, or equivalently disclose the original answer or full solution. Do not rewrite the response and do not perform unrelated safety classification.",
+		Instructions: reviewerInstructions,
 		Input:        input, SchemaName: reviewSchemaFile, Schema: reviewer.raw,
 	})
 	if err != nil {
@@ -111,8 +113,8 @@ func (reviewer *OpenAIReviewer) ReviewTutorOutput(ctx context.Context, request a
 	if err := json.Unmarshal(result.OutputJSON, &review); err != nil {
 		return Review{}, evidence, fmt.Errorf("%w: decode typed output: %v", ErrInvalidReviewOutput, err)
 	}
-	if err := validateReviewVerdict(review); err != nil {
-		return Review{}, evidence, fmt.Errorf("%w: inconsistent verdict: %v", ErrInvalidReviewOutput, err)
+	if err := validateReviewVerdict(review, len(request.Candidate.Segments)); err != nil {
+		return Review{}, evidence, fmt.Errorf("%w: inconsistent verdict: %w", ErrInvalidReviewOutput, err)
 	}
 	return review, evidence, nil
 }

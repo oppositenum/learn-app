@@ -84,8 +84,11 @@ export class ApiError extends Error {
 }
 
 const tutorReviewUnavailableCode = 'TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE'
+const tutorOutputRephraseRequiredCode = 'TUTOR_OUTPUT_REPHRASE_REQUIRED'
+const tutorHintRephraseMessage = '刚才的提示不太合适，老师换个问法。请再点一次『一点提示』'
+const tutorAnswerRephraseMessage = '刚才的回应不太合适，老师换个问法。请再提交一次'
 
-async function studentApiError(response: Response, fallback: string): Promise<ApiError> {
+async function studentApiError(response: Response, fallback: string, rephraseMessage = tutorAnswerRephraseMessage): Promise<ApiError> {
   let code: string | undefined
   try {
     const payload = await response.json() as unknown
@@ -94,12 +97,13 @@ async function studentApiError(response: Response, fallback: string): Promise<Ap
     // Existing endpoints may return plain-text errors; keep their status-based messages.
   }
   if (code === tutorReviewUnavailableCode) return new ApiError('老师正在想，等一下再试一次', response.status, code)
+  if (code === tutorOutputRephraseRequiredCode) return new ApiError(rephraseMessage, response.status, code)
   return new ApiError(`${fallback}（${response.status}）`, response.status, code)
 }
 
-async function studentJSON<T>(path: string, options?: RequestInit): Promise<T> {
+async function studentJSON<T>(path: string, options?: RequestInit, rephraseMessage?: string): Promise<T> {
   const response = await fetch(path, { credentials: 'same-origin', ...options })
-  if (!response.ok) throw await studentApiError(response, '学习数据暂时不可用')
+  if (!response.ok) throw await studentApiError(response, '学习数据暂时不可用', rephraseMessage)
   return response.json() as Promise<T>
 }
 
@@ -142,7 +146,7 @@ export async function submitStudentAnswer(sessionID: string, answer: string): Pr
 export async function requestStudentSupport(sessionID: string, type: 'HINT' | 'EXPLAIN'): Promise<SubmitAnswerResult> {
   return studentJSON<SubmitAnswerResult>(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/support`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type }),
-  })
+  }, type === 'HINT' ? tutorHintRephraseMessage : tutorAnswerRephraseMessage)
 }
 
 export async function completeStudentVoiceExplanation(sessionID: string): Promise<SubmitAnswerResult> {

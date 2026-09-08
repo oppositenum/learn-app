@@ -250,6 +250,24 @@ func TestCodexProviderAuditsEveryStudentVisibleGenerationEntryPoint(t *testing.T
 			if len(auditor.requests) != 1 || len(auditor.requests[0].Candidate.Segments) != 1 || auditor.requests[0].GeneratorResponseID != "resp-audited" {
 				t.Fatalf("entry point did not cross audit gate: %+v", auditor.requests)
 			}
+			for _, required := range []string{"Never directly quote, repeat, or equivalently paraphrase", "Do not locate evidence for the student", "Never provide the answer or a complete solution"} {
+				if !strings.Contains(client.request.Instructions, required) {
+					t.Fatalf("%s instructions missing shared disclosure constraint %q: %s", test.name, required, client.request.Instructions)
+				}
+			}
+			if test.action == tutor.StateHint {
+				if !strings.Contains(client.request.Instructions, hintInstructions) {
+					t.Fatalf("HINT instructions missing dedicated constraint: %s", client.request.Instructions)
+				}
+			} else if strings.Contains(client.request.Instructions, hintInstructions) {
+				t.Fatalf("%s unexpectedly received HINT-only instructions: %s", test.name, client.request.Instructions)
+			}
+			if test.name == "parallel example" {
+				const unchanged = "Explain with a parallel example using different values. Do not solve the original question."
+				if !strings.HasPrefix(client.request.Instructions, unchanged+" ") {
+					t.Fatalf("parallel-example instruction changed: %s", client.request.Instructions)
+				}
+			}
 		})
 	}
 }

@@ -1,10 +1,12 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -207,8 +209,54 @@ func readProtectedClassroomSnapshot(t *testing.T, ctx context.Context, pool *pgx
 	return snapshot
 }
 
+func assertMinimalViolationJSON(t *testing.T, raw string, expected []tutoraudit.Violation, forbidden ...string) {
+	t.Helper()
+	var decoded []map[string]any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("decode violations_json: %v", err)
+	}
+	if len(decoded) != len(expected) {
+		t.Fatalf("violations_json entries=%d want=%d", len(decoded), len(expected))
+	}
+	allowedTypes := map[string]bool{"DIRECT_ANSWER": true, "EQUIVALENT_ANSWER": true, "FULL_SOLUTION": true, "SEGMENT_ANSWER_LEAK": true}
+	allowedKinds := map[string]bool{"MESSAGE": true, "SEGMENT": true}
+	for index, violation := range decoded {
+		if len(violation) != 3 {
+			t.Fatalf("violation %d keys=%v want exactly three allowlisted keys", index, violation)
+		}
+		violationType, typeOK := violation["violation_type"].(string)
+		payloadKind, kindOK := violation["payload_kind"].(string)
+		segmentIndex, indexOK := violation["segment_index"].(float64)
+		if !typeOK || !kindOK || !indexOK || !allowedTypes[violationType] || !allowedKinds[payloadKind] {
+			t.Fatalf("violation %d contains a non-enum or non-integer value: %v", index, violation)
+		}
+		if _, ok := violation["violation_type"]; !ok {
+			t.Fatalf("violation %d missing violation_type", index)
+		}
+		if _, ok := violation["payload_kind"]; !ok {
+			t.Fatalf("violation %d missing payload_kind", index)
+		}
+		if _, ok := violation["segment_index"]; !ok {
+			t.Fatalf("violation %d missing segment_index", index)
+		}
+		want := expected[index]
+		if violationType != want.ViolationType || payloadKind != want.PayloadKind || int(segmentIndex) != want.SegmentIndex || segmentIndex != float64(int(segmentIndex)) {
+			t.Fatalf("violation %d=%v want=%+v", index, violation, want)
+		}
+	}
+	for _, value := range forbidden {
+		if strings.Contains(raw, value) {
+			t.Fatalf("violations_json contains forbidden free text")
+		}
+	}
+}
+
 func TestB3BTutorOutputReviewRejectsBeforeClassroomRealtimeAndVoiceMutation(t *testing.T) {
 	ctx := context.Background()
+	var logOutput bytes.Buffer
+	previousLogOutput := log.Writer()
+	log.SetOutput(&logOutput)
+	defer log.SetOutput(previousLogOutput)
 	pool := isolatedPool(t, ctx, testDatabaseURL(t))
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
 		t.Fatal(err)
@@ -224,7 +272,7 @@ func TestB3BTutorOutputReviewRejectsBeforeClassroomRealtimeAndVoiceMutation(t *t
 			`{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.98,"error_type":"FIXED_COST_IGNORED","misconceptions":["FIXED_COST_IGNORED"],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"VOICE_EXPLAIN","safe_to_increase_difficulty":false}`,
 			`{"message":"先把固定费用和饮料费用分开。","action":"VOICE_EXPLAIN","answer_revealed":false,"segments":[{"id":"s1","text":"先分开两类费用。"}]}`,
 		},
-		reviewerModel: {`{"result":"REJECT","no_answer_leak":false,"reason_codes":["EQUIVALENT_ANSWER"]}`},
+		reviewerModel: {`{"result":"REJECT","no_answer_leak":false,"reason_codes":["EQUIVALENT_ANSWER"],"violations":[{"violation_type":"EQUIVALENT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`},
 	})
 	hub := realtime.NewHub()
 	studentEvents, stop := hub.Subscribe(fixture.studentID.String(), auth.RoleStudent)
@@ -238,11 +286,20 @@ func TestB3BTutorOutputReviewRejectsBeforeClassroomRealtimeAndVoiceMutation(t *t
 	before := readProtectedClassroomSnapshot(t, ctx, pool, fixture)
 
 	response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/answers", fixture.studentToken, map[string]any{"answer": "wrong runtime answer"})
-	if response.Code != http.StatusInternalServerError || response.Body.String() != "answer could not be processed\n" {
+	if response.Code != http.StatusUnprocessableEntity || response.Header().Get("Content-Type") != "application/json" {
 		t.Fatalf("rejected response=%d %q", response.Code, response.Body.String())
 	}
-	if strings.Contains(response.Body.String(), fixture.privateCanary) || strings.Contains(strings.ToLower(response.Body.String()), "correct_answer") {
-		t.Fatalf("student-visible rejection leaked private answer: %s", response.Body.String())
+	var payload map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload) != 1 || payload["code"] != ai.TutorOutputRephraseRequiredCode {
+		t.Fatalf("rephrase payload=%q decode_error=%v", response.Body.String(), err)
+	}
+	for _, forbidden := range []string{fixture.privateCanary, "wrong runtime answer", "先把固定费用和饮料费用分开", "EQUIVALENT_ANSWER", "correct_answer"} {
+		if strings.Contains(response.Body.String(), forbidden) || strings.Contains(logOutput.String(), forbidden) {
+			t.Fatalf("rejection response or log contains forbidden content")
+		}
+	}
+	if !strings.Contains(logOutput.String(), "classroom submit Tutor output requires rephrasing") {
+		t.Fatalf("rejection did not emit the fixed content-free log message")
 	}
 	after := readProtectedClassroomSnapshot(t, ctx, pool, fixture)
 	if after != before {
@@ -274,6 +331,64 @@ func TestB3BTutorOutputReviewRejectsBeforeClassroomRealtimeAndVoiceMutation(t *t
 	if reviewerCost != "0.000140000" {
 		t.Fatalf("reviewer cost=%s want=0.000140000", reviewerCost)
 	}
+	var violationsJSON string
+	if err := pool.QueryRow(ctx, `SELECT violations_json::text FROM tutor_output_audits WHERE session_id=$1`, fixture.sessionID).Scan(&violationsJSON); err != nil {
+		t.Fatal(err)
+	}
+	assertMinimalViolationJSON(t, violationsJSON, []tutoraudit.Violation{{ViolationType: "EQUIVALENT_ANSWER", PayloadKind: "MESSAGE", SegmentIndex: -1}}, fixture.privateCanary, "wrong runtime answer", "先把固定费用和饮料费用分开")
+}
+
+func TestB3CReviewerRejectsSupportWithMinimal422AndNoClassroomMutation(t *testing.T) {
+	ctx := context.Background()
+	var logOutput bytes.Buffer
+	previousLogOutput := log.Writer()
+	log.SetOutput(&logOutput)
+	defer log.SetOutput(previousLogOutput)
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	tutorModel, reviewerModel := "b3c-support-tutor", "b3c-support-reviewer"
+	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
+	queue := newResponseQueueServer(t, map[string][]string{
+		tutorModel:    {`{"message":"先观察题目里的关系。","action":"HINT","answer_revealed":false,"segments":[]}`},
+		reviewerModel: {`{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`},
+	})
+	service := classroom.NewService(pool, nil, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
+	router := api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Classroom:    classroom.NewHandler(service, pool, parent.NewRepository(pool)),
+	})
+	before := readProtectedClassroomSnapshot(t, ctx, pool, fixture)
+
+	response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/support", fixture.studentToken, map[string]any{"type": "HINT"})
+	if response.Code != http.StatusUnprocessableEntity || response.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("support rejection response=%d content-type=%q", response.Code, response.Header().Get("Content-Type"))
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload) != 1 || payload["code"] != ai.TutorOutputRephraseRequiredCode {
+		t.Fatalf("support rephrase payload=%q decode_error=%v", response.Body.String(), err)
+	}
+	for _, forbidden := range []string{fixture.privateCanary, "先观察题目里的关系", "DIRECT_ANSWER", "correct_answer"} {
+		if strings.Contains(response.Body.String(), forbidden) || strings.Contains(logOutput.String(), forbidden) {
+			t.Fatalf("support rejection response or log contains forbidden content")
+		}
+	}
+	if !strings.Contains(logOutput.String(), "classroom support Tutor output requires rephrasing") {
+		t.Fatalf("support rejection did not emit the fixed content-free log message")
+	}
+	if after := readProtectedClassroomSnapshot(t, ctx, pool, fixture); after != before {
+		t.Fatalf("support rejection mutated classroom state:\nbefore=%+v\nafter=%+v", before, after)
+	}
+	var violationsJSON string
+	if err := pool.QueryRow(ctx, `SELECT violations_json::text FROM tutor_output_audits WHERE session_id=$1 AND reviewer_result='REJECT' AND final_result='REJECT' AND reason_code='REVIEWER_REJECTED'`, fixture.sessionID).Scan(&violationsJSON); err != nil {
+		t.Fatal(err)
+	}
+	assertMinimalViolationJSON(t, violationsJSON, []tutoraudit.Violation{{ViolationType: "DIRECT_ANSWER", PayloadKind: "MESSAGE", SegmentIndex: -1}}, fixture.privateCanary, "先观察题目里的关系")
+	if queue.callCount(tutorModel) != 1 || queue.callCount(reviewerModel) != 1 {
+		t.Fatalf("support rejection provider calls tutor=%d reviewer=%d", queue.callCount(tutorModel), queue.callCount(reviewerModel))
+	}
 }
 
 func TestB3BInvalidReviewSchemaFailsClosedAfterPricedUsage(t *testing.T) {
@@ -287,7 +402,7 @@ func TestB3BInvalidReviewSchemaFailsClosedAfterPricedUsage(t *testing.T) {
 	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
 	queue := newResponseQueueServer(t, map[string][]string{
 		tutorModel:    {`{"message":"先找出固定费用。","action":"HINT","answer_revealed":false,"segments":[]}`},
-		reviewerModel: {`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"unexpected":true}`},
+		reviewerModel: {`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[],"unexpected":true}`},
 	})
 	service := classroom.NewService(pool, nil, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
 	var studentUserID uuid.UUID
@@ -320,7 +435,7 @@ func TestB3BDeterministicGateRejectsSelfReportedSafeAnswerAfterIndependentReview
 	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
 	queue := newResponseQueueServer(t, map[string][]string{
 		tutorModel:    {`{"message":"原题答案是` + fixture.privateCanary + `。","action":"HINT","answer_revealed":false,"segments":[]}`},
-		reviewerModel: {`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"]}`},
+		reviewerModel: {`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`},
 	})
 	hub := realtime.NewHub()
 	studentEvents, stop := hub.Subscribe(fixture.studentID.String(), auth.RoleStudent)
@@ -332,8 +447,12 @@ func TestB3BDeterministicGateRejectsSelfReportedSafeAnswerAfterIndependentReview
 	})
 	before := readProtectedClassroomSnapshot(t, ctx, pool, fixture)
 	response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/support", fixture.studentToken, map[string]any{"type": "HINT"})
-	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), fixture.privateCanary) {
+	if response.Code != http.StatusUnprocessableEntity || response.Header().Get("Content-Type") != "application/json" || strings.Contains(response.Body.String(), fixture.privateCanary) {
 		t.Fatalf("deterministic rejection response=%d %q", response.Code, response.Body.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload) != 1 || payload["code"] != ai.TutorOutputRephraseRequiredCode {
+		t.Fatalf("deterministic rephrase payload=%q decode_error=%v", response.Body.String(), err)
 	}
 	if after := readProtectedClassroomSnapshot(t, ctx, pool, fixture); after != before {
 		t.Fatalf("deterministic rejection mutated classroom:\nbefore=%+v\nafter=%+v", before, after)
@@ -369,7 +488,7 @@ func TestB3BUnpricedReviewerIsBlockedBeforeNetworkAndFailsClosed(t *testing.T) {
 	insertAuditPrices(t, ctx, pool, tutorModel)
 	queue := newResponseQueueServer(t, map[string][]string{
 		tutorModel:    {`{"message":"先找出固定费用。","action":"HINT","answer_revealed":false,"segments":[]}`},
-		reviewerModel: {`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"]}`},
+		reviewerModel: {`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`},
 	})
 	service := classroom.NewService(pool, nil, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
 	var studentUserID uuid.UUID
@@ -404,7 +523,7 @@ func TestB3BReviewer429RetryRecoversWithSinglePricedUsage(t *testing.T) {
 		tutorModel: {{status: http.StatusOK, output: `{"message":"先找出固定费用。","action":"HINT","answer_revealed":false,"segments":[]}`}},
 		reviewerModel: {
 			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
-			{status: http.StatusOK, output: `{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"]}`},
+			{status: http.StatusOK, output: `{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`},
 		},
 	})
 	service := classroom.NewService(pool, nil, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))

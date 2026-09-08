@@ -200,7 +200,7 @@ func TestRetryingOpenAIReviewerUsesANewRequestIDPerAttempt(t *testing.T) {
 	client := &reviewStructuredClient{
 		errors: []error{retryableResponseError(http.StatusTooManyRequests, 0, false), nil},
 		results: []ai.StructuredResult{{}, {
-			OutputJSON: json.RawMessage(`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"]}`),
+			OutputJSON: json.RawMessage(`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`),
 			Usage:      ai.ModelUsage{Provider: "openai", Model: "reviewer-v1"},
 		}},
 	}

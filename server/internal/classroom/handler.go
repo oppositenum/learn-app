@@ -85,8 +85,13 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 		http.Error(writer, "authentication required", http.StatusUnauthorized)
 		return
 	}
+	if errors.Is(err, ai.ErrTutorOutputRephraseRequired) {
+		log.Print("classroom submit Tutor output requires rephrasing")
+		writeJSON(writer, http.StatusUnprocessableEntity, map[string]string{"code": ai.TutorOutputRephraseRequiredCode})
+		return
+	}
 	if errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
-		log.Printf("classroom submit failed: %v", err)
+		log.Print("classroom submit Tutor output review unavailable")
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorOutputReviewUnavailableCode})
 		return
 	}
@@ -181,8 +186,13 @@ func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http
 		http.Error(writer, "authentication required", http.StatusUnauthorized)
 		return
 	}
+	if errors.Is(err, ai.ErrTutorOutputRephraseRequired) {
+		log.Print("classroom support Tutor output requires rephrasing")
+		writeJSON(writer, http.StatusUnprocessableEntity, map[string]string{"code": ai.TutorOutputRephraseRequiredCode})
+		return
+	}
 	if errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
-		log.Printf("classroom support failed: %v", err)
+		log.Print("classroom support Tutor output review unavailable")
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorOutputReviewUnavailableCode})
 		return
 	}

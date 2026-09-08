@@ -1,8 +1,7 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["result", "no_answer_leak", "reason_codes"],
+  "required": ["result", "no_answer_leak", "reason_codes", "violations"],
   "properties": {
     "result": { "enum": ["PASS", "REJECT"] },
     "no_answer_leak": { "type": "boolean" },
@@ -16,6 +15,26 @@
           "SEGMENT_ANSWER_LEAK",
           "NONE"
         ]
+      }
+    },
+    "violations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["violation_type", "payload_kind", "segment_index"],
+        "properties": {
+          "violation_type": {
+            "enum": [
+              "DIRECT_ANSWER",
+              "EQUIVALENT_ANSWER",
+              "FULL_SOLUTION",
+              "SEGMENT_ANSWER_LEAK"
+            ]
+          },
+          "payload_kind": { "enum": ["MESSAGE", "SEGMENT"] },
+          "segment_index": { "type": "integer" }
+        }
       }
     }
   }

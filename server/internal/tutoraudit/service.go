@@ -13,12 +13,13 @@ import (
 const PolicyVersion = "tutor-output-audit-v1"
 
 var (
-	ErrReviewerUnavailable = errors.New("independent Tutor output reviewer is unavailable")
-	ErrNonIndependent      = errors.New("Tutor output reviewer must be independent from generator")
-	ErrInvalidProvenance   = errors.New("Tutor output reviewer returned invalid provenance")
-	ErrOutputRejected      = errors.New("Tutor output was rejected by the answer-disclosure audit")
-	ErrAuditRecord         = errors.New("Tutor output audit record could not be persisted")
-	ErrInvalidReviewOutput = errors.New("invalid Tutor output review")
+	ErrReviewerUnavailable    = errors.New("independent Tutor output reviewer is unavailable")
+	ErrNonIndependent         = errors.New("Tutor output reviewer must be independent from generator")
+	ErrInvalidProvenance      = errors.New("Tutor output reviewer returned invalid provenance")
+	ErrOutputRejected         = ai.ErrTutorOutputRephraseRequired
+	ErrAuditRecord            = errors.New("Tutor output audit record could not be persisted")
+	ErrInvalidReviewOutput    = errors.New("invalid Tutor output review")
+	ErrInconsistentViolations = errors.New("inconsistent Tutor output review violations")
 )
 
 type ReviewResult string
@@ -32,6 +33,13 @@ type Review struct {
 	Result       ReviewResult `json:"result"`
 	NoAnswerLeak bool         `json:"no_answer_leak"`
 	ReasonCodes  []string     `json:"reason_codes"`
+	Violations   []Violation  `json:"violations"`
+}
+
+type Violation struct {
+	ViolationType string `json:"violation_type"`
+	PayloadKind   string `json:"payload_kind"`
+	SegmentIndex  int    `json:"segment_index"`
 }
 
 type ReviewEvidence struct {
@@ -45,17 +53,19 @@ type Reviewer interface {
 }
 
 type AuditRecord struct {
-	StudentID            string
-	SessionID            string
-	GenerationResponseID string
-	ReviewerProvider     string
-	ReviewerModel        string
-	ReviewerRequestID    string
-	PolicyVersion        string
-	DeterministicResult  string
-	ReviewerResult       string
-	FinalResult          string
-	ReasonCode           string
+	StudentID             string
+	SessionID             string
+	GenerationResponseID  string
+	ReviewerProvider      string
+	ReviewerModel         string
+	ReviewerRequestID     string
+	PolicyVersion         string
+	DeterministicResult   string
+	ReviewerResult        string
+	FinalResult           string
+	ReasonCode            string
+	Violations            []Violation
+	CandidateSegmentCount int
 }
 
 type Recorder interface {
@@ -96,6 +106,11 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 	}
 	deterministic := service.checker.Check(request)
 	review, evidence, reviewErr := service.reviewer.ReviewTutorOutput(ctx, request)
+	if reviewErr == nil {
+		if err := validateReviewVerdict(review, len(request.Candidate.Segments)); err != nil {
+			reviewErr = fmt.Errorf("%w: inconsistent verdict: %w", ErrInvalidReviewOutput, err)
+		}
+	}
 
 	reviewerResult := string(review.Result)
 	finalResult := "REJECT"
@@ -122,12 +137,18 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 		finalErr = nil
 	}
 
+	var violations []Violation
+	if reviewErr == nil && evidence.Provider+":"+evidence.Model == service.reviewerIdentity && strings.TrimSpace(evidence.RequestID) != "" {
+		violations = make([]Violation, len(review.Violations))
+		copy(violations, review.Violations)
+	}
 	record := AuditRecord{
 		StudentID: request.StudentID, SessionID: request.SessionID,
 		GenerationResponseID: request.GeneratorResponseID,
 		ReviewerProvider:     evidence.Provider, ReviewerModel: evidence.Model, ReviewerRequestID: evidence.RequestID,
 		PolicyVersion: PolicyVersion, DeterministicResult: deterministic.Result(),
 		ReviewerResult: reviewerResult, FinalResult: finalResult, ReasonCode: reasonCode,
+		Violations: violations, CandidateSegmentCount: len(request.Candidate.Segments),
 	}
 	recordContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
@@ -141,10 +162,13 @@ func reviewApproves(review Review) bool {
 	return review.Result == ReviewPass && review.NoAnswerLeak && len(review.ReasonCodes) == 1 && review.ReasonCodes[0] == "NONE"
 }
 
-func validateReviewVerdict(review Review) error {
+func validateReviewVerdict(review Review, segmentCount int) error {
 	if review.Result == ReviewPass {
 		if !review.NoAnswerLeak || len(review.ReasonCodes) != 1 || review.ReasonCodes[0] != "NONE" {
 			return errors.New("PASS must have no_answer_leak=true and reason_codes=[NONE]")
+		}
+		if len(review.Violations) != 0 {
+			return fmt.Errorf("%w: PASS must have no violations", ErrInconsistentViolations)
 		}
 		return nil
 	}
@@ -170,10 +194,59 @@ func validateReviewVerdict(review Review) error {
 		}
 		seen[code] = struct{}{}
 	}
+	if len(review.Violations) == 0 {
+		return fmt.Errorf("%w: REJECT must have at least one violation", ErrInconsistentViolations)
+	}
+	violationTypes, err := validateViolations(review.Violations, segmentCount)
+	if err != nil {
+		return err
+	}
+	if len(violationTypes) != len(seen) {
+		return fmt.Errorf("%w: violation types do not match reason codes", ErrInconsistentViolations)
+	}
+	for code := range seen {
+		if _, ok := violationTypes[code]; !ok {
+			return fmt.Errorf("%w: violation types do not match reason codes", ErrInconsistentViolations)
+		}
+	}
 	return nil
 }
 
+func validateViolations(violations []Violation, segmentCount int) (map[string]struct{}, error) {
+	allowedTypes := map[string]struct{}{
+		"DIRECT_ANSWER": {}, "EQUIVALENT_ANSWER": {}, "FULL_SOLUTION": {}, "SEGMENT_ANSWER_LEAK": {},
+	}
+	types := make(map[string]struct{}, len(violations))
+	seen := make(map[Violation]struct{}, len(violations))
+	for _, violation := range violations {
+		if _, ok := allowedTypes[violation.ViolationType]; !ok {
+			return nil, fmt.Errorf("%w: unsupported violation type", ErrInconsistentViolations)
+		}
+		switch violation.PayloadKind {
+		case "MESSAGE":
+			if violation.SegmentIndex != -1 {
+				return nil, fmt.Errorf("%w: MESSAGE must use segment index -1", ErrInconsistentViolations)
+			}
+		case "SEGMENT":
+			if violation.SegmentIndex < 0 || violation.SegmentIndex >= segmentCount {
+				return nil, fmt.Errorf("%w: SEGMENT index is outside the candidate", ErrInconsistentViolations)
+			}
+		default:
+			return nil, fmt.Errorf("%w: unsupported payload kind", ErrInconsistentViolations)
+		}
+		if _, duplicate := seen[violation]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate violation", ErrInconsistentViolations)
+		}
+		seen[violation] = struct{}{}
+		types[violation.ViolationType] = struct{}{}
+	}
+	return types, nil
+}
+
 func reviewFailureReason(err error, reviewerResult string) string {
+	if errors.Is(err, ErrInconsistentViolations) {
+		return "INCONSISTENT_VIOLATIONS"
+	}
 	if errors.Is(err, ErrReviewerRetriesExhausted) {
 		return "RETRY_EXHAUSTED"
 	}

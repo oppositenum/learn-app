@@ -54,7 +54,7 @@ func validAuditRequest(message string) ai.TutorOutputAuditRequest {
 
 func passingReviewer() *reviewerStub {
 	return &reviewerStub{
-		review:   Review{Result: ReviewPass, NoAnswerLeak: true, ReasonCodes: []string{"NONE"}},
+		review:   Review{Result: ReviewPass, NoAnswerLeak: true, ReasonCodes: []string{"NONE"}, Violations: []Violation{}},
 		evidence: ReviewEvidence{Provider: "openai", Model: "reviewer-v1", RequestID: "review-request-1"},
 	}
 }
@@ -191,7 +191,7 @@ func TestServiceRejectsInvalidReviewerProvenance(t *testing.T) {
 func TestServiceRejectsReviewerVerdictAndAuditPersistenceFailure(t *testing.T) {
 	t.Run("review rejection", func(t *testing.T) {
 		reviewer := passingReviewer()
-		reviewer.review = Review{Result: ReviewReject, NoAnswerLeak: false, ReasonCodes: []string{"EQUIVALENT_ANSWER"}}
+		reviewer.review = Review{Result: ReviewReject, NoAnswerLeak: false, ReasonCodes: []string{"EQUIVALENT_ANSWER"}, Violations: []Violation{{ViolationType: "EQUIVALENT_ANSWER", PayloadKind: "MESSAGE", SegmentIndex: -1}}}
 		recorder := &recorderStub{}
 		service, err := NewService("openai:generator-v1", "openai:reviewer-v1", reviewer, recorder)
 		if err != nil {
@@ -200,7 +200,7 @@ func TestServiceRejectsReviewerVerdictAndAuditPersistenceFailure(t *testing.T) {
 		if err := service.AuditTutorOutput(context.Background(), validAuditRequest("先找出固定费用。")); !errors.Is(err, ErrOutputRejected) {
 			t.Fatalf("review rejection passed: %v", err)
 		}
-		if len(recorder.records) != 1 || recorder.records[0].ReasonCode != "REVIEWER_REJECTED" {
+		if len(recorder.records) != 1 || recorder.records[0].ReasonCode != "REVIEWER_REJECTED" || len(recorder.records[0].Violations) != 1 {
 			t.Fatalf("review rejection record=%+v", recorder.records)
 		}
 	})
@@ -213,8 +213,11 @@ func TestServiceRejectsReviewerVerdictAndAuditPersistenceFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := service.AuditTutorOutput(context.Background(), validAuditRequest("先找出固定费用。")); !errors.Is(err, ErrOutputRejected) {
+		if err := service.AuditTutorOutput(context.Background(), validAuditRequest("先找出固定费用。")); !errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
 			t.Fatalf("inconsistent passing verdict passed: %v", err)
+		}
+		if len(recorder.records) != 1 || recorder.records[0].ReviewerResult != "INVALID_SCHEMA" || recorder.records[0].ReasonCode != "INVALID_SCHEMA" {
+			t.Fatalf("inconsistent verdict audit=%+v", recorder.records)
 		}
 	})
 
@@ -228,4 +231,42 @@ func TestServiceRejectsReviewerVerdictAndAuditPersistenceFailure(t *testing.T) {
 			t.Fatalf("audit persistence failure did not fail closed: %v", err)
 		}
 	})
+}
+
+func TestServiceRecordsEveryViolationInconsistencyAsFailClosed(t *testing.T) {
+	validViolation := Violation{ViolationType: "DIRECT_ANSWER", PayloadKind: "MESSAGE", SegmentIndex: -1}
+	tests := []struct {
+		name        string
+		review      Review
+		withSegment bool
+	}{
+		{name: "PASS with violation", review: Review{Result: ReviewPass, NoAnswerLeak: true, ReasonCodes: []string{"NONE"}, Violations: []Violation{validViolation}}},
+		{name: "REJECT without violation", review: Review{Result: ReviewReject, NoAnswerLeak: false, ReasonCodes: []string{"DIRECT_ANSWER"}, Violations: []Violation{}}},
+		{name: "violation type mismatch", review: Review{Result: ReviewReject, NoAnswerLeak: false, ReasonCodes: []string{"DIRECT_ANSWER"}, Violations: []Violation{{ViolationType: "FULL_SOLUTION", PayloadKind: "MESSAGE", SegmentIndex: -1}}}},
+		{name: "MESSAGE with nonnegative segment index", review: Review{Result: ReviewReject, NoAnswerLeak: false, ReasonCodes: []string{"DIRECT_ANSWER"}, Violations: []Violation{{ViolationType: "DIRECT_ANSWER", PayloadKind: "MESSAGE", SegmentIndex: 0}}}},
+		{name: "SEGMENT index outside candidate", review: Review{Result: ReviewReject, NoAnswerLeak: false, ReasonCodes: []string{"SEGMENT_ANSWER_LEAK"}, Violations: []Violation{{ViolationType: "SEGMENT_ANSWER_LEAK", PayloadKind: "SEGMENT", SegmentIndex: 1}}}, withSegment: true},
+		{name: "duplicate violation", review: Review{Result: ReviewReject, NoAnswerLeak: false, ReasonCodes: []string{"DIRECT_ANSWER"}, Violations: []Violation{validViolation, validViolation}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reviewer := passingReviewer()
+			reviewer.review = test.review
+			recorder := &recorderStub{}
+			service, err := NewService("openai:generator-v1", "openai:reviewer-v1", reviewer, recorder)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := validAuditRequest("candidate_canary")
+			if test.withSegment {
+				request.Candidate.Segments = []ai.SpeechSegment{{ID: "s1", Text: "segment_canary"}}
+			}
+			err = service.AuditTutorOutput(context.Background(), request)
+			if !errors.Is(err, ai.ErrTutorOutputReviewUnavailable) || !errors.Is(err, ErrInconsistentViolations) {
+				t.Fatalf("inconsistent violations did not fail closed: %v", err)
+			}
+			if len(recorder.records) != 1 || recorder.records[0].ReviewerResult != "INVALID_SCHEMA" || recorder.records[0].FinalResult != "REJECT" || recorder.records[0].ReasonCode != "INCONSISTENT_VIOLATIONS" || recorder.records[0].Violations != nil {
+				t.Fatalf("inconsistent violation audit=%+v", recorder.records)
+			}
+		})
+	}
 }

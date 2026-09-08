@@ -23,7 +23,7 @@ func (stub *structuredClientStub) GenerateStructured(_ context.Context, request 
 
 func TestOpenAIReviewerUsesDedicatedPurposeAndSeparatedPrivateInput(t *testing.T) {
 	client := &structuredClientStub{result: ai.StructuredResult{Usage: ai.ModelUsage{Provider: "openai", Model: "reviewer-v1"}, OutputJSON: json.RawMessage(`{
-		"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"]
+		"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]
 	}`)}}
 	reviewer, err := NewOpenAIReviewer(client, "openai", "reviewer-v1")
 	if err != nil {
@@ -37,6 +37,17 @@ func TestOpenAIReviewerUsesDedicatedPurposeAndSeparatedPrivateInput(t *testing.T
 	}
 	if client.request.Purpose != ai.PurposeTutorOutputReview || client.request.SchemaName != reviewSchemaFile {
 		t.Fatalf("review request=%+v", client.request)
+	}
+	if client.request.Instructions != reviewerInstructions {
+		t.Fatalf("review instructions=%q", client.request.Instructions)
+	}
+	for _, required := range []string{"REJECT only", "uniquely determines", "complete solution", "PASS when", "observation direction", "type of evidence", "method framework", "follow-up question", "reason_codes=[NONE]", "empty violations array", "violation_type set exactly matches reason_codes", "payload_kind=MESSAGE", "segment_index=-1", "zero-based segment_index", "never duplicate a violation", "never output a free-text reason", "Do not rewrite", "unrelated safety classification"} {
+		if !strings.Contains(client.request.Instructions, required) {
+			t.Fatalf("review instructions missing %q: %s", required, client.request.Instructions)
+		}
+	}
+	if strings.Contains(strings.ToLower(client.request.Instructions), "derive") {
+		t.Fatalf("review instructions retain overbroad derive language: %s", client.request.Instructions)
 	}
 	payload := string(client.request.Input)
 	for _, expected := range []string{"question_prompt", "private_answer", "correct_answer", "full_solution", "teacher_reference_answer", "candidate", "segments"} {
@@ -54,7 +65,7 @@ func TestOpenAIReviewerUsesDedicatedPurposeAndSeparatedPrivateInput(t *testing.T
 func TestOpenAIReviewerReportsActualProviderModelForProvenance(t *testing.T) {
 	client := &structuredClientStub{result: ai.StructuredResult{
 		Usage:      ai.ModelUsage{Provider: "openai", Model: "generator-v1"},
-		OutputJSON: json.RawMessage(`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"]}`),
+		OutputJSON: json.RawMessage(`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`),
 	}}
 	reviewer, err := NewOpenAIReviewer(client, "openai", "reviewer-alias")
 	if err != nil {
@@ -72,7 +83,7 @@ func TestOpenAIReviewerReportsActualProviderModelForProvenance(t *testing.T) {
 func TestOpenAIReviewerAcceptsConsistentRejectVerdict(t *testing.T) {
 	client := &structuredClientStub{result: ai.StructuredResult{
 		Usage:      ai.ModelUsage{Provider: "openai", Model: "reviewer-v1"},
-		OutputJSON: json.RawMessage(`{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER","FULL_SOLUTION"]}`),
+		OutputJSON: json.RawMessage(`{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER","FULL_SOLUTION"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1},{"violation_type":"FULL_SOLUTION","payload_kind":"MESSAGE","segment_index":-1}]}`),
 	}}
 	reviewer, err := NewOpenAIReviewer(client, "openai", "reviewer-v1")
 	if err != nil {
@@ -90,7 +101,7 @@ func TestOpenAIReviewerAcceptsConsistentRejectVerdict(t *testing.T) {
 func TestOpenAIReviewerActualGeneratorIdentityFailsServiceProvenance(t *testing.T) {
 	client := &structuredClientStub{result: ai.StructuredResult{
 		Usage:      ai.ModelUsage{Provider: "openai", Model: "generator-v1"},
-		OutputJSON: json.RawMessage(`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"]}`),
+		OutputJSON: json.RawMessage(`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`),
 	}}
 	reviewer, err := NewOpenAIReviewer(client, "openai", "reviewer-alias")
 	if err != nil {
@@ -107,7 +118,7 @@ func TestOpenAIReviewerActualGeneratorIdentityFailsServiceProvenance(t *testing.
 
 func TestOpenAIReviewerRejectsInvalidSchemaWithRequestEvidence(t *testing.T) {
 	client := &structuredClientStub{result: ai.StructuredResult{Usage: ai.ModelUsage{Provider: "openai", Model: "reviewer-v1"}, OutputJSON: json.RawMessage(`{
-		"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"forged":true
+		"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[],"forged":true
 	}`)}}
 	reviewer, err := NewOpenAIReviewer(client, "openai", "reviewer-v1")
 	if err != nil {
@@ -124,11 +135,11 @@ func TestOpenAIReviewerRejectsInconsistentVerdictsInServerCode(t *testing.T) {
 		name   string
 		output string
 	}{
-		{name: "PASS contradiction", output: `{"result":"PASS","no_answer_leak":false,"reason_codes":["NONE"]}`},
-		{name: "REJECT contradiction", output: `{"result":"REJECT","no_answer_leak":true,"reason_codes":["DIRECT_ANSWER"]}`},
-		{name: "illegal reason code", output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":["NONE"]}`},
-		{name: "empty reason codes", output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":[]}`},
-		{name: "duplicate reason codes", output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER","DIRECT_ANSWER"]}`},
+		{name: "PASS contradiction", output: `{"result":"PASS","no_answer_leak":false,"reason_codes":["NONE"],"violations":[]}`},
+		{name: "REJECT contradiction", output: `{"result":"REJECT","no_answer_leak":true,"reason_codes":["DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`},
+		{name: "illegal reason code", output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":["NONE"],"violations":[]}`},
+		{name: "empty reason codes", output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":[],"violations":[]}`},
+		{name: "duplicate reason codes", output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER","DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client := &structuredClientStub{result: ai.StructuredResult{
