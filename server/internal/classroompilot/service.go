@@ -225,6 +225,13 @@ func (service *Service) Submit(ctx context.Context, request SubmitRequest) (Subm
 	if err != nil {
 		return SubmitResult{}, err
 	}
+	// A concurrent copy may commit between the first idempotency lookup and
+	// this snapshot. Resolve it before treating the advanced stage as stale.
+	if existing, found, err := service.loadStoredAttempt(ctx, request.SessionID, request.OperationID); err != nil {
+		return SubmitResult{}, err
+	} else if found {
+		return storedResult(request.SessionID, digest, existing)
+	}
 	if err := validateRequest(snapshot, request); err != nil {
 		if errors.Is(err, ErrStageUnavailable) {
 			return unavailableResult(request), err
