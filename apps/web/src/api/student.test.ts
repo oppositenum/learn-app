@@ -45,3 +45,13 @@ test('maps rejected HINT output to the hint rephrase contract by code', async ()
     message: '刚才的提示不太合适，老师换个问法。请再点一次『一点提示』',
   })
 })
+
+test('maps rejected EXPLAIN output to the explain rephrase contract by code', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => response({ code: 'TUTOR_OUTPUT_REPHRASE_REQUIRED' }, 422)))
+
+  await expect(requestStudentSupport('session-1', 'EXPLAIN')).rejects.toMatchObject({
+    status: 422,
+    code: 'TUTOR_OUTPUT_REPHRASE_REQUIRED',
+    message: '刚才的讲解不太合适，老师换个说法。请再点一次『我不会』',
+  })
+})

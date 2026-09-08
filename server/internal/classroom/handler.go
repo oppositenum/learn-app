@@ -91,7 +91,7 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 		return
 	}
 	if errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
-		log.Print("classroom submit Tutor output review unavailable")
+		logTutorReviewUnavailable("submit", err)
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorOutputReviewUnavailableCode})
 		return
 	}
@@ -192,7 +192,7 @@ func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http
 		return
 	}
 	if errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
-		log.Print("classroom support Tutor output review unavailable")
+		logTutorReviewUnavailable("support", err)
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorOutputReviewUnavailableCode})
 		return
 	}
@@ -546,4 +546,23 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(value)
+}
+
+func logTutorReviewUnavailable(operation string, err error) {
+	details, ok := ai.TutorOutputReviewFailureDetails(err)
+	if !ok {
+		details = ai.TutorReviewFailureDetails{
+			Category:     ai.TutorReviewFailureOther,
+			ProviderCode: ai.TutorReviewDiagnosticUnavailable,
+			RequestID:    ai.TutorReviewDiagnosticUnavailable,
+		}
+	}
+	log.Printf(
+		"classroom tutor_review_unavailable operation=%s failure_category=%s http_status=%d provider_error_code=%s reviewer_request_id=%s",
+		operation,
+		details.Category,
+		details.HTTPStatus,
+		details.ProviderCode,
+		details.RequestID,
+	)
 }

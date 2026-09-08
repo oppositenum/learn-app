@@ -86,6 +86,7 @@ export class ApiError extends Error {
 const tutorReviewUnavailableCode = 'TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE'
 const tutorOutputRephraseRequiredCode = 'TUTOR_OUTPUT_REPHRASE_REQUIRED'
 const tutorHintRephraseMessage = '刚才的提示不太合适，老师换个问法。请再点一次『一点提示』'
+const tutorExplainRephraseMessage = '刚才的讲解不太合适，老师换个说法。请再点一次『我不会』'
 const tutorAnswerRephraseMessage = '刚才的回应不太合适，老师换个问法。请再提交一次'
 
 async function studentApiError(response: Response, fallback: string, rephraseMessage = tutorAnswerRephraseMessage): Promise<ApiError> {
@@ -146,7 +147,7 @@ export async function submitStudentAnswer(sessionID: string, answer: string): Pr
 export async function requestStudentSupport(sessionID: string, type: 'HINT' | 'EXPLAIN'): Promise<SubmitAnswerResult> {
   return studentJSON<SubmitAnswerResult>(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/support`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type }),
-  }, type === 'HINT' ? tutorHintRephraseMessage : tutorAnswerRephraseMessage)
+  }, type === 'HINT' ? tutorHintRephraseMessage : tutorExplainRephraseMessage)
 }
 
 export async function completeStudentVoiceExplanation(sessionID: string): Promise<SubmitAnswerResult> {

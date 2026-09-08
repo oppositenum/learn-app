@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -57,6 +59,26 @@ func passingReviewer() *reviewerStub {
 		review:   Review{Result: ReviewPass, NoAnswerLeak: true, ReasonCodes: []string{"NONE"}, Violations: []Violation{}},
 		evidence: ReviewEvidence{Provider: "openai", Model: "reviewer-v1", RequestID: "review-request-1"},
 	}
+}
+
+func providerResponseError(t *testing.T, status int, code string) error {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(status)
+		_, _ = fmt.Fprintf(writer, `{"error":{"code":%q,"message":"raw_provider_response_canary"}}`, code)
+	}))
+	defer server.Close()
+	client, err := ai.NewOpenAIResponsesClient(server.Client(), server.URL, "test-key", "reviewer-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GenerateStructured(context.Background(), ai.StructuredRequest{
+		SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+	})
+	if err == nil {
+		t.Fatal("provider failure returned no error")
+	}
+	return err
 }
 
 func TestServiceRequiresIndependentConfiguredReviewer(t *testing.T) {
@@ -166,6 +188,54 @@ func TestServiceDistinguishesRetryExhaustionFromImmediateReviewerFailure(t *test
 				t.Fatalf("failure was not mapped to reviewer unavailability: %v", err)
 			}
 			if len(recorder.records) != 1 || recorder.records[0].ReviewerResult != test.reviewerResult || recorder.records[0].FinalResult != "REJECT" || recorder.records[0].ReasonCode != test.reasonCode {
+				t.Fatalf("audit record=%+v", recorder.records)
+			}
+		})
+	}
+}
+
+func TestServicePreservesBoundedReviewerTransportDiagnostics(t *testing.T) {
+	tests := []struct {
+		name           string
+		status         int
+		code           string
+		wrap           func(error) error
+		wantCategory   string
+		wantResult     string
+		wantReasonCode string
+	}{
+		{
+			name: "invalid schema", status: http.StatusBadRequest, code: "invalid_json_schema",
+			wrap:         func(err error) error { return err },
+			wantCategory: ai.TutorReviewFailureInvalidSchema, wantResult: "INVALID_SCHEMA", wantReasonCode: "INVALID_SCHEMA",
+		},
+		{
+			name: "retry exhausted server error", status: http.StatusInternalServerError, code: "server_error",
+			wrap:         func(err error) error { return &retryExhaustedError{attempts: 3, err: err} },
+			wantCategory: ai.TutorReviewFailureRetryExhausted, wantResult: "ERROR", wantReasonCode: "RETRY_EXHAUSTED",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reviewer := passingReviewer()
+			reviewer.err = test.wrap(providerResponseError(t, test.status, test.code))
+			recorder := &recorderStub{}
+			service, err := NewService("openai:generator-v1", "openai:reviewer-v1", reviewer, recorder)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = service.AuditTutorOutput(context.Background(), validAuditRequest("safe_candidate_canary"))
+			if !errors.Is(err, ai.ErrTutorOutputReviewUnavailable) || !errors.Is(err, ErrReviewerUnavailable) {
+				t.Fatalf("review failure did not remain fail closed")
+			}
+			details, ok := ai.TutorOutputReviewFailureDetails(err)
+			if !ok || details.Category != test.wantCategory || details.HTTPStatus != test.status || details.ProviderCode != test.code || details.RequestID != reviewer.evidence.RequestID {
+				t.Fatalf("details=%+v present=%v", details, ok)
+			}
+			if strings.Contains(err.Error(), "raw_provider_response_canary") || strings.Contains(err.Error(), "safe_candidate_canary") {
+				t.Fatal("public review failure exposed provider or candidate content")
+			}
+			if len(recorder.records) != 1 || recorder.records[0].ReviewerResult != test.wantResult || recorder.records[0].ReasonCode != test.wantReasonCode {
 				t.Fatalf("audit record=%+v", recorder.records)
 			}
 		})

@@ -193,6 +193,71 @@ func TestOpenAIResponsesClientClassifiesRetryableStatuses(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesClientExtractsOnlyAllowlistedProviderDiagnostics(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantCode     string
+		wantHTTPCode int
+	}{
+		{
+			name:         "known code",
+			body:         `{"error":{"code":"invalid_json_schema","message":"raw_provider_response_canary"}}`,
+			wantCode:     "invalid_json_schema",
+			wantHTTPCode: http.StatusBadRequest,
+		},
+		{
+			name:         "unknown code",
+			body:         `{"error":{"code":"unrecognized_provider_failure","message":"raw_provider_response_canary"}}`,
+			wantCode:     TutorReviewDiagnosticUnavailable,
+			wantHTTPCode: http.StatusInternalServerError,
+		},
+		{
+			name:         "overlong code",
+			body:         `{"error":{"code":"` + strings.Repeat("x", 65) + `","message":"raw_provider_response_canary"}}`,
+			wantCode:     TutorReviewDiagnosticUnavailable,
+			wantHTTPCode: http.StatusInternalServerError,
+		},
+		{
+			name:         "non-string code",
+			body:         `{"error":{"code":500,"message":"raw_provider_response_canary"}}`,
+			wantCode:     TutorReviewDiagnosticUnavailable,
+			wantHTTPCode: http.StatusInternalServerError,
+		},
+		{
+			name:         "malformed body",
+			body:         `raw_provider_response_canary`,
+			wantCode:     TutorReviewDiagnosticUnavailable,
+			wantHTTPCode: http.StatusInternalServerError,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(test.wantHTTPCode)
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client, err := NewOpenAIResponsesClient(server.Client(), server.URL, "test-key", "reviewer-model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.GenerateStructured(context.Background(), StructuredRequest{
+				SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+			})
+			httpStatus, providerCode, ok := ResponsesErrorDiagnostics(err)
+			if !ok || httpStatus != test.wantHTTPCode || providerCode != test.wantCode {
+				t.Fatalf("diagnostics=(%d,%q,%v) want=(%d,%q,true)", httpStatus, providerCode, ok, test.wantHTTPCode, test.wantCode)
+			}
+			for _, forbidden := range []string{"raw_provider_response_canary", "message"} {
+				if strings.Contains(providerCode, forbidden) {
+					t.Fatalf("diagnostics exposed provider response content")
+				}
+			}
+		})
+	}
+}
+
 func TestOpenAIResponsesClientCapturesRetryAfter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Retry-After", "7")

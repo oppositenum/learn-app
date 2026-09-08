@@ -23,6 +23,16 @@ type ResponsesAPIError struct {
 	RetryAfter    time.Duration
 	RetryAfterSet bool
 	body          string
+	providerCode  string
+}
+
+var knownResponsesProviderErrorCodes = map[string]struct{}{
+	"gateway_concurrency_limit": {},
+	"invalid_json_schema":       {},
+	"invalid_request_error":     {},
+	"rate_limit_exceeded":       {},
+	"server_error":              {},
+	"service_unavailable":       {},
 }
 
 func (err *ResponsesAPIError) Error() string {
@@ -44,6 +54,14 @@ func ResponsesRetryAfter(err error) (time.Duration, bool) {
 		return 0, false
 	}
 	return responseErr.RetryAfter, true
+}
+
+func ResponsesErrorDiagnostics(err error) (httpStatus int, providerCode string, ok bool) {
+	var responseErr *ResponsesAPIError
+	if !errors.As(err, &responseErr) {
+		return 0, TutorReviewDiagnosticUnavailable, false
+	}
+	return responseErr.StatusCode, sanitizeResponsesProviderErrorCode(responseErr.providerCode), true
 }
 
 type OpenAIResponsesClient struct {
@@ -211,12 +229,35 @@ func (client *OpenAIResponsesClient) callResponses(ctx context.Context, request 
 		return decoded, &ResponsesAPIError{
 			StatusCode: httpResponse.StatusCode, RetryAfter: retryAfter,
 			RetryAfterSet: retryAfterSet, body: strings.TrimSpace(string(body)),
+			providerCode: extractResponsesProviderErrorCode(body),
 		}
 	}
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return decoded, fmt.Errorf("decode Responses API response: %w", err)
 	}
 	return decoded, nil
+}
+
+func extractResponsesProviderErrorCode(body []byte) string {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return TutorReviewDiagnosticUnavailable
+	}
+	return sanitizeResponsesProviderErrorCode(envelope.Error.Code)
+}
+
+func sanitizeResponsesProviderErrorCode(code string) string {
+	if len(code) == 0 || len(code) > 64 {
+		return TutorReviewDiagnosticUnavailable
+	}
+	if _, known := knownResponsesProviderErrorCodes[code]; !known {
+		return TutorReviewDiagnosticUnavailable
+	}
+	return code
 }
 
 func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {

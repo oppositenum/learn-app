@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -120,7 +121,11 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 	if reviewErr != nil {
 		reviewerResult = reviewFailureResult(reviewErr)
 		reasonCode = reviewFailureReason(reviewErr, reviewerResult)
-		finalErr = fmt.Errorf("%w: %w: %w", ai.ErrTutorOutputReviewUnavailable, ErrReviewerUnavailable, reviewErr)
+		httpStatus, providerCode, _ := ai.ResponsesErrorDiagnostics(reviewErr)
+		finalErr = ai.NewTutorOutputReviewFailure(
+			reviewFailureCategory(reviewErr), httpStatus, providerCode, evidence.RequestID,
+			fmt.Errorf("%w: %w", ErrReviewerUnavailable, reviewErr),
+		)
 	} else if evidence.Provider+":"+evidence.Model != service.reviewerIdentity || strings.TrimSpace(evidence.RequestID) == "" {
 		reviewerResult = "INVALID_PROVENANCE"
 		reasonCode = reviewerResult
@@ -254,6 +259,10 @@ func reviewFailureReason(err error, reviewerResult string) string {
 }
 
 func reviewFailureResult(err error) string {
+	_, providerCode, isResponseError := ai.ResponsesErrorDiagnostics(err)
+	if isResponseError && providerCode == "invalid_json_schema" {
+		return "INVALID_SCHEMA"
+	}
 	if errors.Is(err, ErrInvalidReviewOutput) {
 		return "INVALID_SCHEMA"
 	}
@@ -261,4 +270,31 @@ func reviewFailureResult(err error) string {
 		return "TIMEOUT"
 	}
 	return "ERROR"
+}
+
+func reviewFailureCategory(err error) string {
+	if errors.Is(err, ErrInconsistentViolations) {
+		return ai.TutorReviewFailureInconsistentViolations
+	}
+	if errors.Is(err, ErrReviewerRetriesExhausted) {
+		return ai.TutorReviewFailureRetryExhausted
+	}
+	if errors.Is(err, ErrInvalidReviewOutput) {
+		return ai.TutorReviewFailureInvalidSchema
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return ai.TutorReviewFailureTimeout
+	}
+	_, providerCode, isResponseError := ai.ResponsesErrorDiagnostics(err)
+	if isResponseError {
+		if providerCode == "invalid_json_schema" {
+			return ai.TutorReviewFailureInvalidSchema
+		}
+		return ai.TutorReviewFailureTransport
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return ai.TutorReviewFailureTransport
+	}
+	return ai.TutorReviewFailureOther
 }
