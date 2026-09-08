@@ -92,10 +92,66 @@ func NewCodexProvider(client StructuredClient, auditors ...TutorOutputAuditor) (
 
 func (provider *CodexProvider) AnalyzeAnswer(ctx context.Context, request AnalyzeAnswerRequest) (AnalyzeAnswerResult, error) {
 	var result AnalyzeAnswerResult
-	if err := provider.generate(ctx, PurposeAnswerAnalysis, "analyze_answer.schema.json", request, "Analyze the answer. Return diagnosis only; never mutate mastery or planning state.", "", "", &result); err != nil {
+	if err := provider.analyzeAnswerWithRetry(ctx, request, &result); err != nil {
 		return AnalyzeAnswerResult{}, err
 	}
 	return result, nil
+}
+
+func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, request AnalyzeAnswerRequest, target *AnalyzeAnswerResult) error {
+	ctx, cancel := context.WithTimeout(ctx, provider.generationRetry.overallTimeout)
+	defer cancel()
+
+	var lastErr error
+	var lastRequestID string
+	var lastHTTPStatus int
+	lastProviderCode := TutorReviewDiagnosticUnavailable
+	var waited time.Duration
+	for attempt := 1; attempt <= provider.generationRetry.maxAttempts; attempt++ {
+		requestID := uuid.NewString()
+		lastRequestID = requestID
+		err := provider.generateAttempt(
+			ctx,
+			PurposeAnswerAnalysis,
+			"analyze_answer.schema.json",
+			request,
+			"Analyze the answer. Return diagnosis only; never mutate mastery or planning state.",
+			"",
+			"",
+			target,
+			requestID,
+		)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !IsRetryableResponsesError(err) {
+			return err
+		}
+		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
+		if attempt == provider.generationRetry.maxAttempts {
+			break
+		}
+
+		delay := provider.generationRetry.baseDelay << (attempt - 1)
+		delay += provider.generationRetryJitter(provider.generationRetry.maxJitter)
+		if retryAfter, ok := ResponsesRetryAfter(err); ok && retryAfter > delay {
+			delay = retryAfter
+		}
+		if delay > provider.generationRetry.maxRetryWait-waited {
+			break
+		}
+		if err := provider.waitForGenerationRetry(ctx, delay); err != nil {
+			lastErr = err
+			break
+		}
+		waited += delay
+	}
+	category := TutorReviewFailureRetryExhausted
+	if errors.Is(lastErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		category = TutorReviewFailureTimeout
+	}
+	return NewTutorGenerationBusyFailure(category, lastHTTPStatus, lastProviderCode, lastRequestID, lastErr)
 }
 
 func (provider *CodexProvider) GenerateTurn(ctx context.Context, request GenerateTurnRequest) (TutorTurn, error) {

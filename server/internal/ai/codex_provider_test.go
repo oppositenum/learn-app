@@ -63,6 +63,21 @@ func validGeneratedTurn(action tutor.State) StructuredResult {
 	}
 }
 
+func validAnswerAnalysis() StructuredResult {
+	return StructuredResult{OutputJSON: json.RawMessage(`{
+		"answer_correct":false,
+		"reasoning_quality":"WEAK",
+		"confidence":0.8,
+		"error_type":"NEEDS_MORE_REASONING",
+		"misconceptions":[],
+		"core_ability_signals":[],
+		"emotion_signal":"NEUTRAL",
+		"engagement":"NORMAL",
+		"recommended_action":"PROBE",
+		"safe_to_increase_difficulty":false
+	}`)}
+}
+
 func configureImmediateGenerationRetries(provider *CodexProvider, waits *[]time.Duration) {
 	provider.generationRetryJitter = func(time.Duration) time.Duration { return 0 }
 	provider.waitForGenerationRetry = func(_ context.Context, delay time.Duration) error {
@@ -75,6 +90,128 @@ func generationResponseError(status int, retryAfter time.Duration, retryAfterSet
 	return &ResponsesAPIError{
 		StatusCode: status, RetryAfter: retryAfter, RetryAfterSet: retryAfterSet,
 		providerCode: "gateway_concurrency_limit",
+	}
+}
+
+func TestCodexProviderAnalysis429RetryRecoversWithSharedPolicy(t *testing.T) {
+	client := &structuredClientStub{
+		errors:  []error{generationResponseError(http.StatusTooManyRequests, 0, false), nil},
+		results: []StructuredResult{{}, validAnswerAnalysis()},
+	}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if client.calls != 2 || !slices.Equal(waits, []time.Duration{TutorRetryBaseDelay}) {
+		t.Fatalf("analysis calls=%d waits=%v", client.calls, waits)
+	}
+	if len(client.requests) != 2 || client.requests[0].RequestID == "" || client.requests[0].RequestID == client.requests[1].RequestID {
+		t.Fatalf("analysis request IDs=%q %q", client.requests[0].RequestID, client.requests[1].RequestID)
+	}
+	if client.requests[0].Purpose != PurposeAnswerAnalysis || client.requests[1].Purpose != PurposeAnswerAnalysis {
+		t.Fatalf("analysis purposes=%q/%q", client.requests[0].Purpose, client.requests[1].Purpose)
+	}
+	t.Logf("analysis 429 recovery calls=%d waits=%v", client.calls, waits)
+}
+
+func TestCodexProviderAnalysis5xxUsesSharedRetryPredicate(t *testing.T) {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			client := &structuredClientStub{
+				errors:  []error{generationResponseError(status, 0, false), nil},
+				results: []StructuredResult{{}, validAnswerAnalysis()},
+			}
+			provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var waits []time.Duration
+			configureImmediateGenerationRetries(provider, &waits)
+
+			if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			if client.calls != 2 || !slices.Equal(waits, []time.Duration{TutorRetryBaseDelay}) {
+				t.Fatalf("status=%d analysis calls=%d waits=%v", status, client.calls, waits)
+			}
+			t.Logf("status=%d analysis calls=%d waits=%v", status, client.calls, waits)
+		})
+	}
+}
+
+func TestCodexProviderAnalysis429RetryExhaustionUsesExistingBusyError(t *testing.T) {
+	client := &structuredClientStub{errors: []error{
+		generationResponseError(http.StatusTooManyRequests, 0, false),
+		generationResponseError(http.StatusTooManyRequests, 0, false),
+		generationResponseError(http.StatusTooManyRequests, 0, false),
+	}}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{})
+	if !errors.Is(err, ErrTutorGenerationBusy) || !IsRetryableResponsesError(err) {
+		t.Fatalf("analysis exhaustion error=%v", err)
+	}
+	details, ok := TutorGenerationBusyFailureDetails(err)
+	if !ok || details.Category != TutorReviewFailureRetryExhausted || details.HTTPStatus != http.StatusTooManyRequests ||
+		details.ProviderCode != "gateway_concurrency_limit" || details.RequestID != client.requests[2].RequestID {
+		t.Fatalf("analysis exhaustion details=%+v ok=%v", details, ok)
+	}
+	if err.Error() != ErrTutorGenerationBusy.Error() {
+		t.Fatalf("analysis error exposed provider details: %q", err)
+	}
+	if client.calls != TutorRetryMaxAttempts || !slices.Equal(waits, []time.Duration{TutorRetryBaseDelay, 2 * TutorRetryBaseDelay}) {
+		t.Fatalf("analysis calls=%d waits=%v", client.calls, waits)
+	}
+	t.Logf("analysis 429 exhaustion calls=%d waits=%v", client.calls, waits)
+}
+
+func TestCodexProviderAnalysis400DoesNotRetry(t *testing.T) {
+	client := &structuredClientStub{errors: []error{generationResponseError(http.StatusBadRequest, 0, false)}}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{})
+	if err == nil || errors.Is(err, ErrTutorGenerationBusy) {
+		t.Fatalf("400 analysis error=%v", err)
+	}
+	if client.calls != 1 || len(waits) != 0 {
+		t.Fatalf("400 analysis calls=%d waits=%v", client.calls, waits)
+	}
+	t.Logf("analysis 400 calls=%d waits=%v", client.calls, waits)
+}
+
+func TestCodexProviderAnalysisRetryHonorsRetryAfter(t *testing.T) {
+	client := &structuredClientStub{
+		errors:  []error{generationResponseError(http.StatusTooManyRequests, 7*time.Second, true), nil},
+		results: []StructuredResult{{}, validAnswerAnalysis()},
+	}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(waits, []time.Duration{7 * time.Second}) {
+		t.Fatalf("analysis Retry-After waits=%v", waits)
 	}
 }
 

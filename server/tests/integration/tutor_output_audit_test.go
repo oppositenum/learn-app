@@ -793,3 +793,132 @@ func TestB3DSubmitGeneration429RetryExhaustionReturnsSameMinimal503(t *testing.T
 	}
 	t.Logf("submit_generation_429_exhausted tutor_calls=%d analysis_usage=%d generation_usage=%d reviewer_usage=%d audits=%d", queue.callCount(tutorModel), analysisUsage, generationUsage, reviewerUsage, auditRows)
 }
+
+func TestB3EAnalysis429RetryRecoversWithSinglePricedUsageAndFullAudit(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	tutorModel, reviewerModel := "b3e-retry-tutor", "b3e-retry-reviewer"
+	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
+	queue := newScriptedResponseQueueServer(t, map[string][]queuedResponse{
+		tutorModel: {
+			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
+			{status: http.StatusOK, output: `{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.8,"error_type":"NEEDS_MORE_REASONING","misconceptions":[],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"PROBE","safe_to_increase_difficulty":false}`},
+			{status: http.StatusOK, output: `{"message":"先检查题目中的条件。","action":"ANALOGY","answer_revealed":false,"segments":[]}`},
+		},
+		reviewerModel: {{status: http.StatusOK, output: `{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`}},
+	})
+	service := classroom.NewService(pool, nil, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
+	router := api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Classroom:    classroom.NewHandler(service, pool, parent.NewRepository(pool)),
+	})
+
+	response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/answers", fixture.studentToken, map[string]any{"answer": "集成测试输入"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("recovered analysis response=%d %q", response.Code, response.Body.String())
+	}
+	var analysisUsage, generationUsage, reviewerUsage, auditRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose='ANSWER_ANALYSIS' AND price_catalog_id IS NOT NULL`, fixture.sessionID).Scan(&analysisUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose='SOCRATIC_TURN' AND price_catalog_id IS NOT NULL`, fixture.sessionID).Scan(&generationUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose='TUTOR_OUTPUT_REVIEW' AND price_catalog_id IS NOT NULL`, fixture.sessionID).Scan(&reviewerUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_output_audits WHERE session_id=$1 AND deterministic_result='PASS' AND reviewer_result='PASS' AND final_result='PASS' AND reason_code='APPROVED'`, fixture.sessionID).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if queue.callCount(tutorModel) != 3 || queue.callCount(reviewerModel) != 1 || analysisUsage != 1 || generationUsage != 1 || reviewerUsage != 1 || auditRows != 1 {
+		t.Fatalf("analysis retry evidence calls=%d/%d usage=%d/%d/%d audits=%d", queue.callCount(tutorModel), queue.callCount(reviewerModel), analysisUsage, generationUsage, reviewerUsage, auditRows)
+	}
+	t.Logf("analysis_429_recovered tutor_calls=%d reviewer_calls=%d analysis_usage=%d generation_usage=%d reviewer_usage=%d audits=%d", queue.callCount(tutorModel), queue.callCount(reviewerModel), analysisUsage, generationUsage, reviewerUsage, auditRows)
+}
+
+func TestB3EAnalysis429RetryExhaustionReturnsExistingMinimal503WithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	var logOutput bytes.Buffer
+	previousLogOutput := log.Writer()
+	log.SetOutput(&logOutput)
+	defer log.SetOutput(previousLogOutput)
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	tutorModel, reviewerModel := "b3e-exhaust-tutor", "b3e-exhaust-reviewer"
+	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
+	queue := newScriptedResponseQueueServer(t, map[string][]queuedResponse{
+		tutorModel: {
+			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit","message":"raw_provider_response_canary"}}`},
+			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit","message":"raw_provider_response_canary"}}`},
+			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit","message":"raw_provider_response_canary"}}`},
+		},
+		reviewerModel: {{status: http.StatusOK, output: `{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`}},
+	})
+	hub := realtime.NewHub()
+	studentEvents, stop := hub.Subscribe(fixture.studentID.String(), auth.RoleStudent)
+	defer stop()
+	service := classroom.NewService(pool, hub, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
+	router := api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Classroom:    classroom.NewHandler(service, pool, parent.NewRepository(pool)),
+	})
+	before := readProtectedClassroomSnapshot(t, ctx, pool, fixture)
+
+	response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/answers", fixture.studentToken, map[string]any{"answer": "未持久化的集成测试输入"})
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("analysis exhaustion response=%d content-type=%q body=%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload) != 1 || payload["code"] != ai.TutorGenerationBusyCode {
+		t.Fatalf("analysis busy payload=%q decode_error=%v", response.Body.String(), err)
+	}
+	for _, forbidden := range []string{fixture.privateCanary, tutorModel, reviewerModel, "raw_provider_response_canary"} {
+		if strings.Contains(response.Body.String(), forbidden) || strings.Contains(logOutput.String(), forbidden) {
+			t.Fatalf("analysis failure response or log contains forbidden content")
+		}
+	}
+	for _, required := range []string{
+		"classroom tutor_generation_busy operation=submit",
+		"failure_category=RETRY_EXHAUSTED",
+		"http_status=429",
+		"provider_error_code=gateway_concurrency_limit",
+		"generation_request_id=",
+	} {
+		if !strings.Contains(logOutput.String(), required) {
+			t.Fatalf("analysis failure log=%q missing %q", logOutput.String(), required)
+		}
+	}
+	if after := readProtectedClassroomSnapshot(t, ctx, pool, fixture); after != before {
+		t.Fatalf("analysis retry exhaustion mutated classroom:\nbefore=%+v\nafter=%+v", before, after)
+	}
+	select {
+	case event := <-studentEvents:
+		t.Fatalf("analysis retry exhaustion reached Student WebSocket: %s", event)
+	default:
+	}
+	var analysisUsage, generationUsage, reviewerUsage, auditRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose='ANSWER_ANALYSIS'`, fixture.sessionID).Scan(&analysisUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose IN('SOCRATIC_TURN','EXPLANATION')`, fixture.sessionID).Scan(&generationUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose='TUTOR_OUTPUT_REVIEW'`, fixture.sessionID).Scan(&reviewerUsage); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_output_audits WHERE session_id=$1`, fixture.sessionID).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if queue.callCount(tutorModel) != 3 || queue.callCount(reviewerModel) != 0 || analysisUsage != 0 || generationUsage != 0 || reviewerUsage != 0 || auditRows != 0 {
+		t.Fatalf("analysis exhaustion evidence calls=%d/%d usage=%d/%d/%d audits=%d", queue.callCount(tutorModel), queue.callCount(reviewerModel), analysisUsage, generationUsage, reviewerUsage, auditRows)
+	}
+	t.Log(strings.TrimSpace(logOutput.String()))
+	t.Logf("analysis_429_exhausted tutor_calls=%d reviewer_calls=%d analysis_usage=%d generation_usage=%d reviewer_usage=%d audits=%d", queue.callCount(tutorModel), queue.callCount(reviewerModel), analysisUsage, generationUsage, reviewerUsage, auditRows)
+}
