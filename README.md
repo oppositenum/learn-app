@@ -101,6 +101,6 @@ npm run build
 
 The integration command must target real PostgreSQL. A skipped integration test does not count as passing.
 
-Integration gate baseline: top-level PASS >= 79, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
+Integration gate baseline: top-level PASS >= 84, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
 
 HTTP and WebSocket contracts are documented under [`docs/api/`](docs/api/).
