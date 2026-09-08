@@ -85,6 +85,8 @@ export class ApiError extends Error {
 
 const tutorReviewUnavailableCode = 'TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE'
 const tutorOutputRephraseRequiredCode = 'TUTOR_OUTPUT_REPHRASE_REQUIRED'
+const tutorGenerationBusyCode = 'TUTOR_GENERATION_BUSY'
+const tutorGenerationBusyMessage = '现在有点挤，老师马上就来。请稍等一下再试一次'
 const tutorHintRephraseMessage = '刚才的提示不太合适，老师换个问法。请再点一次『一点提示』'
 const tutorExplainRephraseMessage = '刚才的讲解不太合适，老师换个说法。请再点一次『我不会』'
 const tutorAnswerRephraseMessage = '刚才的回应不太合适，老师换个问法。请再提交一次'
@@ -97,6 +99,7 @@ async function studentApiError(response: Response, fallback: string, rephraseMes
   } catch {
     // Existing endpoints may return plain-text errors; keep their status-based messages.
   }
+  if (code === tutorGenerationBusyCode) return new ApiError(tutorGenerationBusyMessage, response.status, code)
   if (code === tutorReviewUnavailableCode) return new ApiError('老师正在想，等一下再试一次', response.status, code)
   if (code === tutorOutputRephraseRequiredCode) return new ApiError(rephraseMessage, response.status, code)
   return new ApiError(`${fallback}（${response.status}）`, response.status, code)

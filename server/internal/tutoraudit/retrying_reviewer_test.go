@@ -57,6 +57,16 @@ func fastRetryPolicy() retryPolicy {
 	}
 }
 
+func TestReviewerRetryPolicyUsesSharedTutorParameters(t *testing.T) {
+	if reviewerMaxAttempts != ai.TutorRetryMaxAttempts || reviewerBaseDelay != ai.TutorRetryBaseDelay ||
+		reviewerMaxJitter != ai.TutorRetryMaxJitter || reviewerMaxRetryWait != ai.TutorRetryMaxWait ||
+		reviewerOverallTimeout != ai.TutorRetryOverallTimeout {
+		t.Fatalf("reviewer retry policy=%d/%s/%s/%s/%s", reviewerMaxAttempts, reviewerBaseDelay, reviewerMaxJitter, reviewerMaxRetryWait, reviewerOverallTimeout)
+	}
+	t.Logf("reviewer retry max_attempts=%d base_delay=%s max_jitter=%s max_wait=%s overall_timeout=%s",
+		reviewerMaxAttempts, reviewerBaseDelay, reviewerMaxJitter, reviewerMaxRetryWait, reviewerOverallTimeout)
+}
+
 func TestRetryingReviewerRecoversFrom429And5xx(t *testing.T) {
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {

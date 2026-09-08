@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,10 +25,21 @@ type StructuredClient interface {
 }
 
 type CodexProvider struct {
-	client   StructuredClient
-	auditor  TutorOutputAuditor
-	schemas  map[string]*jsonschema.Schema
-	rawFiles fs.FS
+	client                 StructuredClient
+	auditor                TutorOutputAuditor
+	schemas                map[string]*jsonschema.Schema
+	rawFiles               fs.FS
+	generationRetry        generationRetryPolicy
+	waitForGenerationRetry func(context.Context, time.Duration) error
+	generationRetryJitter  func(time.Duration) time.Duration
+}
+
+type generationRetryPolicy struct {
+	maxAttempts    int
+	baseDelay      time.Duration
+	maxJitter      time.Duration
+	maxRetryWait   time.Duration
+	overallTimeout time.Duration
 }
 
 func NewCodexProvider(client StructuredClient, auditors ...TutorOutputAuditor) (*CodexProvider, error) {
@@ -61,7 +73,21 @@ func NewCodexProvider(client StructuredClient, auditors ...TutorOutputAuditor) (
 		}
 		schemas[filename] = schema
 	}
-	return &CodexProvider{client: client, auditor: auditor, schemas: schemas, rawFiles: aioutputs.Files}, nil
+	return &CodexProvider{
+		client: client, auditor: auditor, schemas: schemas, rawFiles: aioutputs.Files,
+		generationRetry: generationRetryPolicy{
+			maxAttempts: TutorRetryMaxAttempts, baseDelay: TutorRetryBaseDelay,
+			maxJitter: TutorRetryMaxJitter, maxRetryWait: TutorRetryMaxWait,
+			overallTimeout: TutorRetryOverallTimeout,
+		},
+		waitForGenerationRetry: waitForTutorGenerationRetry,
+		generationRetryJitter: func(max time.Duration) time.Duration {
+			if max <= 0 {
+				return 0
+			}
+			return time.Duration(rand.Int64N(max.Nanoseconds() + 1))
+		},
+	}, nil
 }
 
 func (provider *CodexProvider) AnalyzeAnswer(ctx context.Context, request AnalyzeAnswerRequest) (AnalyzeAnswerResult, error) {
@@ -107,7 +133,7 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 		instructions = fmt.Sprintf(`%s Set the "action" output field to exactly %q.`, instructions, requiredAction)
 	}
 	var turn TutorTurn
-	if err := provider.generate(ctx, purpose, "tutor_turn.schema.json", request, instructions, request.PreviousResponseID, requiredAction, &turn); err != nil {
+	if err := provider.generateTutorTurn(ctx, purpose, request, instructions, requiredAction, &turn); err != nil {
 		return TutorTurn{}, err
 	}
 	if err := provider.auditor.AuditTutorOutput(ctx, TutorOutputAuditRequest{
@@ -119,7 +145,68 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	return turn, nil
 }
 
+func (provider *CodexProvider) generateTutorTurn(ctx context.Context, purpose Purpose, request GenerateTurnRequest, instructions, requiredAction string, target *TutorTurn) error {
+	ctx, cancel := context.WithTimeout(ctx, provider.generationRetry.overallTimeout)
+	defer cancel()
+
+	var lastErr error
+	var lastRequestID string
+	var lastHTTPStatus int
+	lastProviderCode := TutorReviewDiagnosticUnavailable
+	var waited time.Duration
+	for attempt := 1; attempt <= provider.generationRetry.maxAttempts; attempt++ {
+		requestID := uuid.NewString()
+		lastRequestID = requestID
+		err := provider.generateAttempt(ctx, purpose, "tutor_turn.schema.json", request, instructions, request.PreviousResponseID, requiredAction, target, requestID)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !IsRetryableResponsesError(err) {
+			return err
+		}
+		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
+		if attempt == provider.generationRetry.maxAttempts {
+			break
+		}
+
+		delay := provider.generationRetry.baseDelay << (attempt - 1)
+		delay += provider.generationRetryJitter(provider.generationRetry.maxJitter)
+		if retryAfter, ok := ResponsesRetryAfter(err); ok && retryAfter > delay {
+			delay = retryAfter
+		}
+		if delay > provider.generationRetry.maxRetryWait-waited {
+			break
+		}
+		if err := provider.waitForGenerationRetry(ctx, delay); err != nil {
+			lastErr = err
+			break
+		}
+		waited += delay
+	}
+	category := TutorReviewFailureRetryExhausted
+	if errors.Is(lastErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		category = TutorReviewFailureTimeout
+	}
+	return NewTutorGenerationBusyFailure(category, lastHTTPStatus, lastProviderCode, lastRequestID, lastErr)
+}
+
+func waitForTutorGenerationRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (provider *CodexProvider) generate(ctx context.Context, purpose Purpose, schemaFile string, input any, instructions, previousResponseID, requiredAction string, target any) error {
+	return provider.generateAttempt(ctx, purpose, schemaFile, input, instructions, previousResponseID, requiredAction, target, uuid.NewString())
+}
+
+func (provider *CodexProvider) generateAttempt(ctx context.Context, purpose Purpose, schemaFile string, input any, instructions, previousResponseID, requiredAction string, target any, requestID string) error {
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return fmt.Errorf("marshal teaching request: %w", err)
@@ -138,7 +225,7 @@ func (provider *CodexProvider) generate(ctx context.Context, purpose Purpose, sc
 		}
 	}
 	result, err := provider.client.GenerateStructured(ctx, StructuredRequest{
-		RequestID: uuid.NewString(), StudentID: studentID(input), SessionID: sessionID(input),
+		RequestID: requestID, StudentID: studentID(input), SessionID: sessionID(input),
 		Purpose: purpose, Instructions: instructions, Input: payload,
 		SchemaName: schemaFile, Schema: schemaBytes, PreviousResponseID: previousResponseID,
 	})

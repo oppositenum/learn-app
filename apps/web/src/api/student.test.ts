@@ -55,3 +55,33 @@ test('maps rejected EXPLAIN output to the explain rephrase contract by code', as
     message: '刚才的讲解不太合适，老师换个说法。请再点一次『我不会』',
   })
 })
+
+test('maps generation throttling on answer submission to the child-safe busy contract', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => response({ code: 'TUTOR_GENERATION_BUSY' }, 503)))
+
+  await expect(submitStudentAnswer('session-1', '我的想法')).rejects.toMatchObject({
+    status: 503,
+    code: 'TUTOR_GENERATION_BUSY',
+    message: '现在有点挤，老师马上就来。请稍等一下再试一次',
+  })
+})
+
+test('maps generation throttling on HINT to the same child-safe busy contract', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => response({ code: 'TUTOR_GENERATION_BUSY' }, 503)))
+
+  await expect(requestStudentSupport('session-1', 'HINT')).rejects.toMatchObject({
+    status: 503,
+    code: 'TUTOR_GENERATION_BUSY',
+    message: '现在有点挤，老师马上就来。请稍等一下再试一次',
+  })
+})
+
+test('maps generation throttling on EXPLAIN to the same child-safe busy contract', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => response({ code: 'TUTOR_GENERATION_BUSY' }, 503)))
+
+  await expect(requestStudentSupport('session-1', 'EXPLAIN')).rejects.toMatchObject({
+    status: 503,
+    code: 'TUTOR_GENERATION_BUSY',
+    message: '现在有点挤，老师马上就来。请稍等一下再试一次',
+  })
+})

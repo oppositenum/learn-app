@@ -6,6 +6,7 @@ import (
 )
 
 const (
+	TutorGenerationBusyCode                  = "TUTOR_GENERATION_BUSY"
 	TutorOutputReviewUnavailableCode         = "TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE"
 	TutorOutputRephraseRequiredCode          = "TUTOR_OUTPUT_REPHRASE_REQUIRED"
 	TutorReviewFailureTimeout                = "TIMEOUT"
@@ -18,9 +19,56 @@ const (
 )
 
 var (
+	ErrTutorGenerationBusy          = errors.New("Tutor generation is temporarily busy")
 	ErrTutorOutputReviewUnavailable = errors.New("Tutor output review is temporarily unavailable")
 	ErrTutorOutputRephraseRequired  = errors.New("Tutor output must be rephrased before publication")
 )
+
+type TutorGenerationFailureDetails struct {
+	Category     string
+	HTTPStatus   int
+	ProviderCode string
+	RequestID    string
+}
+
+type tutorGenerationBusyFailure struct {
+	details TutorGenerationFailureDetails
+	cause   error
+}
+
+func (failure *tutorGenerationBusyFailure) Error() string {
+	return ErrTutorGenerationBusy.Error()
+}
+
+func (failure *tutorGenerationBusyFailure) Unwrap() []error {
+	return []error{ErrTutorGenerationBusy, failure.cause}
+}
+
+func NewTutorGenerationBusyFailure(category string, httpStatus int, providerCode, requestID string, cause error) error {
+	if !validTutorReviewFailureCategory(category) {
+		category = TutorReviewFailureOther
+	}
+	if httpStatus < 100 || httpStatus > 599 {
+		httpStatus = 0
+	}
+	return &tutorGenerationBusyFailure{
+		details: TutorGenerationFailureDetails{
+			Category:     category,
+			HTTPStatus:   httpStatus,
+			ProviderCode: sanitizeResponsesProviderErrorCode(providerCode),
+			RequestID:    sanitizeDiagnosticIdentifier(requestID),
+		},
+		cause: cause,
+	}
+}
+
+func TutorGenerationBusyFailureDetails(err error) (TutorGenerationFailureDetails, bool) {
+	var failure *tutorGenerationBusyFailure
+	if !errors.As(err, &failure) {
+		return TutorGenerationFailureDetails{}, false
+	}
+	return failure.details, true
+}
 
 type TutorReviewFailureDetails struct {
 	Category     string

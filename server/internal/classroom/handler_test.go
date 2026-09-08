@@ -80,3 +80,49 @@ func TestLogTutorReviewUnavailableUsesOnlyBoundedStructuredDiagnostics(t *testin
 		})
 	}
 }
+
+func TestLogTutorGenerationBusyUsesOnlyBoundedStructuredDiagnostics(t *testing.T) {
+	previousOutput := log.Writer()
+	previousFlags := log.Flags()
+	previousPrefix := log.Prefix()
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+		log.SetPrefix(previousPrefix)
+	})
+	log.SetFlags(0)
+	log.SetPrefix("")
+
+	unsafeCause := errors.New(strings.Join([]string{
+		"raw_provider_response_canary",
+		"candidate_body_canary",
+		"private_answer_canary",
+		"student_input_canary",
+	}, " "))
+	var output bytes.Buffer
+	log.SetOutput(&output)
+	err := ai.NewTutorGenerationBusyFailure(
+		ai.TutorReviewFailureRetryExhausted,
+		429,
+		"gateway_concurrency_limit",
+		"generation-request-429",
+		unsafeCause,
+	)
+	logTutorGenerationBusy("support", err)
+
+	want := "classroom tutor_generation_busy operation=support failure_category=RETRY_EXHAUSTED http_status=429 provider_error_code=gateway_concurrency_limit generation_request_id=generation-request-429\n"
+	if output.String() != want {
+		t.Fatalf("structured log=%q want=%q", output.String(), want)
+	}
+	t.Log(strings.TrimSpace(output.String()))
+	for _, forbidden := range []string{
+		"raw_provider_response_canary",
+		"candidate_body_canary",
+		"private_answer_canary",
+		"student_input_canary",
+	} {
+		if strings.Contains(output.String(), forbidden) {
+			t.Fatalf("structured log exposed forbidden content marker")
+		}
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +17,10 @@ import (
 type structuredClientStub struct {
 	result      StructuredResult
 	err         error
+	results     []StructuredResult
+	errors      []error
 	request     StructuredRequest
+	requests    []StructuredRequest
 	calls       int
 	deadline    time.Time
 	hasDeadline bool
@@ -37,10 +42,40 @@ func (stub *tutorOutputAuditorStub) AuditTutorOutput(ctx context.Context, reques
 func passingTutorOutputAuditor() *tutorOutputAuditorStub { return &tutorOutputAuditorStub{} }
 
 func (stub *structuredClientStub) GenerateStructured(ctx context.Context, request StructuredRequest) (StructuredResult, error) {
+	index := stub.calls
 	stub.request = request
+	stub.requests = append(stub.requests, request)
 	stub.calls++
 	stub.deadline, stub.hasDeadline = ctx.Deadline()
+	if index < len(stub.errors) && stub.errors[index] != nil {
+		return StructuredResult{}, stub.errors[index]
+	}
+	if index < len(stub.results) {
+		return stub.results[index], nil
+	}
 	return stub.result, stub.err
+}
+
+func validGeneratedTurn(action tutor.State) StructuredResult {
+	return StructuredResult{
+		ResponseID: "response-success",
+		OutputJSON: json.RawMessage(`{"message":"请先观察题目中的关系。","action":"` + string(action) + `","answer_revealed":false,"segments":[]}`),
+	}
+}
+
+func configureImmediateGenerationRetries(provider *CodexProvider, waits *[]time.Duration) {
+	provider.generationRetryJitter = func(time.Duration) time.Duration { return 0 }
+	provider.waitForGenerationRetry = func(_ context.Context, delay time.Duration) error {
+		*waits = append(*waits, delay)
+		return nil
+	}
+}
+
+func generationResponseError(status int, retryAfter time.Duration, retryAfterSet bool) error {
+	return &ResponsesAPIError{
+		StatusCode: status, RetryAfter: retryAfter, RetryAfterSet: retryAfterSet,
+		providerCode: "gateway_concurrency_limit",
+	}
 }
 
 func TestCodexProviderRejectsSchemaViolation(t *testing.T) {
@@ -272,7 +307,7 @@ func TestCodexProviderAuditsEveryStudentVisibleGenerationEntryPoint(t *testing.T
 	}
 }
 
-func TestCodexProviderBoundsTutorGenerationAndAuditWithOneOperationDeadline(t *testing.T) {
+func TestCodexProviderBoundsGenerationRetryInsideTutorOperationDeadline(t *testing.T) {
 	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{
 		"message":"先找题目条件。","action":"HINT","answer_revealed":false,"segments":[]
 	}`)}}
@@ -288,13 +323,178 @@ func TestCodexProviderBoundsTutorGenerationAndAuditWithOneOperationDeadline(t *t
 		t.Fatal(err)
 	}
 	remaining := client.deadline.Sub(started)
-	if !client.hasDeadline || !auditor.hasDeadline || !client.deadline.Equal(auditor.deadline) {
+	if !client.hasDeadline || !auditor.hasDeadline || !client.deadline.Before(auditor.deadline) {
 		t.Fatalf("generation deadline=%v/%v audit deadline=%v/%v", client.deadline, client.hasDeadline, auditor.deadline, auditor.hasDeadline)
 	}
-	if remaining <= 84*time.Second || remaining > tutorOutputOperationTimeout+100*time.Millisecond {
-		t.Fatalf("operation deadline remaining=%v", remaining)
+	if remaining <= TutorRetryOverallTimeout-time.Second || remaining > TutorRetryOverallTimeout+100*time.Millisecond {
+		t.Fatalf("generation retry deadline remaining=%v", remaining)
+	}
+	auditRemaining := auditor.deadline.Sub(started)
+	if auditRemaining <= tutorOutputOperationTimeout-time.Second || auditRemaining > tutorOutputOperationTimeout+100*time.Millisecond {
+		t.Fatalf("operation deadline remaining=%v", auditRemaining)
 	}
 	if client.calls != 1 {
 		t.Fatalf("Tutor generation calls=%d want=1", client.calls)
+	}
+}
+
+func TestCodexProviderGenerationRetryUsesSharedPolicy(t *testing.T) {
+	provider, err := NewCodexProvider(&structuredClientStub{}, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := provider.generationRetry
+	if policy.maxAttempts != TutorRetryMaxAttempts || policy.baseDelay != TutorRetryBaseDelay ||
+		policy.maxJitter != TutorRetryMaxJitter || policy.maxRetryWait != TutorRetryMaxWait ||
+		policy.overallTimeout != TutorRetryOverallTimeout {
+		t.Fatalf("generation retry policy=%+v", policy)
+	}
+	t.Logf("generation retry max_attempts=%d base_delay=%s max_jitter=%s max_wait=%s overall_timeout=%s",
+		policy.maxAttempts, policy.baseDelay, policy.maxJitter, policy.maxRetryWait, policy.overallTimeout)
+}
+
+func TestCodexProviderGeneration429RetryRecoversBeforeOneAudit(t *testing.T) {
+	client := &structuredClientStub{
+		errors:  []error{generationResponseError(http.StatusTooManyRequests, 0, false), nil},
+		results: []StructuredResult{{}, validGeneratedTurn(tutor.StateHint)},
+	}
+	auditor := passingTutorOutputAuditor()
+	provider, err := NewCodexProvider(client, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}}); err != nil {
+		t.Fatal(err)
+	}
+	if client.calls != 2 || len(auditor.requests) != 1 || !slices.Equal(waits, []time.Duration{2 * time.Second}) {
+		t.Fatalf("generation calls=%d audits=%d waits=%v", client.calls, len(auditor.requests), waits)
+	}
+	if len(client.requests) != 2 || client.requests[0].RequestID == "" || client.requests[0].RequestID == client.requests[1].RequestID {
+		t.Fatalf("generation request IDs=%q %q", client.requests[0].RequestID, client.requests[1].RequestID)
+	}
+	t.Logf("generation 429 recovery calls=%d audits=%d waits=%v", client.calls, len(auditor.requests), waits)
+}
+
+func TestCodexProviderGeneration5xxUsesSharedRetryPredicate(t *testing.T) {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			client := &structuredClientStub{
+				errors:  []error{generationResponseError(status, 0, false), nil},
+				results: []StructuredResult{{}, validGeneratedTurn(tutor.StateHint)},
+			}
+			auditor := passingTutorOutputAuditor()
+			provider, err := NewCodexProvider(client, auditor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var waits []time.Duration
+			configureImmediateGenerationRetries(provider, &waits)
+
+			if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}}); err != nil {
+				t.Fatal(err)
+			}
+			if client.calls != 2 || len(auditor.requests) != 1 || !slices.Equal(waits, []time.Duration{2 * time.Second}) {
+				t.Fatalf("status=%d generation calls=%d audits=%d waits=%v", status, client.calls, len(auditor.requests), waits)
+			}
+			t.Logf("status=%d generation calls=%d audits=%d waits=%v", status, client.calls, len(auditor.requests), waits)
+		})
+	}
+}
+
+func TestCodexProviderGeneration429RetryExhaustionIsChildSafe(t *testing.T) {
+	client := &structuredClientStub{errors: []error{
+		generationResponseError(http.StatusTooManyRequests, 0, false),
+		generationResponseError(http.StatusTooManyRequests, 0, false),
+		generationResponseError(http.StatusTooManyRequests, 0, false),
+	}}
+	auditor := passingTutorOutputAuditor()
+	provider, err := NewCodexProvider(client, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
+	if !errors.Is(err, ErrTutorGenerationBusy) || !IsRetryableResponsesError(err) {
+		t.Fatalf("generation exhaustion error=%v", err)
+	}
+	details, ok := TutorGenerationBusyFailureDetails(err)
+	if !ok || details.Category != TutorReviewFailureRetryExhausted || details.HTTPStatus != http.StatusTooManyRequests ||
+		details.ProviderCode != "gateway_concurrency_limit" || details.RequestID != client.requests[2].RequestID {
+		t.Fatalf("generation exhaustion details=%+v ok=%v", details, ok)
+	}
+	if err.Error() != ErrTutorGenerationBusy.Error() {
+		t.Fatalf("generation error exposed provider details: %q", err)
+	}
+	if client.calls != 3 || len(auditor.requests) != 0 || !slices.Equal(waits, []time.Duration{2 * time.Second, 4 * time.Second}) {
+		t.Fatalf("generation calls=%d audits=%d waits=%v", client.calls, len(auditor.requests), waits)
+	}
+	t.Logf("generation 429 exhaustion calls=%d audits=%d waits=%v", client.calls, len(auditor.requests), waits)
+}
+
+func TestCodexProviderGeneration400DoesNotRetry(t *testing.T) {
+	client := &structuredClientStub{errors: []error{generationResponseError(http.StatusBadRequest, 0, false)}}
+	auditor := passingTutorOutputAuditor()
+	provider, err := NewCodexProvider(client, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
+	if err == nil || errors.Is(err, ErrTutorGenerationBusy) {
+		t.Fatalf("400 generation error=%v", err)
+	}
+	if client.calls != 1 || len(auditor.requests) != 0 || len(waits) != 0 {
+		t.Fatalf("400 generation calls=%d audits=%d waits=%v", client.calls, len(auditor.requests), waits)
+	}
+	t.Logf("generation 400 calls=%d audits=%d waits=%v", client.calls, len(auditor.requests), waits)
+}
+
+func TestCodexProviderGenerationRetryHonorsRetryAfter(t *testing.T) {
+	client := &structuredClientStub{
+		errors:  []error{generationResponseError(http.StatusTooManyRequests, 7*time.Second, true), nil},
+		results: []StructuredResult{{}, validGeneratedTurn(tutor.StateHint)},
+	}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(waits, []time.Duration{7 * time.Second}) {
+		t.Fatalf("Retry-After waits=%v", waits)
+	}
+}
+
+func TestCodexProviderGenerationOverallTimeoutStopsRetryWait(t *testing.T) {
+	client := &structuredClientStub{errors: []error{generationResponseError(http.StatusTooManyRequests, 0, false)}}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.generationRetry.overallTimeout = 20 * time.Millisecond
+	provider.generationRetry.baseDelay = time.Second
+	provider.generationRetry.maxJitter = 0
+	provider.generationRetryJitter = func(time.Duration) time.Duration { return 0 }
+
+	started := time.Now()
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
+	elapsed := time.Since(started)
+	details, ok := TutorGenerationBusyFailureDetails(err)
+	if !errors.Is(err, ErrTutorGenerationBusy) || !ok || details.Category != TutorReviewFailureTimeout {
+		t.Fatalf("timeout error=%v details=%+v ok=%v", err, details, ok)
+	}
+	if elapsed > 250*time.Millisecond || client.calls != 1 {
+		t.Fatalf("timeout elapsed=%v calls=%d", elapsed, client.calls)
 	}
 }

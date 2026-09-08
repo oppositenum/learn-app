@@ -11,11 +11,11 @@ import (
 )
 
 const (
-	reviewerMaxAttempts    = 3
-	reviewerBaseDelay      = 2 * time.Second
-	reviewerMaxJitter      = time.Second
-	reviewerMaxRetryWait   = 20 * time.Second
-	reviewerOverallTimeout = 60 * time.Second
+	reviewerMaxAttempts    = ai.TutorRetryMaxAttempts
+	reviewerBaseDelay      = ai.TutorRetryBaseDelay
+	reviewerMaxJitter      = ai.TutorRetryMaxJitter
+	reviewerMaxRetryWait   = ai.TutorRetryMaxWait
+	reviewerOverallTimeout = ai.TutorRetryOverallTimeout
 )
 
 var ErrReviewerRetriesExhausted = errors.New("Tutor output reviewer retries exhausted")
