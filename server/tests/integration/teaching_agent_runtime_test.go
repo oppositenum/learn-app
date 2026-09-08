@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,12 +19,25 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/migrations"
 )
 
+type allowTutorOutputAuditor struct{}
+
+func (allowTutorOutputAuditor) AuditTutorOutput(context.Context, ai.TutorOutputAuditRequest) error {
+	return nil
+}
+
+type rejectTutorOutputAuditor struct{}
+
+func (rejectTutorOutputAuditor) AuditTutorOutput(context.Context, ai.TutorOutputAuditRequest) error {
+	return errors.New("Tutor output rejected")
+}
+
 func TestClassroomMetersRealResponsesClientBeforeStateMutation(t *testing.T) {
 	tests := []struct {
 		name              string
 		outputs           []string
 		wantUsage         int
 		wantPurposeCounts map[string]int
+		auditor           ai.TutorOutputAuditor
 	}{
 		{
 			name:      "malformed analysis",
@@ -36,9 +50,10 @@ func TestClassroomMetersRealResponsesClientBeforeStateMutation(t *testing.T) {
 			wantUsage: 2, wantPurposeCounts: map[string]int{"ANSWER_ANALYSIS": 1, "SOCRATIC_TURN": 1},
 		},
 		{
-			name:      "answer reveal violation",
-			outputs:   []string{validAnalysisJSON(), validTurnJSON("PROBE", true)},
+			name:      "independent output audit rejection",
+			outputs:   []string{validAnalysisJSON(), validTurnJSON("PROBE", false)},
 			wantUsage: 2, wantPurposeCounts: map[string]int{"ANSWER_ANALYSIS": 1, "SOCRATIC_TURN": 1},
+			auditor: rejectTutorOutputAuditor{},
 		},
 	}
 	for _, test := range tests {
@@ -62,7 +77,11 @@ func TestClassroomMetersRealResponsesClientBeforeStateMutation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder))
+			auditor := test.auditor
+			if auditor == nil {
+				auditor = allowTutorOutputAuditor{}
+			}
+			agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder), auditor)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -142,7 +161,7 @@ func TestResponsesPriceGuardBlocksProviderRequestBeforeClassroomMutation(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder))
+	agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder), allowTutorOutputAuditor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +210,7 @@ func TestClassroomPersistsEmotionDeescalationWithoutConsumingSocraticRound(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder))
+	agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder), allowTutorOutputAuditor{})
 	if err != nil {
 		t.Fatal(err)
 	}

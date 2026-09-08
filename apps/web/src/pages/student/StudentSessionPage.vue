@@ -8,9 +8,12 @@ import { difficultyLabels, tutorActionLabels } from '../../lib/learningLabels'
 import { useLearningStore } from '../../stores/learning'
 
 const learning = useLearningStore()
-const answer = ref('')
 const route = useRoute()
 const router = useRouter()
+const answer = computed({
+	get: () => learning.answerDraftFor(String(route.params.id || '')),
+	set: (value: string) => learning.setAnswerDraft(String(route.params.id || ''), value),
+})
 const monotonicNow = ref(performance.now())
 let timer = 0
 

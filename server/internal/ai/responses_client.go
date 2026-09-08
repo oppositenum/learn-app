@@ -8,12 +8,61 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	aioutputs "github.com/oppositenum/ai-learning-tutor/schemas/ai_outputs"
 )
 
 const defaultOpenAIBaseURL = "https://api.openai.com/v1"
+
+type ResponsesAPIError struct {
+	StatusCode    int
+	RetryAfter    time.Duration
+	RetryAfterSet bool
+	body          string
+	providerCode  string
+}
+
+var knownResponsesProviderErrorCodes = map[string]struct{}{
+	"gateway_concurrency_limit": {},
+	"invalid_json_schema":       {},
+	"invalid_request_error":     {},
+	"rate_limit_exceeded":       {},
+	"server_error":              {},
+	"service_unavailable":       {},
+}
+
+func (err *ResponsesAPIError) Error() string {
+	if err == nil {
+		return "Responses API request failed"
+	}
+	return fmt.Sprintf("Responses API status %d: %s", err.StatusCode, err.body)
+}
+
+func IsRetryableResponsesError(err error) bool {
+	var responseErr *ResponsesAPIError
+	return errors.As(err, &responseErr) && (responseErr.StatusCode == http.StatusTooManyRequests ||
+		(responseErr.StatusCode >= http.StatusInternalServerError && responseErr.StatusCode <= 599))
+}
+
+func ResponsesRetryAfter(err error) (time.Duration, bool) {
+	var responseErr *ResponsesAPIError
+	if !errors.As(err, &responseErr) || !responseErr.RetryAfterSet {
+		return 0, false
+	}
+	return responseErr.RetryAfter, true
+}
+
+func ResponsesErrorDiagnostics(err error) (httpStatus int, providerCode string, ok bool) {
+	var responseErr *ResponsesAPIError
+	if !errors.As(err, &responseErr) {
+		return 0, TutorReviewDiagnosticUnavailable, false
+	}
+	return responseErr.StatusCode, sanitizeResponsesProviderErrorCode(responseErr.providerCode), true
+}
 
 type OpenAIResponsesClient struct {
 	httpClient *http.Client
@@ -93,6 +142,9 @@ type responsesResponse struct {
 
 func (client *OpenAIResponsesClient) GenerateStructured(ctx context.Context, request StructuredRequest) (StructuredResult, error) {
 	startedAt := time.Now()
+	if err := aioutputs.ValidateProviderSchemaCompatibility(request.Schema); err != nil {
+		return StructuredResult{}, fmt.Errorf("check response schema provider compatibility: %w", err)
+	}
 	var schema any
 	if err := json.Unmarshal(request.Schema, &schema); err != nil {
 		return StructuredResult{}, fmt.Errorf("decode response schema: %w", err)
@@ -173,12 +225,62 @@ func (client *OpenAIResponsesClient) callResponses(ctx context.Context, request 
 		return decoded, fmt.Errorf("read Responses API response: %w", err)
 	}
 	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
-		return decoded, fmt.Errorf("Responses API status %d: %s", httpResponse.StatusCode, strings.TrimSpace(string(body)))
+		retryAfter, retryAfterSet := parseRetryAfter(httpResponse.Header.Get("Retry-After"), time.Now())
+		return decoded, &ResponsesAPIError{
+			StatusCode: httpResponse.StatusCode, RetryAfter: retryAfter,
+			RetryAfterSet: retryAfterSet, body: strings.TrimSpace(string(body)),
+			providerCode: extractResponsesProviderErrorCode(body),
+		}
 	}
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return decoded, fmt.Errorf("decode Responses API response: %w", err)
 	}
 	return decoded, nil
+}
+
+func extractResponsesProviderErrorCode(body []byte) string {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return TutorReviewDiagnosticUnavailable
+	}
+	return sanitizeResponsesProviderErrorCode(envelope.Error.Code)
+}
+
+func sanitizeResponsesProviderErrorCode(code string) string {
+	if len(code) == 0 || len(code) > 64 {
+		return TutorReviewDiagnosticUnavailable
+	}
+	if _, known := knownResponsesProviderErrorCodes[code]; !known {
+		return TutorReviewDiagnosticUnavailable
+	}
+	return code
+}
+
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
+		const maxRetryAfterSeconds = int64((time.Duration(1<<63 - 1)) / time.Second)
+		if seconds <= maxRetryAfterSeconds {
+			return time.Duration(seconds) * time.Second, true
+		}
+		return 0, false
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	delay := when.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	return delay, true
 }
 
 func isChainingRejected(err error) bool {

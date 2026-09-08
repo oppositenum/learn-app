@@ -6,26 +6,50 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	aioutputs "github.com/oppositenum/ai-learning-tutor/schemas/ai_outputs"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 )
 
-var ErrAnswerRevealViolation = errors.New("teaching agent revealed an answer without authorization")
+var ErrTutorOutputAuditorUnavailable = errors.New("independent Tutor output auditor is unavailable")
+
+const tutorOutputOperationTimeout = 85 * time.Second
 
 type StructuredClient interface {
 	GenerateStructured(ctx context.Context, request StructuredRequest) (StructuredResult, error)
 }
 
 type CodexProvider struct {
-	client   StructuredClient
-	schemas  map[string]*jsonschema.Schema
-	rawFiles fs.FS
+	client                 StructuredClient
+	auditor                TutorOutputAuditor
+	schemas                map[string]*jsonschema.Schema
+	rawFiles               fs.FS
+	generationRetry        generationRetryPolicy
+	waitForGenerationRetry func(context.Context, time.Duration) error
+	generationRetryJitter  func(time.Duration) time.Duration
 }
 
-func NewCodexProvider(client StructuredClient) (*CodexProvider, error) {
+type generationRetryPolicy struct {
+	maxAttempts    int
+	baseDelay      time.Duration
+	maxJitter      time.Duration
+	maxRetryWait   time.Duration
+	overallTimeout time.Duration
+}
+
+func NewCodexProvider(client StructuredClient, auditors ...TutorOutputAuditor) (*CodexProvider, error) {
+	if len(auditors) > 1 {
+		return nil, errors.New("only one Tutor output auditor may be configured")
+	}
+	var auditor TutorOutputAuditor
+	if len(auditors) == 1 {
+		auditor = auditors[0]
+	}
 	compiler := jsonschema.NewCompiler()
 	for _, filename := range []string{"analyze_answer.schema.json", "tutor_turn.schema.json"} {
 		contents, err := fs.ReadFile(aioutputs.Files, filename)
@@ -49,15 +73,85 @@ func NewCodexProvider(client StructuredClient) (*CodexProvider, error) {
 		}
 		schemas[filename] = schema
 	}
-	return &CodexProvider{client: client, schemas: schemas, rawFiles: aioutputs.Files}, nil
+	return &CodexProvider{
+		client: client, auditor: auditor, schemas: schemas, rawFiles: aioutputs.Files,
+		generationRetry: generationRetryPolicy{
+			maxAttempts: TutorRetryMaxAttempts, baseDelay: TutorRetryBaseDelay,
+			maxJitter: TutorRetryMaxJitter, maxRetryWait: TutorRetryMaxWait,
+			overallTimeout: TutorRetryOverallTimeout,
+		},
+		waitForGenerationRetry: waitForTutorGenerationRetry,
+		generationRetryJitter: func(max time.Duration) time.Duration {
+			if max <= 0 {
+				return 0
+			}
+			return time.Duration(rand.Int64N(max.Nanoseconds() + 1))
+		},
+	}, nil
 }
 
 func (provider *CodexProvider) AnalyzeAnswer(ctx context.Context, request AnalyzeAnswerRequest) (AnalyzeAnswerResult, error) {
 	var result AnalyzeAnswerResult
-	if err := provider.generate(ctx, PurposeAnswerAnalysis, "analyze_answer.schema.json", request, "Analyze the answer. Return diagnosis only; never mutate mastery or planning state.", "", "", &result); err != nil {
+	if err := provider.analyzeAnswerWithRetry(ctx, request, &result); err != nil {
 		return AnalyzeAnswerResult{}, err
 	}
 	return result, nil
+}
+
+func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, request AnalyzeAnswerRequest, target *AnalyzeAnswerResult) error {
+	ctx, cancel := context.WithTimeout(ctx, provider.generationRetry.overallTimeout)
+	defer cancel()
+
+	var lastErr error
+	var lastRequestID string
+	var lastHTTPStatus int
+	lastProviderCode := TutorReviewDiagnosticUnavailable
+	var waited time.Duration
+	for attempt := 1; attempt <= provider.generationRetry.maxAttempts; attempt++ {
+		requestID := uuid.NewString()
+		lastRequestID = requestID
+		err := provider.generateAttempt(
+			ctx,
+			PurposeAnswerAnalysis,
+			"analyze_answer.schema.json",
+			request,
+			"Analyze the answer. Return diagnosis only; never mutate mastery or planning state.",
+			"",
+			"",
+			target,
+			requestID,
+		)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !IsRetryableResponsesError(err) {
+			return err
+		}
+		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
+		if attempt == provider.generationRetry.maxAttempts {
+			break
+		}
+
+		delay := provider.generationRetry.baseDelay << (attempt - 1)
+		delay += provider.generationRetryJitter(provider.generationRetry.maxJitter)
+		if retryAfter, ok := ResponsesRetryAfter(err); ok && retryAfter > delay {
+			delay = retryAfter
+		}
+		if delay > provider.generationRetry.maxRetryWait-waited {
+			break
+		}
+		if err := provider.waitForGenerationRetry(ctx, delay); err != nil {
+			lastErr = err
+			break
+		}
+		waited += delay
+	}
+	category := TutorReviewFailureRetryExhausted
+	if errors.Is(lastErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		category = TutorReviewFailureTimeout
+	}
+	return NewTutorGenerationBusyFailure(category, lastHTTPStatus, lastProviderCode, lastRequestID, lastErr)
 }
 
 func (provider *CodexProvider) GenerateTurn(ctx context.Context, request GenerateTurnRequest) (TutorTurn, error) {
@@ -76,25 +170,99 @@ func (provider *CodexProvider) GenerateExplanation(ctx context.Context, request 
 	return provider.generateTurn(ctx, PurposeExplanation, GenerateTurnRequest(request), "Give a concise explanation or voice script using a parallel example. Do not reveal the original answer unless the server explicitly authorizes it.")
 }
 
-const turnStyleInstructions = "Write the message in warm, conversational Chinese for a primary or junior-secondary student. Keep it brief. Plain text only: never use markdown syntax such as headings, asterisks, bullet or dash list markers."
+const turnStyleInstructions = "Write the message in warm, conversational Chinese for a primary or junior-secondary student. Keep it brief. Plain text only: never use markdown syntax such as headings, asterisks, bullet or dash list markers. Never directly quote, repeat, or equivalently paraphrase a sentence or phrase that uniquely supports the correct answer. Do not locate evidence for the student. Never provide the answer or a complete solution."
+
+const hintInstructions = "For a HINT, provide only an observation direction, a reasoning method, or a next-step question."
 
 func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose, request GenerateTurnRequest, instructions string) (TutorTurn, error) {
+	if provider.auditor == nil {
+		return TutorTurn{}, ErrTutorOutputAuditorUnavailable
+	}
+	ctx, cancel := context.WithTimeout(ctx, tutorOutputOperationTimeout)
+	defer cancel()
 	instructions = instructions + " " + turnStyleInstructions
 	requiredAction := string(request.TutorDecision.NextState)
+	if request.TutorDecision.NextState == tutor.StateHint {
+		instructions = instructions + " " + hintInstructions
+	}
 	if requiredAction != "" {
 		instructions = fmt.Sprintf(`%s Set the "action" output field to exactly %q.`, instructions, requiredAction)
 	}
 	var turn TutorTurn
-	if err := provider.generate(ctx, purpose, "tutor_turn.schema.json", request, instructions, request.PreviousResponseID, requiredAction, &turn); err != nil {
+	if err := provider.generateTutorTurn(ctx, purpose, request, instructions, requiredAction, &turn); err != nil {
 		return TutorTurn{}, err
 	}
-	if turn.AnswerRevealed && !request.TutorDecision.AnswerRevealAllowed {
-		return TutorTurn{}, ErrAnswerRevealViolation
+	if err := provider.auditor.AuditTutorOutput(ctx, TutorOutputAuditRequest{
+		StudentID: request.StudentID, SessionID: request.SessionID, Question: request.Question,
+		PrivateAnswer: request.AuditPrivateAnswer, Candidate: turn, GeneratorResponseID: turn.ResponseID,
+	}); err != nil {
+		return TutorTurn{}, err
 	}
 	return turn, nil
 }
 
+func (provider *CodexProvider) generateTutorTurn(ctx context.Context, purpose Purpose, request GenerateTurnRequest, instructions, requiredAction string, target *TutorTurn) error {
+	ctx, cancel := context.WithTimeout(ctx, provider.generationRetry.overallTimeout)
+	defer cancel()
+
+	var lastErr error
+	var lastRequestID string
+	var lastHTTPStatus int
+	lastProviderCode := TutorReviewDiagnosticUnavailable
+	var waited time.Duration
+	for attempt := 1; attempt <= provider.generationRetry.maxAttempts; attempt++ {
+		requestID := uuid.NewString()
+		lastRequestID = requestID
+		err := provider.generateAttempt(ctx, purpose, "tutor_turn.schema.json", request, instructions, request.PreviousResponseID, requiredAction, target, requestID)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !IsRetryableResponsesError(err) {
+			return err
+		}
+		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
+		if attempt == provider.generationRetry.maxAttempts {
+			break
+		}
+
+		delay := provider.generationRetry.baseDelay << (attempt - 1)
+		delay += provider.generationRetryJitter(provider.generationRetry.maxJitter)
+		if retryAfter, ok := ResponsesRetryAfter(err); ok && retryAfter > delay {
+			delay = retryAfter
+		}
+		if delay > provider.generationRetry.maxRetryWait-waited {
+			break
+		}
+		if err := provider.waitForGenerationRetry(ctx, delay); err != nil {
+			lastErr = err
+			break
+		}
+		waited += delay
+	}
+	category := TutorReviewFailureRetryExhausted
+	if errors.Is(lastErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		category = TutorReviewFailureTimeout
+	}
+	return NewTutorGenerationBusyFailure(category, lastHTTPStatus, lastProviderCode, lastRequestID, lastErr)
+}
+
+func waitForTutorGenerationRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (provider *CodexProvider) generate(ctx context.Context, purpose Purpose, schemaFile string, input any, instructions, previousResponseID, requiredAction string, target any) error {
+	return provider.generateAttempt(ctx, purpose, schemaFile, input, instructions, previousResponseID, requiredAction, target, uuid.NewString())
+}
+
+func (provider *CodexProvider) generateAttempt(ctx context.Context, purpose Purpose, schemaFile string, input any, instructions, previousResponseID, requiredAction string, target any, requestID string) error {
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return fmt.Errorf("marshal teaching request: %w", err)
@@ -113,7 +281,7 @@ func (provider *CodexProvider) generate(ctx context.Context, purpose Purpose, sc
 		}
 	}
 	result, err := provider.client.GenerateStructured(ctx, StructuredRequest{
-		RequestID: uuid.NewString(), StudentID: studentID(input), SessionID: sessionID(input),
+		RequestID: requestID, StudentID: studentID(input), SessionID: sessionID(input),
 		Purpose: purpose, Instructions: instructions, Input: payload,
 		SchemaName: schemaFile, Schema: schemaBytes, PreviousResponseID: previousResponseID,
 	})

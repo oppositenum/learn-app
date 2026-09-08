@@ -62,11 +62,11 @@ jobs:
           GOFLAGS: -json
         run: |
           set -o pipefail
-          # Integration gate baseline: top-level PASS >= 67, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
+          # Integration gate baseline: top-level PASS >= 79, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
           report_path="${RUNNER_TEMP}/go-integration.json"
           go test -count=1 ./server/tests/integration | tee "${report_path}"
           jq -e -s '
-            ([.[] | select(.Action == "pass" and .Test != null and (.Test | contains("/") | not))] | length) >= 67 and
+            ([.[] | select(.Action == "pass" and .Test != null and (.Test | contains("/") | not))] | length) >= 79 and
             ([.[] | select(.Action == "fail" and .Test != null and (.Test | contains("/") | not))] | length) == 0 and
             ([.[] | select(.Action == "skip" and .Test != null)] | length) == 0 and
             any(.[]; .Action == "pass" and .Test == "TestIntegrationDatabaseConfiguredInCI")

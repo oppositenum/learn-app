@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/parent"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
@@ -82,6 +83,21 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 	}
 	if errors.Is(err, auth.ErrSessionRevoked) {
 		http.Error(writer, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if errors.Is(err, ai.ErrTutorGenerationBusy) {
+		logTutorGenerationBusy("submit", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorGenerationBusyCode})
+		return
+	}
+	if errors.Is(err, ai.ErrTutorOutputRephraseRequired) {
+		log.Print("classroom submit Tutor output requires rephrasing")
+		writeJSON(writer, http.StatusUnprocessableEntity, map[string]string{"code": ai.TutorOutputRephraseRequiredCode})
+		return
+	}
+	if errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
+		logTutorReviewUnavailable("submit", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorOutputReviewUnavailableCode})
 		return
 	}
 	if err != nil {
@@ -173,6 +189,21 @@ func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http
 	}
 	if errors.Is(err, auth.ErrSessionRevoked) {
 		http.Error(writer, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if errors.Is(err, ai.ErrTutorGenerationBusy) {
+		logTutorGenerationBusy("support", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorGenerationBusyCode})
+		return
+	}
+	if errors.Is(err, ai.ErrTutorOutputRephraseRequired) {
+		log.Print("classroom support Tutor output requires rephrasing")
+		writeJSON(writer, http.StatusUnprocessableEntity, map[string]string{"code": ai.TutorOutputRephraseRequiredCode})
+		return
+	}
+	if errors.Is(err, ai.ErrTutorOutputReviewUnavailable) {
+		logTutorReviewUnavailable("support", err)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorOutputReviewUnavailableCode})
 		return
 	}
 	if err != nil {
@@ -525,4 +556,42 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(value)
+}
+
+func logTutorReviewUnavailable(operation string, err error) {
+	details, ok := ai.TutorOutputReviewFailureDetails(err)
+	if !ok {
+		details = ai.TutorReviewFailureDetails{
+			Category:     ai.TutorReviewFailureOther,
+			ProviderCode: ai.TutorReviewDiagnosticUnavailable,
+			RequestID:    ai.TutorReviewDiagnosticUnavailable,
+		}
+	}
+	log.Printf(
+		"classroom tutor_review_unavailable operation=%s failure_category=%s http_status=%d provider_error_code=%s reviewer_request_id=%s",
+		operation,
+		details.Category,
+		details.HTTPStatus,
+		details.ProviderCode,
+		details.RequestID,
+	)
+}
+
+func logTutorGenerationBusy(operation string, err error) {
+	details, ok := ai.TutorGenerationBusyFailureDetails(err)
+	if !ok {
+		details = ai.TutorGenerationFailureDetails{
+			Category:     ai.TutorReviewFailureOther,
+			ProviderCode: ai.TutorReviewDiagnosticUnavailable,
+			RequestID:    ai.TutorReviewDiagnosticUnavailable,
+		}
+	}
+	log.Printf(
+		"classroom tutor_generation_busy operation=%s failure_category=%s http_status=%d provider_error_code=%s generation_request_id=%s",
+		operation,
+		details.Category,
+		details.HTTPStatus,
+		details.ProviderCode,
+		details.RequestID,
+	)
 }

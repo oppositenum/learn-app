@@ -37,7 +37,7 @@ func TestStudentSupportIsBoundedRoleSeparatedAndMetered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder))
+	agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder), allowTutorOutputAuditor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestStudentSupportRejectsAgentActionMismatchWithoutClassroomMutation(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder))
+	agent, err := ai.NewCodexProvider(client.WithUsageRecorder(recorder), allowTutorOutputAuditor{})
 	if err != nil {
 		t.Fatal(err)
 	}

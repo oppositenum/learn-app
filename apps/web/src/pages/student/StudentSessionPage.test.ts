@@ -1,11 +1,12 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { createMemoryHistory, createRouter } from 'vue-router'
+import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import type { StudentSession } from '../../api/student'
 import { useLearningStore } from '../../stores/learning'
 import StudentSessionPage from './StudentSessionPage.vue'
+import StudentSupplyPage from './StudentSupplyPage.vue'
 
 function session(overrides: Partial<StudentSession> = {}): StudentSession {
   return {
@@ -165,6 +166,310 @@ test('keeps a readable recovery action after failure and allows retry', async ()
   expect(resumeRequests).toBe(2)
   expect(learning.status).toBe('ACTIVE')
   expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  wrapper.unmount()
+})
+
+test('keeps the answer and retry controls after a temporary Tutor review failure', async () => {
+  let supportRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/support')) {
+      supportRequests++
+      if (supportRequests === 1) return response({ code: 'TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE' }, 503)
+      return response({
+        session_id: 'session-1',
+        version: 2,
+        timing_version: 2,
+        action: 'HINT',
+        socratic_round: 2,
+        message: '先找一找两种分数共同的小格。',
+        status: 'ACTIVE',
+        active_seconds: 20,
+        current_active_seconds: 3,
+        timing_observed_at: '2026-08-26T12:00:23Z',
+      })
+    }
+    return response(session({
+      version: supportRequests >= 2 ? 2 : 1,
+      timing_version: supportRequests >= 2 ? 2 : 1,
+      status: 'ACTIVE',
+      state: supportRequests >= 2 ? 'HINT' : 'ASK',
+      current_active_seconds: supportRequests >= 2 ? 3 : 0,
+    }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('我先把小格分成一样大')
+  const hint = () => wrapper.findAll('button').find((button) => button.text().includes('一点提示'))!
+
+  await hint().trigger('click')
+  await flushPromises()
+
+  expect(learning.error).toBe('老师正在想，等一下再试一次')
+  expect(wrapper.get('[role="alert"]').text()).toBe('老师正在想，等一下再试一次')
+  expect(textarea.element.value).toBe('我先把小格分成一样大')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(hint().attributes('disabled')).toBeUndefined()
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+
+  await hint().trigger('click')
+  await flushPromises()
+
+  expect(supportRequests).toBe(2)
+  expect(learning.error).toBe('')
+  expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+  expect(textarea.element.value).toBe('我先把小格分成一样大')
+  expect(hint().attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})
+
+test('keeps a submitted answer available when Tutor review is temporarily unavailable', async () => {
+  let answerRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/answers')) {
+      answerRequests++
+      if (answerRequests === 1) return response({ code: 'TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE' }, 503)
+      return response({
+        session_id: 'session-1',
+        version: 2,
+        timing_version: 2,
+        action: 'PROBE',
+        socratic_round: 3,
+        message: '你准备怎样让两种小格一样大？',
+        status: 'ACTIVE',
+        active_seconds: 20,
+        current_active_seconds: 4,
+        timing_observed_at: '2026-08-26T12:00:24Z',
+      })
+    }
+    return response(session({
+      version: answerRequests >= 2 ? 2 : 1,
+      timing_version: answerRequests >= 2 ? 2 : 1,
+      status: 'ACTIVE',
+      state: answerRequests >= 2 ? 'PROBE' : 'ASK',
+      current_active_seconds: answerRequests >= 2 ? 4 : 0,
+    }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('我觉得要先通分')
+
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(learning.error).toBe('老师正在想，等一下再试一次')
+  expect(textarea.element.value).toBe('我觉得要先通分')
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(answerRequests).toBe(2)
+  expect(learning.error).toBe('')
+  expect(textarea.element.value).toBe('')
+  wrapper.unmount()
+})
+
+test('keeps controls and typed text available when a HINT must be rephrased', async () => {
+  let supportRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/support')) {
+      supportRequests++
+      return response({ code: 'TUTOR_OUTPUT_REPHRASE_REQUIRED' }, 422)
+    }
+    return response(session({ status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('我正在整理自己的思路')
+  const hint = wrapper.findAll('button').find((button) => button.text().includes('一点提示'))!
+
+  await hint.trigger('click')
+  await flushPromises()
+
+  expect(supportRequests).toBe(1)
+  expect(learning.error).toBe('刚才的提示不太合适，老师换个问法。请再点一次『一点提示』')
+  expect(wrapper.get('[role="alert"]').text()).toBe('刚才的提示不太合适，老师换个问法。请再点一次『一点提示』')
+  expect(wrapper.text()).not.toContain('学习数据暂时不可用（422）')
+  expect(textarea.element.value).toBe('我正在整理自己的思路')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(hint.attributes('disabled')).toBeUndefined()
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})
+
+test('keeps controls and typed text available when an EXPLAIN must be rephrased', async () => {
+  let supportRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/support')) {
+      supportRequests++
+      return response({ code: 'TUTOR_OUTPUT_REPHRASE_REQUIRED' }, 422)
+    }
+    return response(session({ status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('我还在整理自己的想法')
+  const explain = wrapper.findAll('button').find((button) => button.text().includes('我不会'))!
+
+  await explain.trigger('click')
+  await flushPromises()
+
+  expect(supportRequests).toBe(1)
+  expect(learning.error).toBe('刚才的讲解不太合适，老师换个说法。请再点一次『我不会』')
+  expect(wrapper.get('[role="alert"]').text()).toBe('刚才的讲解不太合适，老师换个说法。请再点一次『我不会』')
+  expect(wrapper.text()).not.toContain('学习数据暂时不可用（422）')
+  expect(wrapper.text()).not.toContain('请再提交一次')
+  expect(textarea.element.value).toBe('我还在整理自己的想法')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(explain.attributes('disabled')).toBeUndefined()
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})
+
+test('keeps a submitted answer and controls available when the response must be rephrased', async () => {
+  let answerRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/answers')) {
+      answerRequests++
+      return response({ code: 'TUTOR_OUTPUT_REPHRASE_REQUIRED' }, 422)
+    }
+    return response(session({ status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('这是我还要继续检查的想法')
+
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(answerRequests).toBe(1)
+  expect(learning.error).toBe('刚才的回应不太合适，老师换个问法。请再提交一次')
+  expect(wrapper.get('[role="alert"]').text()).toBe('刚才的回应不太合适，老师换个问法。请再提交一次')
+  expect(wrapper.text()).not.toContain('课堂暂时无法提交（422）')
+  expect(textarea.element.value).toBe('这是我还要继续检查的想法')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})
+
+test.each([
+  { type: 'HINT' as const, label: '一点提示' },
+  { type: 'EXPLAIN' as const, label: '我不会' },
+])('keeps controls and typed text after $type generation throttling', async ({ label }) => {
+  let supportRequests = 0
+  const { learning, router, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/support')) {
+      supportRequests++
+      return response({ code: 'TUTOR_GENERATION_BUSY' }, 503)
+    }
+    return response(session({ status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('尚未提交的课堂草稿')
+  const action = wrapper.findAll('button').find((button) => button.text().includes(label))!
+
+  await action.trigger('click')
+  await flushPromises()
+
+  expect(supportRequests).toBe(1)
+  expect(learning.error).toBe('现在有点挤，老师马上就来。请稍等一下再试一次')
+  expect(wrapper.get('[role="alert"]').text()).toBe('现在有点挤，老师马上就来。请稍等一下再试一次')
+  expect(wrapper.text()).not.toContain('学习数据暂时不可用（503）')
+  expect(textarea.element.value).toBe('尚未提交的课堂草稿')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(action.attributes('disabled')).toBeUndefined()
+  expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+  wrapper.unmount()
+})
+
+test('keeps answer controls and typed text after answer-generation throttling', async () => {
+  let answerRequests = 0
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/answers')) {
+      answerRequests++
+      return response({ code: 'TUTOR_GENERATION_BUSY' }, 503)
+    }
+    return response(session({ status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+  }))
+  const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+  await textarea.setValue('尚未提交的课堂草稿')
+
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(answerRequests).toBe(1)
+  expect(learning.error).toBe('现在有点挤，老师马上就来。请稍等一下再试一次')
+  expect(wrapper.get('[role="alert"]').text()).toBe('现在有点挤，老师马上就来。请稍等一下再试一次')
+  expect(textarea.element.value).toBe('尚未提交的课堂草稿')
+  expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+  expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})
+
+test('preserves an answer draft across an EXPLAIN supply round trip', async () => {
+  let supportRequests = 0
+  const fetch = vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/support')) {
+      supportRequests++
+      return response({
+        session_id: 'session-1',
+        version: 2,
+        timing_version: 2,
+        action: 'EXPLAIN',
+        socratic_round: 2,
+        message: '用一个相似场景观察同样的关系。',
+        status: 'ACTIVE',
+        active_seconds: 20,
+        current_active_seconds: 3,
+        timing_observed_at: '2026-08-26T12:00:23Z',
+      })
+    }
+    return response(session({
+      version: supportRequests ? 2 : 1,
+      timing_version: supportRequests ? 2 : 1,
+      status: 'ACTIVE',
+      state: supportRequests ? 'EXPLAIN' : 'ASK',
+      current_active_seconds: supportRequests ? 3 : 0,
+      timeline: supportRequests ? [
+        { sequence: 1, actor: 'TUTOR', action: 'ASK', message: '先说说你的想法。', at: '2026-08-26T12:00:00Z' },
+        { sequence: 2, actor: 'TUTOR', action: 'EXPLAIN', message: '用一个相似场景观察同样的关系。', at: '2026-08-26T12:00:23Z' },
+      ] : [
+        { sequence: 1, actor: 'TUTOR', action: 'ASK', message: '先说说你的想法。', at: '2026-08-26T12:00:00Z' },
+      ],
+    }))
+  })
+  vi.stubGlobal('fetch', fetch)
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/student/session/:id/supply', component: StudentSupplyPage },
+      { path: '/student/session/:id', component: StudentSessionPage },
+    ],
+  })
+  await router.push('/student/session/session-1')
+  await router.isReady()
+  const wrapper = mount(RouterView, { global: { plugins: [pinia, router] } })
+  await flushPromises()
+
+  await wrapper.get<HTMLTextAreaElement>('#student-answer').setValue('准备带回原题的草稿')
+  const explain = wrapper.findAll('button').find((button) => button.text().includes('我不会'))!
+  await explain.trigger('click')
+  await flushPromises()
+
+  expect(supportRequests).toBe(1)
+  expect(router.currentRoute.value.path).toBe('/student/session/session-1/supply')
+  expect(wrapper.findComponent(StudentSupplyPage).exists()).toBe(true)
+  const returnLink = wrapper.findAll('a').find((link) => link.text().includes('返回原题'))!
+  await returnLink.trigger('click')
+  await flushPromises()
+
+  expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+  expect(wrapper.get<HTMLTextAreaElement>('#student-answer').element.value).toBe('准备带回原题的草稿')
   wrapper.unmount()
 })
 

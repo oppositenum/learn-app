@@ -48,6 +48,8 @@ export const useLearningStore = defineStore('learning', {
     targetMinutes: 0,
     prompt: '',
     studentAnswer: '',
+    answerDraftSessionID: '',
+    answerDraft: '',
     status: '' as SessionStatus | '',
     activeSeconds: 0,
     currentActiveSeconds: 0,
@@ -76,6 +78,8 @@ export const useLearningStore = defineStore('learning', {
 			this.requestedSessionID = ''
 			this.preparing = false
 			this.loading = false
+			this.answerDraftSessionID = ''
+			this.answerDraft = ''
 			this.resetSession()
 		},
     resetSession() {
@@ -136,6 +140,13 @@ export const useLearningStore = defineStore('learning', {
 	      this.timeline = session.timeline.map((turn: StudentSessionTurn) => ({ id: `${turn.sequence}`, actor: turn.actor, text: turn.message, meta: turn.action }))
 			return true
 	    },
+			setAnswerDraft(sessionID: string, value: string) {
+				this.answerDraftSessionID = sessionID
+				this.answerDraft = value
+			},
+			answerDraftFor(sessionID: string) {
+				return this.answerDraftSessionID === sessionID ? this.answerDraft : ''
+			},
 	    applyTiming(timing: SessionTiming) {
 	      if (timing.session_id !== this.sessionID || timing.timing_version < this.timingVersion) return false
 			const observedAt = Date.parse(timing.timing_observed_at) || 0
@@ -157,6 +168,10 @@ export const useLearningStore = defineStore('learning', {
 			const operation = ++this.operationSequence
 			this.timingSequence++
 			this.loading = false
+			if (this.answerDraftSessionID && this.answerDraftSessionID !== sessionID) {
+				this.answerDraftSessionID = ''
+				this.answerDraft = ''
+			}
       this.resetSession()
       this.requestedSessionID = sessionID
       this.preparing = true

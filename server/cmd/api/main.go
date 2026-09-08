@@ -21,6 +21,7 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/speech"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/trial"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/tutoraudit"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/usage"
 )
 
@@ -83,12 +84,37 @@ func newDatabaseHandler(pool *pgxpool.Pool) http.Handler {
 	}
 	classrooms := classroom.NewService(pool, hub, voice, usageRecorder, plannerService)
 	go classrooms.RunStaleSessionRecovery(context.Background(), time.Minute)
-	if apiKey, tutorModel := os.Getenv("OPENAI_API_KEY"), os.Getenv("OPENAI_TUTOR_MODEL"); apiKey != "" && tutorModel != "" {
+	if apiKey, tutorModel := os.Getenv("OPENAI_API_KEY"), strings.TrimSpace(os.Getenv("OPENAI_TUTOR_MODEL")); apiKey != "" && tutorModel != "" {
+		reviewerModel := strings.TrimSpace(os.Getenv("OPENAI_TUTOR_OUTPUT_REVIEW_MODEL"))
+		if reviewerModel == "" {
+			log.Fatal("OPENAI_TUTOR_OUTPUT_REVIEW_MODEL is required when OPENAI_TUTOR_MODEL is configured")
+		}
 		client, err := ai.NewOpenAIResponsesClient(&http.Client{Timeout: 90 * time.Second}, os.Getenv("OPENAI_BASE_URL"), apiKey, tutorModel)
 		if err != nil {
 			log.Fatalf("configure teaching client: %v", err)
 		}
-		agent, err := ai.NewCodexProvider(client.WithUsageRecorder(usageRecorder))
+		reviewClient, err := ai.NewOpenAIResponsesClient(&http.Client{Timeout: 90 * time.Second}, os.Getenv("OPENAI_BASE_URL"), apiKey, reviewerModel)
+		if err != nil {
+			log.Fatalf("configure Tutor output review client: %v", err)
+		}
+		reviewer, err := tutoraudit.NewOpenAIReviewer(reviewClient.WithUsageRecorder(usageRecorder), "openai", reviewerModel)
+		if err != nil {
+			log.Fatalf("configure Tutor output reviewer: %v", err)
+		}
+		retryingReviewer, err := tutoraudit.NewRetryingReviewer(reviewer)
+		if err != nil {
+			log.Fatalf("configure Tutor output reviewer retry policy: %v", err)
+		}
+		auditor, err := tutoraudit.NewService(
+			"openai:"+tutorModel,
+			"openai:"+reviewerModel,
+			retryingReviewer,
+			tutoraudit.NewPostgresRecorder(pool),
+		)
+		if err != nil {
+			log.Fatalf("configure independent Tutor output audit: %v", err)
+		}
+		agent, err := ai.NewCodexProvider(client.WithUsageRecorder(usageRecorder), auditor)
 		if err != nil {
 			log.Fatalf("configure teaching agent: %v", err)
 		}

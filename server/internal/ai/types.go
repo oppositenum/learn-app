@@ -15,6 +15,7 @@ const (
 	PurposeAnswerAnalysis    Purpose = "ANSWER_ANALYSIS"
 	PurposeSocraticTurn      Purpose = "SOCRATIC_TURN"
 	PurposeExplanation       Purpose = "EXPLANATION"
+	PurposeTutorOutputReview Purpose = "TUTOR_OUTPUT_REVIEW"
 	PurposeContentGeneration Purpose = "CONTENT_GENERATION"
 	PurposeContentReview     Purpose = "CONTENT_REVIEW"
 	PurposePlanSummary       Purpose = "PLAN_SUMMARY"
@@ -50,13 +51,14 @@ type AnalyzeAnswerResult struct {
 }
 
 type GenerateTurnRequest struct {
-	StudentID          string                 `json:"-"`
-	SessionID          string                 `json:"session_id"`
-	Question           content.QuestionPublic `json:"question"`
-	StudentAnswer      string                 `json:"student_answer"`
-	TutorDecision      tutor.Decision         `json:"tutor_decision"`
-	PriorTurns         []TutorTurn            `json:"prior_turns"`
-	PreviousResponseID string                 `json:"previous_response_id,omitempty"`
+	StudentID          string                        `json:"-"`
+	SessionID          string                        `json:"session_id"`
+	Question           content.QuestionPublic        `json:"question"`
+	AuditPrivateAnswer content.QuestionPrivateAnswer `json:"-"`
+	StudentAnswer      string                        `json:"student_answer"`
+	TutorDecision      tutor.Decision                `json:"tutor_decision"`
+	PriorTurns         []TutorTurn                   `json:"prior_turns"`
+	PreviousResponseID string                        `json:"previous_response_id,omitempty"`
 }
 
 type AnalogyRequest GenerateTurnRequest
@@ -69,14 +71,26 @@ type SpeechSegment struct {
 }
 
 type TutorTurn struct {
-	Message        string          `json:"message"`
-	Action         tutor.State     `json:"action"`
-	AnswerRevealed bool            `json:"answer_revealed"`
-	Segments       []SpeechSegment `json:"segments"`
-	ResponseID     string          `json:"-"`
+	Message    string          `json:"message"`
+	Action     tutor.State     `json:"action"`
+	Segments   []SpeechSegment `json:"segments"`
+	ResponseID string          `json:"-"`
 }
 
 type Explanation = TutorTurn
+
+type TutorOutputAuditRequest struct {
+	StudentID           string
+	SessionID           string
+	Question            content.QuestionPublic
+	PrivateAnswer       content.QuestionPrivateAnswer
+	Candidate           TutorTurn
+	GeneratorResponseID string
+}
+
+type TutorOutputAuditor interface {
+	AuditTutorOutput(ctx context.Context, request TutorOutputAuditRequest) error
+}
 
 type StructuredRequest struct {
 	RequestID          string
