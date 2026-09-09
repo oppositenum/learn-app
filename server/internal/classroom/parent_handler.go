@@ -267,11 +267,17 @@ LEFT JOIN questions q ON q.id=ls.current_question_id LEFT JOIN knowledge_points 
 		return
 	}
 	sessionRows.Close()
+	growth, err := loadGrowthProjection(request.Context(), handler.pool, studentID)
+	if err != nil {
+		http.Error(writer, "report unavailable", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"student_id":      studentID,
 		"summary":         map[string]any{"completed_sessions": completedSessions, "active_seconds": activeSeconds, "total_energy": totalEnergy, "streak_days": streakDays, "reward_events": rewardEvents},
 		"activity_days":   days,
 		"recent_sessions": sessions,
+		"growth_evidence": growth,
 	})
 }
 

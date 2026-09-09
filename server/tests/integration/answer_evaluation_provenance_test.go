@@ -452,6 +452,8 @@ func assertLegacySchemaUnchanged(t *testing.T, ctx context.Context, pool *pgxpoo
 		"classroom_stage_sessions",
 		"classroom_stage_attempts",
 		"classroom_stage_evidence",
+		"learning_effect_events",
+		"ai_request_outcomes",
 	})
 	if after != before {
 		t.Fatal("additive provenance migration changed a legacy table definition")
@@ -484,9 +486,10 @@ END $$`); err != nil {
 	rows, err := pool.Query(ctx, `
 SELECT table_name FROM information_schema.tables
 WHERE table_schema=current_schema() AND table_type='BASE TABLE'
-  AND table_name NOT IN (
-      'schema_migrations','answer_evaluation_provenance','mastery_evidence_provenance',
-      'provenance_test_write_observations'
+	  AND table_name NOT IN (
+	      'schema_migrations','answer_evaluation_provenance','mastery_evidence_provenance',
+	      'learning_effect_events','ai_request_outcomes',
+	      'provenance_test_write_observations'
   )
 ORDER BY table_name`)
 	if err != nil {

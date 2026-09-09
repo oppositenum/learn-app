@@ -11,10 +11,25 @@ import (
 	"time"
 )
 
-type collectingUsageRecorder struct{ records []UsageRecord }
+type collectingUsageRecorder struct {
+	records  []UsageRecord
+	outcomes []RequestOutcomeRecord
+	err      error
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
 
 func (recorder *collectingUsageRecorder) RecordAIUsage(_ context.Context, record UsageRecord) error {
 	recorder.records = append(recorder.records, record)
+	return recorder.err
+}
+
+func (recorder *collectingUsageRecorder) RecordAIRequestOutcome(_ context.Context, record RequestOutcomeRecord) error {
+	recorder.outcomes = append(recorder.outcomes, record)
 	return nil
 }
 
@@ -93,7 +108,94 @@ func TestOpenAIResponsesClientRecordsUsageBeforeOutputExtraction(t *testing.T) {
 	if recorder.records[0].Latency < 0 || recorder.records[0].CreatedAt.After(time.Now()) {
 		t.Fatalf("invalid usage timing: %+v", recorder.records[0])
 	}
+	if len(recorder.outcomes) != 1 || recorder.outcomes[0].Outcome != RequestInvalidResponse || recorder.outcomes[0].HTTPStatus != nil {
+		t.Fatalf("invalid response outcome=%+v", recorder.outcomes)
+	}
 }
+
+func TestOpenAIResponsesClientRecordsBoundedRequestOutcomes(t *testing.T) {
+	tests := []struct {
+		name        string
+		handler     http.HandlerFunc
+		recorderErr error
+		want        RequestOutcome
+		wantStatus  *int
+	}{
+		{
+			name: "success",
+			handler: func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte(`{"id":"ok","model":"model","output":[{"type":"message","content":[{"type":"output_text","text":"{}"}]}],"usage":{}}`))
+			},
+			want: RequestSucceeded,
+		},
+		{
+			name: "provider error",
+			handler: func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = writer.Write([]byte(`{"error":{"message":"provider body must not be recorded"}}`))
+			},
+			want: RequestProviderError, wantStatus: intPointer(http.StatusServiceUnavailable),
+		},
+		{
+			name: "accounting error",
+			handler: func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte(`{"id":"usage-failed","model":"model","output":[{"type":"message","content":[{"type":"output_text","text":"{}"}]}],"usage":{}}`))
+			},
+			recorderErr: errors.New("usage unavailable"), want: RequestAccountingError,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(test.handler)
+			defer server.Close()
+			recorder := &collectingUsageRecorder{err: test.recorderErr}
+			client, err := NewOpenAIResponsesClient(server.Client(), server.URL, "test-key", "model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.WithUsageRecorder(recorder)
+			_, _ = client.GenerateStructured(context.Background(), StructuredRequest{
+				RequestID: "bounded-outcome", StudentID: "student", SessionID: "session",
+				Purpose: PurposeAnswerAnalysis, SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+			})
+			if len(recorder.outcomes) != 1 || recorder.outcomes[0].Outcome != test.want {
+				t.Fatalf("outcomes=%+v want=%s", recorder.outcomes, test.want)
+			}
+			gotStatus := recorder.outcomes[0].HTTPStatus
+			if (gotStatus == nil) != (test.wantStatus == nil) || gotStatus != nil && *gotStatus != *test.wantStatus {
+				t.Fatalf("status=%v want=%v", gotStatus, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestOpenAIResponsesClientRecordsTransportErrorWithoutHTTPStatus(t *testing.T) {
+	recorder := &collectingUsageRecorder{}
+	client, err := NewOpenAIResponsesClient(&http.Client{Transport: roundTripFunc(
+		func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("network unavailable")
+		},
+	)}, "https://provider.invalid", "test-key", "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.WithUsageRecorder(recorder)
+	_, err = client.GenerateStructured(context.Background(), StructuredRequest{
+		RequestID: "transport-error", StudentID: "student", SessionID: "session",
+		Purpose: PurposeAnswerAnalysis, SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+	})
+	if err == nil {
+		t.Fatal("transport failure was accepted")
+	}
+	if len(recorder.outcomes) != 1 || recorder.outcomes[0].Outcome != RequestTransportError {
+		t.Fatalf("outcomes=%+v want=%s", recorder.outcomes, RequestTransportError)
+	}
+	if recorder.outcomes[0].HTTPStatus != nil {
+		t.Fatalf("transport error unexpectedly recorded HTTP status %d", *recorder.outcomes[0].HTTPStatus)
+	}
+}
+
+func intPointer(value int) *int { return &value }
 
 func TestOpenAIResponsesClientRejectsIncompatibleSchemaBeforeNetwork(t *testing.T) {
 	calls := 0

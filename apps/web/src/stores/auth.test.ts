@@ -30,11 +30,11 @@ test('clears student-domain stores when the account logs out', async () => {
   const supervision = useSupervisionStore()
   auth.user.value = { user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }
   growth.studentID = 'student-1'
-  growth.data = { student_id: 'student-1', learning_date: '2026-08-26', total_energy: 12, streak_days: 3, buildings: {} }
+  growth.data = { student_id: 'student-1', learning_date: '2026-08-26', total_energy: 12, streak_days: 3, buildings: {}, growth_evidence: { policy_version: 'growth-evidence-v1', indicators: [] } }
   learning.sessionID = 'session-1'
   learning.status = 'ACTIVE'
   supervision.children = [{ student_id: 'child-1', display_name: '孩子甲', grade_level: 7, active_session_id: 'session-child', subject: '数学', knowledge_point: '方程', started_at: '2026-08-26T12:00:00Z' }]
-  supervision.studentAnswer = '旧家长可见的回答'
+  supervision.studentAnswerPreview = '旧家长可见的回答'
 
   await auth.logout()
 
@@ -44,7 +44,7 @@ test('clears student-domain stores when the account logs out', async () => {
   expect(learning.sessionID).toBe('')
   expect(learning.status).toBe('')
   expect(supervision.children).toEqual([])
-  expect(supervision.studentAnswer).toBe('')
+  expect(supervision.studentAnswerPreview).toBe('')
 })
 
 test('refreshes a changed student identity and clears the previous student stores', async () => {
@@ -56,7 +56,7 @@ test('refreshes a changed student identity and clears the previous student store
   const supervision = useSupervisionStore()
   auth.user.value = { user_id: 'user-1', role: 'STUDENT', display_name: '学生甲', student_id: 'student-1' }
   growth.studentID = 'student-1'
-  growth.data = { student_id: 'student-1', learning_date: '2026-08-26', total_energy: 12, streak_days: 3, buildings: {} }
+  growth.data = { student_id: 'student-1', learning_date: '2026-08-26', total_energy: 12, streak_days: 3, buildings: {}, growth_evidence: { policy_version: 'growth-evidence-v1', indicators: [] } }
   learning.sessionID = 'session-1'
   learning.status = 'ACTIVE'
   supervision.children = [{ student_id: 'child-1', display_name: '孩子甲', grade_level: 7, active_session_id: 'session-child', subject: '数学', knowledge_point: '方程', started_at: '2026-08-26T12:00:00Z' }]

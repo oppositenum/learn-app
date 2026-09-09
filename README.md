@@ -4,13 +4,14 @@ AI Learning Tutor is a mobile-first, five-subject Socratic learning prototype fo
 
 ## Implemented V1 Surface
 
-- Student, Parent, and Owner authorization with explicit Parent-Student binding, plus answer-free Parent ability and activity reports.
+- Student, Parent, and Owner authorization with explicit Parent-Student binding. Parent live views receive only a server-bounded current short-answer preview; completed reports contain evidence and safety summaries without verbatim Student or Tutor dialogue.
 - PostgreSQL-level public/private answer separation and authenticated Student non-disclosure tests.
 - Five-subject curriculum with all 132 assessable primary/junior-secondary skeleton entries from the V1 product specification, 10 preserved high-quality detail points, prerequisite graph, cross-subject graph, abilities, and misconceptions. The 142 released points are organized into 44 useful subject/grade-band domains rather than the original broad three-domain demo taxonomy.
 - The production classroom now activates a server-authoritative `ORIGINAL -> VARIANT -> ABSTRACT -> VERIFY -> COMPLETE` flow for complete `READY` task lineages. Every stage uses a versioned deterministic scorer, excludes every task already presented in the session, and requires a fresh independent task after help. Incomplete lineages fail closed; content without a lineage remains on the legacy classroom path while its model correctness override is disabled.
 - `student-interaction-v1` provides seven allowlisted, keyboard-operable renderers with server-bound answer schemas and an always-available text representation. Unknown or incomplete material fails closed to a sanitized text fallback and cannot authorize stage evidence.
-- Student mobile classroom, supply station, voice player with timed highlighting, growth view, Parent live supervision/preferences, and Owner content/cost views.
-- Planner and deterministic Mastery with evidence-derived scores, real activity-day streaks, idempotent Reward, STT/TTS adapters, and versioned usage accounting. Review-queue consumption and rescheduling remain pending B2.
+- Student mobile classroom, supply station, voice player with timed highlighting, five explainable growth indicators, Parent live supervision/preferences, and Owner content/cost/learning-effect views.
+- Planner and deterministic Mastery with evidence-derived scores, real activity-day streaks, idempotent Reward, STT/TTS adapters, versioned usage accounting, and deterministic review-queue consumption/rescheduling.
+- Body-free, append-only learning-effect events calculate first-answer effective latency with coverage, interaction event share, completion by assistance, transfer accuracy, D+1/D+7 retention, post-EXPLAIN re-engagement, exit stage, and structured AI anomaly rate.
 - Content provenance, deterministic validation, independent review, database release gate, quarantine, 142 released and source-linked knowledge points, and 15 curated demo questions.
 - Full Student/Parent/Owner PostgreSQL + HTTP + role-projected realtime lifecycle E2E.
 - Recoverable TTS sessions and Student-only post-session willingness reflections for a real seven-day trial.
@@ -102,6 +103,6 @@ npm run build
 
 The integration command must target real PostgreSQL. A skipped integration test does not count as passing.
 
-Integration gate baseline: top-level PASS >= 92, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
+Integration gate baseline: top-level PASS >= 98, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
 
 HTTP and WebSocket contracts are documented under [`docs/api/`](docs/api/).

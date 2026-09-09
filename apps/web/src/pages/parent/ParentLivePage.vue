@@ -19,6 +19,11 @@ const supportStatus = computed(() => {
     default: return '当前未进入讲解'
   }
 })
+const answerLabel = computed(() => {
+  if (learning.answerVisibility === 'SHORT_CURRENT') return learning.studentAnswerPreview
+  if (learning.answerVisibility === 'WITHHELD_LONG') return '较长回答已隐藏'
+  return '尚未提交简短回答'
+})
 
 const actorLabel = {
   AI: 'AI 老师',
@@ -87,6 +92,14 @@ const actorLabel = {
         >
           课堂时间线
         </h2>
+        <div class="mt-5 border-y border-zinc-300 py-4">
+          <p class="detail-label">
+            当前简短回答
+          </p>
+          <p class="mt-1 font-semibold">
+            {{ answerLabel }}
+          </p>
+        </div>
         <ol class="mt-6 space-y-6">
           <li
             v-for="item in learning.timeline"

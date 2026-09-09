@@ -165,6 +165,15 @@ func (client *OpenAIResponsesClient) GenerateStructured(ctx context.Context, req
 		decoded, err = client.callResponses(ctx, request, schema, "")
 	}
 	if err != nil {
+		outcome := RequestTransportError
+		var status *int
+		var responseErr *ResponsesAPIError
+		if errors.As(err, &responseErr) {
+			outcome = RequestProviderError
+			value := responseErr.StatusCode
+			status = &value
+		}
+		client.recordRequestOutcome(ctx, request, outcome, status, startedAt)
 		return StructuredResult{}, err
 	}
 	result := StructuredResult{
@@ -184,15 +193,30 @@ func (client *OpenAIResponsesClient) GenerateStructured(ctx context.Context, req
 			RequestID: requestID, StudentID: request.StudentID, SessionID: request.SessionID,
 			Purpose: request.Purpose, Usage: result.Usage, Latency: time.Since(startedAt), CreatedAt: startedAt,
 		}); err != nil {
+			client.recordRequestOutcome(ctx, request, RequestAccountingError, nil, startedAt)
 			return StructuredResult{}, fmt.Errorf("record Responses API usage: %w", err)
 		}
 	}
 	output, err := firstOutputText(decoded)
 	if err != nil {
+		client.recordRequestOutcome(ctx, request, RequestInvalidResponse, nil, startedAt)
 		return StructuredResult{}, err
 	}
 	result.OutputJSON = json.RawMessage(output)
+	client.recordRequestOutcome(ctx, request, RequestSucceeded, nil, startedAt)
 	return result, nil
+}
+
+func (client *OpenAIResponsesClient) recordRequestOutcome(ctx context.Context, request StructuredRequest, outcome RequestOutcome, status *int, startedAt time.Time) {
+	recorder, ok := client.usage.(RequestOutcomeRecorder)
+	if !ok || request.RequestID == "" {
+		return
+	}
+	_ = recorder.RecordAIRequestOutcome(ctx, RequestOutcomeRecord{
+		RequestID: request.RequestID, StudentID: request.StudentID, SessionID: request.SessionID,
+		Provider: "openai", Model: client.model, Purpose: request.Purpose, Outcome: outcome,
+		HTTPStatus: status, Latency: time.Since(startedAt), CreatedAt: startedAt,
+	})
 }
 
 func (client *OpenAIResponsesClient) callResponses(ctx context.Context, request StructuredRequest, schema any, previousResponseID string) (responsesResponse, error) {

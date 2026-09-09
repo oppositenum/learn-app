@@ -6,14 +6,14 @@ Browser WebSockets authenticate through the same-origin HttpOnly session cookie.
 - Parent: `/ws/parent/{student_id}`; only an actively bound Parent may subscribe.
 - Slow observers are dropped per event buffer policy and never block the classroom transaction.
 
-The Parent client subscribes as soon as a child is selected, even when that child has no active session. `SESSION_STARTED` switches the live projection to the new session, answer events update the visible supervision state immediately, and the client refreshes the authoritative Parent REST projection after each event burst. Clients reconnect with bounded exponential backoff after an unexpected close.
+The Parent client subscribes as soon as a child is selected, even when that child has no active session. `SESSION_STARTED` switches the live projection to the new session. Answer-related events carry supervision state and a refresh marker, never the Student answer body; the client refreshes the authoritative bounded Parent REST projection after each event burst. Clients reconnect with bounded exponential backoff after an unexpected close.
 
 The server projects separate representations before serialization:
 
 ```text
 Tutor event
   -> StudentEventDTO (safe teaching action/message)
-  -> ParentEventDTO  (answer, analysis, misconception, action reason)
+  -> ParentEventDTO  (analysis, misconception, action reason, REST refresh marker)
 ```
 
 Common envelope fields are `event_id`, `session_id`, `sequence`, `type`, `created_at`, and `payload`. Parent envelopes additionally contain `student_id`.
@@ -34,6 +34,6 @@ Runtime-persisted and broadcast event types are:
 
 `AI_TURN_STARTED` and `AI_TURN_STREAM` remain reserved protocol types. The current OpenAI Responses adapter is request/response based and therefore does not emit fake streaming events. A future streaming adapter must emit these events from real provider lifecycle signals.
 
-Student payloads must not contain `correct_answer`, solutions, scoring keys, private misconception mappings, provider raw logs, or the submitted answer echoed back by the server. `ANSWER_SUBMITTED` only acknowledges receipt on the Student channel; the authenticated Parent projection contains the answer.
+Student payloads must not contain `correct_answer`, solutions, scoring keys, private misconception mappings, provider raw logs, or the submitted answer echoed back by the server. `ANSWER_SUBMITTED` only acknowledges receipt on the Student channel. Parent WebSocket payloads also never contain the Student answer body; `answer_visibility=REFRESH_LIVE_ENDPOINT` tells the client to refresh the authenticated REST projection, where only an active, single-line answer of at most 80 Unicode code points can be exposed as `student_answer_preview`.
 
 `SAFETY_INTERVENTION` never contains the Student input. The Student payload contains the fixed fallback, policy version, category, severity, fixed action, and the transparent `parent_notified` flag. Low and moderate non-escalated classifications are suppressed from the Parent channel. Escalated Parent payloads contain only policy version, category, severity, fixed action, and occurrence time.

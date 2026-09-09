@@ -1,3 +1,5 @@
+import type { GrowthEvidenceProjection } from './learning'
+
 export interface SpeechSegment { id: string; text: string; start_ms: number; end_ms: number }
 export type TutorAction = 'INTRO' | 'ASK' | 'WAIT' | 'ANALYZE' | 'PROBE' | 'HINT' | 'SCAFFOLD' | 'ANALOGY' | 'BACKTRACK' | 'EXPLAIN' | 'VOICE_EXPLAIN' | 'RETURN' | 'ORIGINAL' | 'VARIANT' | 'ABSTRACT' | 'VERIFY' | 'REVIEW' | 'BREAK' | 'COMPLETE'
 export type SessionStatus = 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'ABANDONED'
@@ -115,6 +117,7 @@ export interface StudentGrowth {
     corrected_misconceptions?: number
     cross_subject_insights?: number
   }
+  growth_evidence: GrowthEvidenceProjection
 }
 
 export class ApiError extends Error {

@@ -322,7 +322,12 @@ func (handler *Handler) Growth(writer http.ResponseWriter, request *http.Request
 		http.Error(writer, "growth unavailable", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"student_id": studentID, "learning_date": learningDate(now), "total_energy": energy, "streak_days": streak, "buildings": buildings})
+	growth, err := loadGrowthProjection(request.Context(), handler.pool, studentID)
+	if err != nil {
+		http.Error(writer, "growth unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"student_id": studentID, "learning_date": learningDate(now), "total_energy": energy, "streak_days": streak, "buildings": buildings, "growth_evidence": growth})
 }
 
 func (handler *Handler) Today(writer http.ResponseWriter, request *http.Request) {

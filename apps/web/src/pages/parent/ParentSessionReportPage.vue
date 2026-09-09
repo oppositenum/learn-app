@@ -126,10 +126,7 @@ onMounted(async () => {
       >
         <div class="py-6 sm:border-r sm:border-zinc-300 sm:pr-6">
           <p class="detail-label">
-            孩子最后回答
-          </p>
-          <p class="mt-2 text-lg font-semibold leading-8">
-            {{ session.student_answer || '未提交回答' }}
+            学习结果
           </p>
           <p
             class="mt-3 flex items-center gap-2 text-sm font-semibold"

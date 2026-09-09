@@ -134,6 +134,33 @@ type UsageRecorder interface {
 	RecordAIUsage(ctx context.Context, record UsageRecord) error
 }
 
+type RequestOutcome string
+
+const (
+	RequestSucceeded       RequestOutcome = "SUCCEEDED"
+	RequestProviderError   RequestOutcome = "PROVIDER_ERROR"
+	RequestTransportError  RequestOutcome = "TRANSPORT_ERROR"
+	RequestInvalidResponse RequestOutcome = "INVALID_RESPONSE"
+	RequestAccountingError RequestOutcome = "ACCOUNTING_ERROR"
+)
+
+type RequestOutcomeRecord struct {
+	RequestID  string
+	StudentID  string
+	SessionID  string
+	Provider   string
+	Model      string
+	Purpose    Purpose
+	Outcome    RequestOutcome
+	HTTPStatus *int
+	Latency    time.Duration
+	CreatedAt  time.Time
+}
+
+type RequestOutcomeRecorder interface {
+	RecordAIRequestOutcome(ctx context.Context, record RequestOutcomeRecord) error
+}
+
 type PriceGuard interface {
 	EnsurePrice(ctx context.Context, provider, model string, at time.Time) error
 }

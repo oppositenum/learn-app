@@ -93,6 +93,30 @@ ON CONFLICT (request_id) DO NOTHING`, requestID, record.StudentID, record.Sessio
 	return nil
 }
 
+func (recorder *Recorder) RecordAIRequestOutcome(ctx context.Context, record ai.RequestOutcomeRecord) error {
+	if recorder.pool == nil {
+		return errors.New("usage database is required")
+	}
+	if record.RequestID == "" || record.Provider == "" || record.Model == "" || record.Purpose == "" {
+		return errors.New("AI request outcome identity is required")
+	}
+	at := record.CreatedAt
+	if at.IsZero() {
+		at = recorder.now()
+	}
+	_, err := recorder.pool.Exec(ctx, `
+INSERT INTO ai_request_outcomes(
+    request_id,student_id,session_id,provider,model,purpose,outcome,http_status,latency_ms,occurred_at
+) VALUES($1,NULLIF($2,'')::uuid,NULLIF($3,'')::uuid,$4,$5,$6,$7,$8,$9,$10)
+ON CONFLICT(request_id) DO NOTHING`, record.RequestID, record.StudentID, record.SessionID,
+		record.Provider, record.Model, string(record.Purpose), string(record.Outcome), record.HTTPStatus,
+		max(record.Latency.Milliseconds(), 0), at)
+	if err != nil {
+		return fmt.Errorf("insert AI request outcome: %w", err)
+	}
+	return nil
+}
+
 func decimalValue(value string) string {
 	if value == "" {
 		return "0"

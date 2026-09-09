@@ -1,3 +1,5 @@
+import type { GrowthEvidenceProjection } from './learning'
+
 export interface ParentLiveSession {
   session_id: string
   student_id: string
@@ -11,7 +13,9 @@ export interface ParentLiveSession {
   question_prompt: string
   correct_answer: unknown
   full_solution: string
-  student_answer: string
+  detail_mode: 'LIVE' | 'REPORT'
+  student_answer_visibility: 'NONE' | 'SHORT_CURRENT' | 'WITHHELD_LONG' | 'WITHHELD_NOT_ACTIVE'
+  student_answer_preview?: string
   answer_correct: boolean
   error_type: string
   misconceptions: string[]
@@ -38,6 +42,16 @@ export interface ParentReport {
 	summary: { completed_sessions: number; active_seconds: number; total_energy: number; streak_days: number; reward_events: number }
 	activity_days: Array<{ date: string; completed_sessions: number; active_seconds: number }>
 	recent_sessions: Array<{ id: string; subject: string; knowledge_point: string; status: string; state: string; started_at: string; ended_at?: string; active_seconds: number }>
+	growth_evidence: GrowthEvidenceProjection
+}
+
+export interface ParentSafetyEvent {
+	id: string
+	policy_version: string
+	category: string
+	severity: 'LOW' | 'MODERATE' | 'HIGH' | 'CRITICAL'
+	fixed_action: string
+	occurred_at: string
 }
 
 export async function getParentChildren(): Promise<ParentChild[]> {
@@ -56,6 +70,12 @@ export async function getParentReport(studentID: string): Promise<ParentReport> 
 	const response = await fetch(`/api/v1/parent/child/${encodeURIComponent(studentID)}/report`, { credentials: 'same-origin' })
 	if (!response.ok) throw new Error(`学习报告暂时不可用（${response.status}）`)
 	return response.json() as Promise<ParentReport>
+}
+
+export async function getParentSafetyEvents(studentID: string): Promise<ParentSafetyEvent[]> {
+	const response = await fetch(`/api/v1/parent/child/${encodeURIComponent(studentID)}/safety-events`, { credentials: 'same-origin' })
+	if (!response.ok) throw new Error(`安全摘要暂时不可用（${response.status}）`)
+	return (await response.json() as { events?: ParentSafetyEvent[] }).events ?? []
 }
 
 export async function sendParentIntervention(studentID: string, type: 'ENCOURAGEMENT' | 'REDUCE_INTENSITY' | 'REVIEW_ONLY' | 'STATE_NOT_GOOD'): Promise<void> {

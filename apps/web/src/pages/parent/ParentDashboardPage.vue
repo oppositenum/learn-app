@@ -6,6 +6,11 @@ import { useParentLiveConnection } from '../../features/supervision/useParentLiv
 
 const learning = useParentLiveConnection()
 const connectionLabel = computed(() => learning.sessionActive ? '正在学习' : learning.connected ? '实时已连接' : learning.reconnecting ? '正在重连' : '等待连接')
+const answerLabel = computed(() => {
+  if (learning.answerVisibility === 'SHORT_CURRENT') return learning.studentAnswerPreview
+  if (learning.answerVisibility === 'WITHHELD_LONG') return '较长回答已隐藏'
+  return '尚未提交简短回答'
+})
 
 function switchChild(event: Event) {
   void learning.selectChild((event.target as HTMLSelectElement).value)
@@ -85,7 +90,7 @@ function switchChild(event: Event) {
             孩子刚才回答
           </dt>
           <dd class="mt-1 text-lg font-semibold">
-            {{ learning.studentAnswer }}
+            {{ answerLabel }}
           </dd>
         </div>
         <div>

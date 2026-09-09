@@ -57,7 +57,9 @@ function liveSession(sessionID: string, answer = '第一次回答') {
     question_prompt: '题目',
     correct_answer: { value: '铁钉生锈' },
     full_solution: '解析',
-    student_answer: answer,
+    detail_mode: 'LIVE',
+    student_answer_visibility: 'SHORT_CURRENT',
+    student_answer_preview: answer,
     answer_correct: false,
     error_type: 'STATE_CHANGE_IS_CHEMICAL',
     misconceptions: ['STATE_CHANGE_IS_CHEMICAL'],
@@ -96,7 +98,7 @@ describe('Parent realtime supervision', () => {
     vi.unstubAllGlobals()
   })
 
-  it('selects the child with the newest active classroom and applies answers immediately', async () => {
+  it('uses the REST preview and ignores answer bodies injected into realtime payloads', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const path = String(input)
       if (path.includes('/parent/children')) return {
@@ -121,7 +123,7 @@ describe('Parent realtime supervision', () => {
       event_id: 'event-answer', student_id: 'student-new', session_id: 'session-new', type: 'TUTOR_ACTION_SELECTED',
       payload: { student_answer: 'WebSocket 实时想法', correct_answer: '铁钉生锈', error_type: 'STATE_CHANGE_IS_CHEMICAL', action: 'PROBE', round: 3 },
     })
-    expect(store.studentAnswer).toBe('WebSocket 实时想法')
+    expect(store.studentAnswerPreview).toBe('REST 回答')
     expect(store.correctAnswer).toBe('铁钉生锈')
     expect(store.socraticRound).toBe(3)
     expect(store.timeline.at(-1)?.text).toBe('AI 已选择下一步教学动作')
@@ -131,7 +133,7 @@ describe('Parent realtime supervision', () => {
       event_id: 'event-submitted', student_id: 'student-new', session_id: 'session-new', type: 'ANSWER_SUBMITTED',
       payload: { student_answer: 'WebSocket 实时想法' },
     })
-    expect(store.timeline.filter((item) => item.text === 'WebSocket 实时想法')).toHaveLength(1)
+    expect(store.timeline.some((item) => item.text === 'WebSocket 实时想法')).toBe(false)
     await vi.advanceTimersByTimeAsync(100)
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/session/session-new'))).toBe(true)
   })
@@ -174,7 +176,7 @@ describe('Parent realtime supervision', () => {
     const initialization = store.initialize()
     store.children = [{ student_id: 'student-old', display_name: '旧账号', grade_level: 7, active_session_id: 'session-old', subject: '数学', knowledge_point: '方程', started_at: '2026-08-27T01:00:00Z' }]
     store.studentID = 'student-old'
-    store.studentAnswer = '旧账号回答'
+    store.studentAnswerPreview = '旧账号回答'
     store.correctAnswer = '旧账号答案'
     store.openRealtime('student-old')
     const socket = FakeWebSocket.instances[0]
@@ -185,7 +187,7 @@ describe('Parent realtime supervision', () => {
 
     expect(store.children).toEqual([])
     expect(store.studentID).toBe('')
-    expect(store.studentAnswer).toBe('')
+    expect(store.studentAnswerPreview).toBe('')
     expect(store.correctAnswer).toBe('')
     expect(socket?.readyState).toBe(FakeWebSocket.CLOSED)
   })

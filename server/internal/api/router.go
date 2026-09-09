@@ -87,6 +87,7 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		parentSafety := auth.RequireRole(auth.RoleParent, http.HandlerFunc(dependencies.Classroom.ParentSafetyEvents))
 		parentIntervention := auth.RequireRole(auth.RoleParent, http.HandlerFunc(dependencies.Classroom.ParentIntervention))
 		ownerCosts := auth.RequireRole(auth.RoleOwner, http.HandlerFunc(dependencies.Classroom.OwnerCosts))
+		ownerLearningEffects := auth.RequireRole(auth.RoleOwner, http.HandlerFunc(dependencies.Classroom.OwnerLearningEffects))
 		ownerContent := auth.RequireRole(auth.RoleOwner, http.HandlerFunc(dependencies.Classroom.OwnerContent))
 		mux.Handle("POST /api/v1/student/sessions/{session_id}/answers", dependencies.Authenticate(studentSubmit))
 		mux.Handle("POST /api/v1/student/sessions/{session_id}/support", dependencies.Authenticate(studentSupport))
@@ -108,6 +109,7 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/v1/parent/child/{student_id}/safety-events", dependencies.Authenticate(parentSafety))
 		mux.Handle("POST /api/v1/parent/child/{student_id}/interventions", dependencies.Authenticate(parentIntervention))
 		mux.Handle("GET /api/v1/owner/costs", dependencies.Authenticate(ownerCosts))
+		mux.Handle("GET /api/v1/owner/learning-effects", dependencies.Authenticate(ownerLearningEffects))
 		mux.Handle("GET /api/v1/owner/content", dependencies.Authenticate(ownerContent))
 	}
 	if dependencies.Authenticate != nil && dependencies.ContentPipeline != nil {

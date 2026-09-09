@@ -32,7 +32,7 @@ export const useSupervisionStore = defineStore('supervision', {
     reconnecting: false,
     sessionActive: false,
 		studentID: '', sessionID: '', childName: '', startedAt: '', subject: '', knowledgePoint: '', elapsed: '00:00', target: '00:00', activeSeconds: 0, timingClientAt: 0,
-    studentAnswer: '', correctAnswer: '', misconception: '', tutorAction: '', tutorReason: '', socraticRound: 0,
+    studentAnswerPreview: '', answerVisibility: 'NONE' as 'NONE' | 'SHORT_CURRENT' | 'WITHHELD_LONG' | 'WITHHELD_NOT_ACTIVE', correctAnswer: '', misconception: '', tutorAction: '', tutorReason: '', socraticRound: 0,
     masteryState: 'UNKNOWN', masteryScore: 0,
     timeline: [] as ParentTimelineItem[],
     connectionError: '',
@@ -88,7 +88,8 @@ export const useSupervisionStore = defineStore('supervision', {
         this.sessionActive = live.status === 'ACTIVE'
         this.subject = live.subject
         this.knowledgePoint = live.knowledge_point
-        this.studentAnswer = live.student_answer
+        this.studentAnswerPreview = live.student_answer_preview ?? ''
+        this.answerVisibility = live.student_answer_visibility
         this.correctAnswer = formatAnswer(live.correct_answer)
         this.misconception = live.error_type || live.misconceptions.join('、')
         this.tutorAction = live.tutor_action || live.current_state
@@ -117,7 +118,8 @@ export const useSupervisionStore = defineStore('supervision', {
       this.target = '00:00'
 			this.activeSeconds = 0
 			this.timingClientAt = 0
-      this.studentAnswer = ''
+      this.studentAnswerPreview = ''
+      this.answerVisibility = 'NONE'
       this.correctAnswer = ''
       this.misconception = ''
       this.tutorAction = ''
@@ -190,7 +192,6 @@ export const useSupervisionStore = defineStore('supervision', {
 				this.timingClientAt = performance.now()
 			}
       if (typeof payload.correct_answer !== 'undefined') this.correctAnswer = formatAnswer(payload.correct_answer)
-      if (typeof payload.student_answer === 'string') this.studentAnswer = payload.student_answer
       if (typeof payload.error_type === 'string') this.misconception = payload.error_type
       if (typeof payload.misconception === 'string') this.misconception = payload.misconception
       if (typeof payload.action === 'string') this.tutorAction = payload.action
@@ -269,7 +270,6 @@ function eventLabel(type: string): string {
 }
 
 function realtimeTimelineText(type: string, payload: Record<string, unknown>): string {
-  if (type === 'ANSWER_SUBMITTED' && typeof payload.student_answer === 'string') return payload.student_answer
   if (typeof payload.message === 'string') return payload.message
   return eventLabel(type)
 }

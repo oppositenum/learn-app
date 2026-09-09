@@ -1,6 +1,18 @@
 export interface CostRecord { date: string; model: string; purpose: string; requests: number; input_tokens: number; cached_input_tokens: number; output_tokens: number; audio_input_seconds: number; audio_output_seconds: number; estimated_cost_usd: string }
 export interface CostSummary { total_cost_usd: string; cost_per_active_student_day_usd: string; cost_per_20_minute_lesson_usd: string; cost_per_mastered_skill_usd: string; cached_ratio: string; stt_cost_usd: string; tts_cost_usd: string; strong_model_ratio: string; average_tokens_per_request: string }
 export interface CostFilters { student_id?: string; subject?: string; date_from?: string; date_to?: string; model?: string; purpose?: string; session_id?: string }
+export interface MetricRate { rate: number | null }
+export interface LearningEffectReport {
+	definitions: Record<string, string>
+	first_answer_effective_latency: { sessions: number; measured_sessions: number; average_ms: number | null }
+	student_interaction_share: MetricRate & { student_events: number; tutor_events: number }
+	completion_by_assistance: Array<MetricRate & { assistance_level: number; completed: number; exits: number }>
+	transfer_accuracy: MetricRate & { correct: number; attempts: number }
+	retention: Array<MetricRate & { days: number; correct: number; attempts: number }>
+	dont_know_reengagement: MetricRate & { requests: number; reengaged: number }
+	exit_stages: Array<{ stage: string; outcome: string; count: number }>
+	ai_anomaly: MetricRate & { requests: number; anomalies: number }
+}
 export interface ContentRecord { id: string; status: string; content_version: string; subject: string; knowledge_point: string; prompt: string; automatic_validation_passed: boolean; secondary_review_passed: boolean }
 export interface ContentKnowledgePointOption {
 	id: string
@@ -33,6 +45,10 @@ async function ownerGet<T>(path: string): Promise<T> { const response = await fe
 export async function getOwnerCosts(filters: CostFilters = {}): Promise<{ records: CostRecord[]; summary: CostSummary }> {
 	const query = new URLSearchParams(Object.entries(filters).filter((entry): entry is [string, string] => Boolean(entry[1])))
 	return ownerGet<{ records: CostRecord[]; summary: CostSummary }>(`/api/v1/owner/costs?${query}`)
+}
+export async function getOwnerLearningEffects(filters: Pick<CostFilters, 'student_id' | 'subject' | 'date_from' | 'date_to'> = {}): Promise<LearningEffectReport> {
+	const query = new URLSearchParams(Object.entries(filters).filter((entry): entry is [string, string] => Boolean(entry[1])))
+	return ownerGet<LearningEffectReport>(`/api/v1/owner/learning-effects?${query}`)
 }
 export async function getOwnerContent(): Promise<ContentRecord[]> { return (await ownerGet<{ records: ContentRecord[] }>('/api/v1/owner/content')).records }
 export async function getContentGenerationOptions(): Promise<ContentGenerationOptions> { return ownerGet('/api/v1/owner/content/generation-options') }

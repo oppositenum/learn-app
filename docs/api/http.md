@@ -29,7 +29,7 @@ Browser credentials are held only in a `HttpOnly`, `SameSite=Strict` cookie. The
 | `POST` | `/api/v1/student/sessions/{session_id}/voice/complete` | Explicitly transitions `VOICE_EXPLAIN` to `RETURN` while keeping the released original question active | Student must own active session; Parent is forbidden |
 | `POST` | `/api/v1/student/sessions/{session_id}/reflection` | Saves `CONTINUE_TOMORROW`, `PAUSE`, or `STOP` after a completed classroom | Student must own the completed session; Parent/Owner cannot submit |
 | `POST` | `/api/v1/student/sessions/{session_id}/support` | Safe `HINT` or parallel-example `EXPLAIN` Tutor turn | Student must own active session; strict body; no answer/analysis row and no failed-round increment |
-| `GET` | `/api/v1/student/growth` | Student ID, Shanghai `learning_date`, live streak, energy, and growth-base JSON | Student's own record only |
+| `GET` | `/api/v1/student/growth` | Student ID, Shanghai `learning_date`, live streak, compatibility energy, growth-base JSON, and five evidence-backed growth indicators | Student's own record only |
 | `POST` | `/api/v1/student/speech/transcriptions` | Transcript requiring confirmation; raw-audio deletion status | Student only; multipart `audio`, `duration_seconds`, optional `session_id` |
 
 Example safe answer response:
@@ -72,7 +72,7 @@ While a session is in `VOICE_EXPLAIN`, direct answer submission returns `409 Con
 | Method | Path | Response | Security |
 |---|---|---|---|
 | `GET` | `/api/v1/parent/children` | Bound children and optional active-session discovery | Parent only; active links only |
-| `GET` | `/api/v1/parent/child/{student_id}/session/{session_id}` | Public question plus private supervision analysis/answer | Bound Parent only |
+| `GET` | `/api/v1/parent/child/{student_id}/session/{session_id}` | Public question, Parent-only answer key/analysis, bounded current-answer visibility, and a privacy-safe timeline | Bound Parent only |
 | `GET` | `/api/v1/parent/child/{student_id}/ability` | Subject mastery, core-ability evidence, and active misconceptions | Bound Parent only; read-only and answer-free |
 | `GET` | `/api/v1/parent/child/{student_id}/report` | Activity, rewards, and recent classroom summaries | Bound Parent only; read-only and answer-free |
 | `GET` | `/api/v1/parent/child/{student_id}/safety-events` | Up to 50 escalated safety categories with policy version, severity, fixed action, and time | Bound Parent only; no Student wording; every access is audited |
@@ -81,6 +81,8 @@ While a session is in `VOICE_EXPLAIN`, direct answer submission returns `409 Con
 | `POST` | `/api/v1/parent/child/{student_id}/interventions` | Saves one fixed lightweight intervention | Bound Parent only; unknown fields rejected |
 
 Allowed preference fields are `daily_minutes`, `priority_subject_codes`, `review_only`, `reduce_intensity`, and `enabled_subject_codes`. `enabled_subject_codes` must be a subset of `MATH`/`CHINESE`/`ENGLISH`/`PHYSICS`/`CHEMISTRY` with at least one entry when provided; omitting it (or the stored empty array) means all subjects are enabled. The daily plan contains one block per enabled subject with released content, splitting `daily_minutes` evenly. There is no send-answer or per-question control endpoint.
+
+The session endpoint returns `student_answer_preview` only while the session is `ACTIVE` and the latest answer is a single line of at most 80 Unicode code points after surrounding whitespace is removed. `student_answer_visibility` is `SHORT_CURRENT`, `NONE`, `WITHHELD_LONG`, or `WITHHELD_NOT_ACTIVE`; the preview field is omitted for every value except `SHORT_CURRENT`. Any carriage return or line feed causes `WITHHELD_LONG`, including a leading or trailing newline. Student timeline turns are always replaced with action summaries. Tutor turns are also summarized, and all private turn reasons are removed, once a session is `PAUSED`, `COMPLETED`, or `ABANDONED`. Standard answers and full solutions remain available only within the authenticated Parent projection.
 
 The preference update response reports `plan_updated`, `today_preserved`, and the Shanghai learning date `applies_from`. If today's plan has started or a classroom remains open, the server preserves that history and applies the new preference from the following learning date. Otherwise it rebuilds today's proposed plan. `plan_updated` states whether an already materialized plan was replaced or a new plan was created; the saved preference still applies from `applies_from` when no future plan has been materialized yet.
 
@@ -113,9 +115,12 @@ Allowed intervention types are `ENCOURAGEMENT`, `REDUCE_INTENSITY`, `REVIEW_ONLY
 | `POST` | `/api/v1/owner/content/{question_id}/release` | Releases using server-looked-up PASS evidence | Owner only; reviewed state required |
 | `POST` | `/api/v1/owner/content/{question_id}/quarantine` | Immediately removes released content from classroom selection | Owner only; reason required |
 | `GET` | `/api/v1/owner/costs` | Daily model/purpose/token/audio/cost aggregates and normalized summary metrics | Owner only |
+| `GET` | `/api/v1/owner/learning-effects` | Learning-effect rates, explicit numerators/denominators, latency coverage, exit distribution, and bounded AI outcome anomalies | Owner only; no answer, Tutor, provider-response, or audio bodies |
 | `GET` | `/api/v1/owner/trials` | Longest/current activity and child-submitted willingness streaks | Owner read-only; cannot create reflections |
 
 Cost filters may be combined: `student_id`, `session_id`, `subject`, `date_from`, `date_to`, `model`, and `purpose`. Summary fields are `total_cost_usd`, `cost_per_active_student_day_usd`, `cost_per_20_minute_lesson_usd`, `cost_per_mastered_skill_usd`, `cached_ratio`, `stt_cost_usd`, `tts_cost_usd`, `strong_model_ratio`, and `average_tokens_per_request`.
+
+Learning-effect filters may be combined: `student_id`, `subject`, `date_from`, and `date_to`. The response defines and reports first-answer effective latency with measured-session coverage, Student interaction event share, completion by assistance levels 0 through 4, transfer accuracy, D+1 and D+7 retention, post-`EXPLAIN` re-engagement, exit-stage distribution, and the structured AI anomaly rate. Every rate includes its numerator and denominator; rates with a zero denominator and latency with no measured session are `null`, not zero.
 
 The 15 curated seed questions retain explicit curated validation/review provenance. Migration `000013_seed_asset_evidence.sql` reconstructs their complete DRAFT assets, and the PostgreSQL integration suite runs every asset through the same deterministic Validator used by the Owner HTTP pipeline. This does not retroactively claim that migration `000007` invoked the Go validator or a real AI reviewer.
 

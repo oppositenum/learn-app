@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,29 +15,31 @@ import (
 var ErrLiveSessionNotFound = errors.New("live session not found")
 
 type LiveSessionDTO struct {
-	SessionID      uuid.UUID       `json:"session_id"`
-	StudentID      uuid.UUID       `json:"student_id"`
-	Subject        string          `json:"subject"`
-	KnowledgePoint string          `json:"knowledge_point"`
-	StartedAt      time.Time       `json:"started_at"`
-	Status         string          `json:"status"`
-	CurrentState   string          `json:"current_state"`
-	SocraticRound  int16           `json:"socratic_round"`
-	Engagement     string          `json:"engagement"`
-	QuestionPrompt string          `json:"question_prompt"`
-	CorrectAnswer  json.RawMessage `json:"correct_answer"`
-	FullSolution   string          `json:"full_solution"`
-	StudentAnswer  string          `json:"student_answer"`
-	AnswerCorrect  bool            `json:"answer_correct"`
-	ErrorType      string          `json:"error_type"`
-	Misconceptions json.RawMessage `json:"misconceptions"`
-	TutorAction    string          `json:"tutor_action"`
-	TutorReason    string          `json:"tutor_reason"`
-	TargetMinutes  int16           `json:"target_minutes"`
-	ActiveSeconds  int             `json:"active_seconds"`
-	MasteryState   string          `json:"mastery_state"`
-	MasteryScore   float64         `json:"mastery_score"`
-	Timeline       []LiveTurnDTO   `json:"timeline"`
+	SessionID            uuid.UUID       `json:"session_id"`
+	StudentID            uuid.UUID       `json:"student_id"`
+	Subject              string          `json:"subject"`
+	KnowledgePoint       string          `json:"knowledge_point"`
+	StartedAt            time.Time       `json:"started_at"`
+	Status               string          `json:"status"`
+	CurrentState         string          `json:"current_state"`
+	SocraticRound        int16           `json:"socratic_round"`
+	Engagement           string          `json:"engagement"`
+	QuestionPrompt       string          `json:"question_prompt"`
+	CorrectAnswer        json.RawMessage `json:"correct_answer"`
+	FullSolution         string          `json:"full_solution"`
+	AnswerCorrect        bool            `json:"answer_correct"`
+	ErrorType            string          `json:"error_type"`
+	Misconceptions       json.RawMessage `json:"misconceptions"`
+	TutorAction          string          `json:"tutor_action"`
+	TutorReason          string          `json:"tutor_reason"`
+	TargetMinutes        int16           `json:"target_minutes"`
+	ActiveSeconds        int             `json:"active_seconds"`
+	MasteryState         string          `json:"mastery_state"`
+	MasteryScore         float64         `json:"mastery_score"`
+	DetailMode           string          `json:"detail_mode"`
+	AnswerVisibility     string          `json:"student_answer_visibility"`
+	StudentAnswerPreview *string         `json:"student_answer_preview,omitempty"`
+	Timeline             []LiveTurnDTO   `json:"timeline"`
 }
 
 type LiveTurnDTO struct {
@@ -49,6 +53,7 @@ type LiveTurnDTO struct {
 
 func (repository *Repository) LiveSession(ctx context.Context, studentID, sessionID uuid.UUID) (LiveSessionDTO, error) {
 	var live LiveSessionDTO
+	var studentAnswer string
 	err := repository.pool.QueryRow(ctx, `
 SELECT ls.id, ls.student_id, s.name_zh, kp.name, ls.started_at, ls.status,
        ls.current_state, ls.socratic_fail_count, ls.engagement_state,
@@ -75,7 +80,7 @@ WHERE ls.id = $1 AND ls.student_id = $2`, sessionID, studentID).Scan(
 		&live.SessionID, &live.StudentID, &live.Subject, &live.KnowledgePoint,
 		&live.StartedAt, &live.Status, &live.CurrentState, &live.SocraticRound,
 		&live.Engagement, &live.QuestionPrompt, &live.CorrectAnswer, &live.FullSolution,
-		&live.StudentAnswer, &live.AnswerCorrect, &live.ErrorType, &live.Misconceptions,
+		&studentAnswer, &live.AnswerCorrect, &live.ErrorType, &live.Misconceptions,
 		&live.TutorAction, &live.TutorReason, &live.TargetMinutes, &live.ActiveSeconds, &live.MasteryState, &live.MasteryScore,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -83,6 +88,12 @@ WHERE ls.id = $1 AND ls.student_id = $2`, sessionID, studentID).Scan(
 	}
 	if err != nil {
 		return live, err
+	}
+	live.DetailMode = "REPORT"
+	live.AnswerVisibility = "WITHHELD_NOT_ACTIVE"
+	if live.Status == "ACTIVE" {
+		live.DetailMode = "LIVE"
+		live.StudentAnswerPreview, live.AnswerVisibility = currentAnswerPreview(studentAnswer)
 	}
 	rows, err := repository.pool.Query(ctx, `SELECT sequence,actor,action,message,reason_private,created_at FROM tutor_turns WHERE session_id=$1 ORDER BY sequence`, sessionID)
 	if err != nil {
@@ -94,7 +105,41 @@ WHERE ls.id = $1 AND ls.student_id = $2`, sessionID, studentID).Scan(
 		if err := rows.Scan(&turn.Sequence, &turn.Actor, &turn.Action, &turn.Message, &turn.Reason, &turn.At); err != nil {
 			return live, err
 		}
+		if live.DetailMode == "REPORT" || turn.Actor == "STUDENT" {
+			turn.Message = parentTurnSummary(turn.Actor, turn.Action)
+			turn.Reason = ""
+		}
 		live.Timeline = append(live.Timeline, turn)
 	}
 	return live, rows.Err()
+}
+
+const parentCurrentAnswerLimit = 80
+
+func currentAnswerPreview(answer string) (*string, string) {
+	if strings.ContainsAny(answer, "\r\n") {
+		return nil, "WITHHELD_LONG"
+	}
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return nil, "NONE"
+	}
+	if utf8.RuneCountInString(answer) > parentCurrentAnswerLimit {
+		return nil, "WITHHELD_LONG"
+	}
+	return &answer, "SHORT_CURRENT"
+}
+
+func parentTurnSummary(actor string, action *string) string {
+	switch actor {
+	case "STUDENT":
+		return "孩子提交了一次回答"
+	case "TUTOR":
+		if action != nil && *action != "" {
+			return "Tutor 完成了 " + *action + " 教学步骤"
+		}
+		return "Tutor 完成了一次教学步骤"
+	default:
+		return "系统更新了课堂状态"
+	}
 }

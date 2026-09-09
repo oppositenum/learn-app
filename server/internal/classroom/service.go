@@ -257,14 +257,14 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 		}
 		misconceptionCode := firstMisconception(analysisMisconceptions)
 		submittedStudent, _ := json.Marshal(map[string]any{"status": "RECEIVED"})
-		submittedParent, _ := json.Marshal(map[string]any{"student_answer": answer})
+		submittedParent, _ := json.Marshal(map[string]any{"answer_visibility": "REFRESH_LIVE_ENDPOINT"})
 		submittedEvent := makeEvent(row.studentID, sessionID, eventSequence, realtime.EventAnswerSubmitted, submittedStudent, submittedParent, now)
 		if err := insertEvent(ctx, tx, submittedEvent); err != nil {
 			return err
 		}
 		published = append(published, submittedEvent)
 		analyzedStudent, _ := json.Marshal(map[string]any{"status": "ANALYZED"})
-		analyzedParent, _ := json.Marshal(map[string]any{"student_answer": answer, "correct_answer": row.answer, "answer_correct": correct, "reasoning_quality": reasoningQuality, "confidence": confidence, "error_type": errorType, "misconception": misconceptionCode, "emotion_signal": emotionSignal, "engagement": engagement, "recommended_action": recommended})
+		analyzedParent, _ := json.Marshal(map[string]any{"answer_visibility": "REFRESH_LIVE_ENDPOINT", "correct_answer": row.answer, "answer_correct": correct, "reasoning_quality": reasoningQuality, "confidence": confidence, "error_type": errorType, "misconception": misconceptionCode, "emotion_signal": emotionSignal, "engagement": engagement, "recommended_action": recommended})
 		analyzedEvent := makeEvent(row.studentID, sessionID, eventSequence+1, realtime.EventAnswerAnalyzed, analyzedStudent, analyzedParent, now)
 		if err := insertEvent(ctx, tx, analyzedEvent); err != nil {
 			return err
@@ -345,7 +345,7 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 			return err
 		}
 		studentPayload, _ := json.Marshal(map[string]any{"action": decision.NextState, "round": decision.SocraticRound, "message": message})
-		parentPayload, _ := json.Marshal(map[string]any{"student_answer": answer, "correct_answer": row.answer, "answer_correct": false, "error_type": errorType, "misconception": misconceptionCode, "action": decision.NextState, "round": decision.SocraticRound, "message": message, "reason": decision.Reason})
+		parentPayload, _ := json.Marshal(map[string]any{"answer_visibility": "REFRESH_LIVE_ENDPOINT", "correct_answer": row.answer, "answer_correct": false, "error_type": errorType, "misconception": misconceptionCode, "action": decision.NextState, "round": decision.SocraticRound, "message": message, "reason": decision.Reason})
 		event := makeEvent(row.studentID, sessionID, eventSequence, realtime.EventTutorActionSelected, studentPayload, parentPayload, now)
 		if err := insertEvent(ctx, tx, event); err != nil {
 			return err
@@ -682,7 +682,11 @@ func (service *Service) RequestSupport(ctx context.Context, studentUserID, sessi
 		if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_state=$2,teaching_response_id=COALESCE(NULLIF($3,''),teaching_response_id),assistance_level=GREATEST(assistance_level,$4),last_activity_at=CASE WHEN status='ACTIVE' THEN $5 ELSE last_activity_at END,processing_token=NULL,processing_until=NULL,version=version+1 WHERE id=$1`, sessionID, decision.NextState, newResponseID, assistanceForState(decision.NextState), now); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private,response_id) VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), sessionID, turnSequence, decision.NextState, message, decision.Reason, newResponseID); err != nil {
+		turnID := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private,response_id) VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, turnID, sessionID, turnSequence, decision.NextState, message, decision.Reason, newResponseID); err != nil {
+			return err
+		}
+		if err := recordLegacySupportLearningEffect(ctx, tx, row, sessionID, turnID, support, string(decision.NextState), max(row.assistanceLevel, assistanceForState(decision.NextState)), now); err != nil {
 			return err
 		}
 		studentPayload, _ := json.Marshal(map[string]any{"action": decision.NextState, "message": message})

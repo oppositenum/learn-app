@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BookOpen, FlaskConical, Landmark, Sparkles } from '@lucide/vue'
+import { BookOpen, CalendarCheck2, FlaskConical, HandHelping, Landmark, RefreshCcw, Shuffle, Sparkles, Target } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 
 import { useGrowthStore } from '../../stores/growth'
@@ -29,6 +29,18 @@ const places = computed(() => [
   { name: '语言馆', detail: `${count('CHINESE') + count('ENGLISH')} 个语言知识点已点亮`, icon: BookOpen, color: 'bg-amber-100 text-amber-800' },
   { name: '科学实验室', detail: `${count('PHYSICS') + count('CHEMISTRY')} 个科学知识点 · ${buildings.value.cross_subject_insights ?? 0} 次跨学科发现`, icon: FlaskConical, color: 'bg-sky-100 text-sky-800' },
 ])
+const evidenceIcons = {
+  INDEPENDENT_SOLVING: Target,
+  UNDERSTANDING_AFTER_HELP: HandHelping,
+  SELF_CORRECTION: RefreshCcw,
+  TRANSFER_SUCCESS: Shuffle,
+  DELAYED_REVIEW: CalendarCheck2,
+}
+const evidence = computed(() => currentGrowth.value?.growth_evidence?.indicators ?? [])
+
+function evidenceDetail(event: { subject: string; knowledge_point: string; occurred_at: string }) {
+  return `${event.subject} · ${event.knowledge_point} · ${new Date(event.occurred_at).toLocaleDateString('zh-CN')}`
+}
 </script>
 
 <template>
@@ -52,17 +64,56 @@ const places = computed(() => [
     </p>
     <div class="mt-7 flex items-end justify-between border-b border-zinc-300 pb-5">
       <div>
-        <p class="text-4xl font-semibold tabular-nums">
-          {{ currentGrowth?.total_energy ?? '--' }}
+        <p class="text-sm text-zinc-500">
+          学习证据
         </p>
-        <p class="mt-1 text-sm text-zinc-500">
-          探索能量
+        <p class="mt-1 text-xl font-semibold">
+          五种真实进步
         </p>
       </div>
       <p class="text-sm font-medium text-teal-700">
         {{ currentGrowth ? `连续 ${currentGrowth.streak_days} 天` : '等待同步' }}
       </p>
     </div>
+
+    <section
+      class="mt-7"
+      aria-labelledby="evidence-title"
+    >
+      <h2
+        id="evidence-title"
+        class="text-lg font-semibold"
+      >
+        成长证据
+      </h2>
+      <div
+        v-if="currentGrowth"
+        class="mt-4 divide-y divide-zinc-300 border-y border-zinc-300"
+      >
+        <article
+          v-for="indicator in evidence"
+          :key="indicator.code"
+          class="grid grid-cols-[2.5rem_minmax(0,1fr)_auto] gap-3 py-4"
+        >
+          <span class="grid size-10 place-items-center bg-white text-teal-800">
+            <component
+              :is="evidenceIcons[indicator.code]"
+              :size="19"
+              aria-hidden="true"
+            />
+          </span>
+          <div class="min-w-0">
+            <h3 class="font-semibold">
+              {{ indicator.label }}
+            </h3>
+            <p class="mt-1 text-sm leading-6 text-zinc-500">
+              {{ indicator.events[0] ? evidenceDetail(indicator.events[0]) : '等待新的学习证据' }}
+            </p>
+          </div>
+          <strong class="pt-1 text-2xl tabular-nums">{{ indicator.count }}</strong>
+        </article>
+      </div>
+    </section>
 
     <section
       class="mt-8"
@@ -115,5 +166,9 @@ const places = computed(() => [
         />
       </div>
     </section>
+
+    <p class="mt-8 border-t border-zinc-300 pt-4 text-xs text-zinc-500">
+      兼容能量记录：{{ currentGrowth?.total_energy ?? '--' }}
+    </p>
   </main>
 </template>

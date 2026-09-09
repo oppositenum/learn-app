@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ArrowRight, CalendarDays, Clock3, Sparkles } from '@lucide/vue'
+import { ArrowRight, CalendarDays, Clock3, ShieldCheck } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { getParentChildren, getParentReport, type ParentChild, type ParentReport } from '../../api/parent'
+import { getParentChildren, getParentReport, getParentSafetyEvents, type ParentChild, type ParentReport, type ParentSafetyEvent } from '../../api/parent'
 
 const route = useRoute()
 const router = useRouter()
@@ -13,6 +13,7 @@ const childName = ref('孩子')
 const report = ref<ParentReport | null>(null)
 const loading = ref(true)
 const error = ref('')
+const safetyEvents = ref<ParentSafetyEvent[]>([])
 const activeMinutes = computed(() => Math.round((report.value?.summary.active_seconds ?? 0) / 60))
 
 async function loadReport(nextStudentID: string) {
@@ -27,7 +28,12 @@ async function loadReport(nextStudentID: string) {
     await router.replace({ query: { ...route.query, student: child.student_id } })
   }
   try {
-    report.value = await getParentReport(child.student_id)
+    const [nextReport, nextSafetyEvents] = await Promise.all([
+      getParentReport(child.student_id),
+      getParentSafetyEvents(child.student_id),
+    ])
+    report.value = nextReport
+    safetyEvents.value = nextSafetyEvents
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '学习报告暂时不可用'
   } finally {
@@ -110,16 +116,86 @@ onMounted(async () => {
           <span class="text-sm text-zinc-500">有效分钟</span>
         </div>
         <div class="border-r border-zinc-300 py-5 pr-4">
-          <Sparkles
-            :size="18"
-            class="text-amber-700"
-          />
-          <strong class="mt-3 block text-2xl tabular-nums">{{ report.summary.total_energy }}</strong>
-          <span class="text-sm text-zinc-500">探索能量</span>
+          <strong class="block text-2xl tabular-nums">{{ report.summary.reward_events }}</strong>
+          <span class="text-sm text-zinc-500">努力记录</span>
         </div>
         <div class="py-5 pl-4">
           <strong class="block text-2xl tabular-nums">{{ report.summary.streak_days }}</strong>
           <span class="text-sm text-zinc-500">连续活动天数</span>
+        </div>
+      </section>
+
+      <section
+        class="mt-9"
+        aria-labelledby="growth-evidence-title"
+      >
+        <h2
+          id="growth-evidence-title"
+          class="text-lg font-semibold"
+        >
+          成长证据
+        </h2>
+        <div class="mt-4 divide-y divide-zinc-300 border-y border-zinc-300">
+          <article
+            v-for="indicator in report.growth_evidence.indicators"
+            :key="indicator.code"
+            class="grid grid-cols-[minmax(0,1fr)_auto] gap-4 py-4"
+          >
+            <div class="min-w-0">
+              <h3 class="font-semibold">
+                {{ indicator.label }}
+              </h3>
+              <p class="mt-1 text-sm leading-6 text-zinc-500">
+                {{ indicator.events[0] ? `${indicator.events[0].subject} · ${indicator.events[0].knowledge_point} · ${new Date(indicator.events[0].occurred_at).toLocaleDateString('zh-CN')}` : '暂无对应证据' }}
+              </p>
+            </div>
+            <strong class="text-2xl tabular-nums">{{ indicator.count }}</strong>
+          </article>
+        </div>
+      </section>
+
+      <section
+        class="mt-9"
+        aria-labelledby="safety-summary-title"
+      >
+        <div class="flex items-center gap-2">
+          <ShieldCheck
+            :size="19"
+            class="text-teal-700"
+            aria-hidden="true"
+          />
+          <h2
+            id="safety-summary-title"
+            class="text-lg font-semibold"
+          >
+            安全摘要
+          </h2>
+        </div>
+        <div class="mt-4 divide-y divide-zinc-300 border-y border-zinc-300">
+          <article
+            v-for="event in safetyEvents"
+            :key="event.id"
+            class="grid grid-cols-[minmax(0,1fr)_auto] gap-4 py-4"
+          >
+            <div>
+              <h3 class="font-semibold">
+                {{ event.category }}
+              </h3>
+              <p class="mt-1 text-sm text-zinc-500">
+                {{ event.fixed_action }} · {{ event.policy_version }}
+              </p>
+            </div>
+            <div class="text-right text-sm">
+              <strong>{{ event.severity }}</strong>
+              <time class="mt-1 block text-zinc-500">{{ new Date(event.occurred_at).toLocaleDateString('zh-CN') }}</time>
+            </div>
+          </article>
+          <p
+            v-if="safetyEvents.length === 0"
+            class="py-4 text-sm text-zinc-500"
+          >
+            暂无需要家长查看的安全事件
+          </p>
         </div>
       </section>
 
