@@ -21,7 +21,7 @@ Browser credentials are held only in a `HttpOnly`, `SameSite=Strict` cookie. The
 | `POST` | `/api/v1/student/sessions` | Starts the released question selected for a current plan block, or returns the open session already bound to that block | Student's own current-day block only; a different open block returns 409 |
 | `GET` | `/api/v1/student/sessions/current` | Current `ACTIVE` or `PAUSED` session, or `204 No Content` | Student's own record only |
 | `GET` | `/api/v1/student/sessions/{session_id}` | Versioned public classroom prompt, public timeline, status, and authoritative timing snapshot | Student must own session; no private answer fields |
-| `POST` | `/api/v1/student/sessions/{session_id}/answers` | Tutor action, Socratic round, safe message, optional voice audio/segments, safe mastery/reward summary | Student must own active session; no answer echo |
+| `POST` | `/api/v1/student/sessions/{session_id}/answers` | Tutor action, Socratic round, safe message, optional voice audio/segments, safe mastery/reward summary, or a fixed versioned safety notice | Student must own active session; no answer echo |
 | `POST` | `/api/v1/student/sessions/{session_id}/pause` | Checkpoints active study time and changes `ACTIVE` to `PAUSED` | Student must own session; idempotent while paused |
 | `POST` | `/api/v1/student/sessions/{session_id}/resume` | Starts a new active timing interval and changes `PAUSED` to `ACTIVE` | Student must own session; idempotent while active |
 | `POST` | `/api/v1/student/sessions/{session_id}/abandon` | Ends an open session and releases its plan block | Student must own session; idempotent once abandoned |
@@ -57,6 +57,10 @@ Student session DTOs are assembled from one repeatable-read database snapshot, s
 
 Support request bodies are exactly `{"type":"HINT"}` or `{"type":"EXPLAIN"}`. Unknown fields, unsupported types, and trailing JSON are rejected. Generated support is validated against the server-authorized action and answer non-disclosure schema before a Tutor turn is persisted.
 
+Tutor output passes the existing independent answer-disclosure audit and then the deterministic `tutor-number-material-v1` gate before publication. `PROBE`, `HINT`, `SCAFFOLD`, and `ANALOGY` may only use numeric material present in the released original prompt. `EXPLAIN` and `VOICE_EXPLAIN` may use a different-number parallel example, and the server appends a fixed return-to-original verification instruction after the audited model output.
+
+Student answer submission first applies the narrow deterministic `minor-safety-v1` policy. A matched safety category is not sent to the Teaching Agent and is not inserted into `student_answers`, `answer_analyses`, or the Tutor transcript. The response contains only the fixed fallback plus policy version, category, severity, fixed action, and whether a Parent was notified. The learning session, mastery evidence, reward, review, and plan state remain unchanged. This narrow deterministic classifier does not claim complete coverage of all unsafe language.
+
 While a session is in `VOICE_EXPLAIN`, direct answer submission returns `409 Conflict`. The Student must complete the voice explanation first; the server then records `VOICE_EXPLAIN_COMPLETED`, enters `RETURN`, and requires a fresh answer to the same released question.
 
 `GET` session responses in `VOICE_EXPLAIN` include the persisted safe TTS `voice_audio` data URL and synchronized `voice_segments`, so refreshing the voice page does not lose the explanation or block `RETURN`. The Student supply route is likewise session-bound (`/student/session/{session_id}/supply`) and reloads its safe classroom timeline instead of depending on browser memory. Raw child STT audio is not persisted.
@@ -69,6 +73,7 @@ While a session is in `VOICE_EXPLAIN`, direct answer submission returns `409 Con
 | `GET` | `/api/v1/parent/child/{student_id}/session/{session_id}` | Public question plus private supervision analysis/answer | Bound Parent only |
 | `GET` | `/api/v1/parent/child/{student_id}/ability` | Subject mastery, core-ability evidence, and active misconceptions | Bound Parent only; read-only and answer-free |
 | `GET` | `/api/v1/parent/child/{student_id}/report` | Activity, rewards, and recent classroom summaries | Bound Parent only; read-only and answer-free |
+| `GET` | `/api/v1/parent/child/{student_id}/safety-events` | Up to 50 escalated safety categories with policy version, severity, fixed action, and time | Bound Parent only; no Student wording; every access is audited |
 | `GET` | `/api/v1/parent/child/{student_id}/preferences` | Effective plan preferences including `enabled_subject_codes` and `configured` | Bound Parent only |
 | `PUT` | `/api/v1/parent/child/{student_id}/preferences` | Save confirmation, plan application result, and `answer_controls_available=false` | Bound Parent only; 15-60 minutes |
 | `POST` | `/api/v1/parent/child/{student_id}/interventions` | Saves one fixed lightweight intervention | Bound Parent only; unknown fields rejected |

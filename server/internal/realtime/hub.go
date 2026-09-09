@@ -56,6 +56,9 @@ func (hub *Hub) Publish(event Event) error {
 		}
 		payload := studentBytes
 		if subscription.role == auth.RoleParent || subscription.role == auth.RoleOwner {
+			if event.ParentSuppressed {
+				continue
+			}
 			payload = parentBytes
 		}
 		select {

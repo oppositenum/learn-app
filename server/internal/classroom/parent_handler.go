@@ -58,6 +58,15 @@ type parentRecentSession struct {
 	ActiveSeconds  int        `json:"active_seconds"`
 }
 
+type parentSafetyEvent struct {
+	ID            uuid.UUID `json:"id"`
+	PolicyVersion string    `json:"policy_version"`
+	Category      string    `json:"category"`
+	Severity      string    `json:"severity"`
+	FixedAction   string    `json:"fixed_action"`
+	OccurredAt    time.Time `json:"occurred_at"`
+}
+
 func (handler *Handler) ParentChildren(writer http.ResponseWriter, request *http.Request) {
 	principal, _ := auth.PrincipalFromContext(request.Context())
 	parentID, err := uuid.Parse(principal.UserID)
@@ -264,6 +273,55 @@ LEFT JOIN questions q ON q.id=ls.current_question_id LEFT JOIN knowledge_points 
 		"activity_days":   days,
 		"recent_sessions": sessions,
 	})
+}
+
+func (handler *Handler) ParentSafetyEvents(writer http.ResponseWriter, request *http.Request) {
+	studentID, ok := handler.authorizedParentStudent(writer, request)
+	if !ok {
+		return
+	}
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	parentID, err := uuid.Parse(principal.UserID)
+	if err != nil {
+		http.Error(writer, "invalid principal", http.StatusUnauthorized)
+		return
+	}
+	events := []parentSafetyEvent{}
+	err = pgx.BeginFunc(request.Context(), handler.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(request.Context(), `
+SELECT id,policy_version,category,severity,fixed_action,created_at
+FROM minor_safety_incidents
+WHERE student_id=$1 AND parent_escalated
+ORDER BY created_at DESC,id DESC
+LIMIT 50`, studentID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item parentSafetyEvent
+			if err := rows.Scan(&item.ID, &item.PolicyVersion, &item.Category, &item.Severity, &item.FixedAction, &item.OccurredAt); err != nil {
+				return err
+			}
+			events = append(events, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, item := range events {
+			if _, err := tx.Exec(request.Context(), `
+INSERT INTO minor_safety_access_audits(id,incident_id,accessor_user_id,channel)
+VALUES($1,$2,$3,'PARENT_SUMMARY_API')`, uuid.New(), item.ID, parentID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		http.Error(writer, "safety events unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"student_id": studentID, "events": events})
 }
 
 func (handler *Handler) authorizedParentStudent(writer http.ResponseWriter, request *http.Request) (uuid.UUID, bool) {

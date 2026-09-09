@@ -405,7 +405,13 @@ WHERE table_schema=current_schema() AND NOT (table_name=ANY($1::text[]))`, exclu
 
 func assertLegacySchemaUnchanged(t *testing.T, ctx context.Context, pool *pgxpool.Pool, before string) {
 	t.Helper()
-	after := schemaSignature(t, ctx, pool, []string{"answer_evaluation_provenance", "mastery_evidence_provenance", "legacy_model_mediated_evidence_candidates"})
+	after := schemaSignature(t, ctx, pool, []string{
+		"answer_evaluation_provenance",
+		"mastery_evidence_provenance",
+		"legacy_model_mediated_evidence_candidates",
+		"minor_safety_incidents",
+		"minor_safety_access_audits",
+	})
 	if after != before {
 		t.Fatal("additive provenance migration changed a legacy table definition")
 	}

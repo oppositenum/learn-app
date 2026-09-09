@@ -198,7 +198,10 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	}); err != nil {
 		return TutorTurn{}, err
 	}
-	return turn, nil
+	if err := enforceTutorMaterialPolicy(request.Question.Prompt, turn); err != nil {
+		return TutorTurn{}, errors.Join(ErrTutorOutputRephraseRequired, err)
+	}
+	return ensureOriginalTaskVerification(turn), nil
 }
 
 func (provider *CodexProvider) generateTutorTurn(ctx context.Context, purpose Purpose, request GenerateTurnRequest, instructions, requiredAction string, target *TutorTurn) error {

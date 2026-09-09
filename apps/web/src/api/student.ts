@@ -2,6 +2,13 @@ export interface SpeechSegment { id: string; text: string; start_ms: number; end
 export type TutorAction = 'INTRO' | 'ASK' | 'WAIT' | 'ANALYZE' | 'PROBE' | 'HINT' | 'SCAFFOLD' | 'ANALOGY' | 'BACKTRACK' | 'EXPLAIN' | 'VOICE_EXPLAIN' | 'RETURN' | 'VARIANT' | 'ABSTRACT' | 'VERIFY' | 'REVIEW' | 'BREAK' | 'COMPLETE'
 export type SessionStatus = 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'ABANDONED'
 export type PlanBlockStatus = 'AVAILABLE' | 'ACTIVE' | 'COMPLETED'
+export interface SafetyNotice {
+  policy_version: string
+  category: 'OFF_TOPIC_LONG' | 'PERSONAL_INFORMATION' | 'FAMILY_PRIVACY' | 'DANGEROUS_EXPERIMENT' | 'HEALTH' | 'SELF_HARM' | 'BULLYING' | 'SEXUAL_CONTENT'
+  severity: 'LOW' | 'MODERATE' | 'HIGH' | 'CRITICAL'
+  fixed_action: string
+  parent_notified: boolean
+}
 export interface SubmitAnswerResult {
   session_id: string
   version: number
@@ -18,6 +25,7 @@ export interface SubmitAnswerResult {
   mastery_state?: string
   energy?: number
   tomorrow_plan_changed?: boolean
+  safety?: SafetyNotice
 }
 
 export interface PlanBlock { id: string; sequence: number; subject: string; knowledge_point_id: string; minutes: number; mode: string; reason: string; focus: string; original_task_id?: string | null; status: PlanBlockStatus; session_id?: string | null; session_status?: SessionStatus | null }

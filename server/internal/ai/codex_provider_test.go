@@ -258,6 +258,51 @@ func TestCodexProviderDoesNotTrustAnswerRevealedWhenAuditorRejectsBody(t *testin
 	}
 }
 
+func TestCodexProviderRejectsIntroducedNumbersAfterIndependentDisclosureAudit(t *testing.T) {
+	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{
+		"message":"如果改成每盒10支会怎样？","action":"HINT","answer_revealed":false,"segments":[]
+	}`)}}
+	auditor := passingTutorOutputAuditor()
+	provider, err := NewCodexProvider(client, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+		Question:      content.QuestionPublic{Prompt: "每盒12支，共3盒。"},
+		TutorDecision: tutor.Decision{NextState: tutor.StateHint},
+	})
+	if !errors.Is(err, ErrTutorOutputRephraseRequired) || !errors.Is(err, ErrTutorMaterialPolicyViolation) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(auditor.requests) != 1 {
+		t.Fatalf("existing independent disclosure audit was bypassed: %+v", auditor.requests)
+	}
+}
+
+func TestCodexProviderAddsOriginalTaskVerificationAfterExplanationAudit(t *testing.T) {
+	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{
+		"message":"先看一个不同数字的平行例子。","action":"EXPLAIN","answer_revealed":false,"segments":[]
+	}`)}}
+	auditor := passingTutorOutputAuditor()
+	provider, err := NewCodexProvider(client, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := provider.GenerateParallelExample(context.Background(), ExampleRequest(GenerateTurnRequest{
+		Question:      content.QuestionPublic{Prompt: "每盒12支，共3盒。"},
+		TutorDecision: tutor.Decision{NextState: tutor.StateExplain},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auditor.requests) != 1 || strings.Contains(auditor.requests[0].Candidate.Message, "回到原题") {
+		t.Fatalf("reviewer did not receive original provider output: %+v", auditor.requests)
+	}
+	if !strings.Contains(turn.Message, "现在回到原题，请你再独立试一次。") {
+		t.Fatalf("student output lacks original-task verification: %q", turn.Message)
+	}
+}
+
 func TestCodexProviderFailsClosedWithoutTutorOutputAuditor(t *testing.T) {
 	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{
 		"message":"先看数量关系。","action":"PROBE","answer_revealed":false,"segments":[]

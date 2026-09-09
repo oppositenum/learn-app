@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 )
 
 func TestStudentAndParentDTOsAreSeparated(t *testing.T) {
@@ -28,5 +30,32 @@ func TestStudentAndParentDTOsAreSeparated(t *testing.T) {
 	}
 	if !strings.Contains(string(parent), "correct_answer") {
 		t.Fatalf("parent DTO lost supervised answer data: %s", parent)
+	}
+}
+
+func TestParentSuppressedEventOnlyReachesStudent(t *testing.T) {
+	hub := NewHub()
+	studentEvents, stopStudent := hub.Subscribe("stu_1", auth.RoleStudent)
+	defer stopStudent()
+	parentEvents, stopParent := hub.Subscribe("stu_1", auth.RoleParent)
+	defer stopParent()
+	event := Event{
+		EventID: "evt_2", StudentID: "stu_1", SessionID: "ses_1", Sequence: 5,
+		Type: EventSafetyIntervention, CreatedAt: time.Now(), ParentSuppressed: true,
+		StudentPayload: json.RawMessage(`{"category":"PERSONAL_INFORMATION"}`),
+		ParentPayload:  json.RawMessage(`{}`),
+	}
+	if err := hub.Publish(event); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-studentEvents:
+	case <-time.After(time.Second):
+		t.Fatal("student did not receive safety event")
+	}
+	select {
+	case payload := <-parentEvents:
+		t.Fatalf("parent received suppressed event: %s", payload)
+	case <-time.After(20 * time.Millisecond):
 	}
 }

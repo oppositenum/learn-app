@@ -21,6 +21,7 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/reward"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/safety"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/speech"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 )
@@ -95,6 +96,15 @@ type SubmitResult struct {
 	MasteryState    mastery.State    `json:"mastery_state,omitempty"`
 	Energy          int              `json:"energy,omitempty"`
 	TomorrowChanged bool             `json:"tomorrow_plan_changed,omitempty"`
+	Safety          *SafetyNotice    `json:"safety,omitempty"`
+}
+
+type SafetyNotice struct {
+	PolicyVersion  string          `json:"policy_version"`
+	Category       safety.Category `json:"category"`
+	Severity       safety.Severity `json:"severity"`
+	FixedAction    safety.Action   `json:"fixed_action"`
+	ParentNotified bool            `json:"parent_notified"`
 }
 
 type SupportType string
@@ -159,6 +169,10 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 		return SubmitResult{}, err
 	}
 	defer service.endSessionOperation(ctx, sessionID, operationToken)
+	classification := safety.Classify(answer)
+	if classification.Matched {
+		return service.handleSafetyClassification(ctx, studentUserID, sessionID, operationToken, classification)
+	}
 	var prepared *preparedAgent
 	if service.agent != nil {
 		prepared, err = service.prepareAgent(ctx, studentUserID, sessionID, operationToken, answer)
@@ -371,6 +385,69 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 		if service.hub != nil {
 			_ = service.hub.Publish(event)
 		}
+	}
+	return result, nil
+}
+
+func (service *Service) handleSafetyClassification(ctx context.Context, studentUserID, sessionID, operationToken uuid.UUID, classification safety.Classification) (SubmitResult, error) {
+	var result SubmitResult
+	var event realtime.Event
+	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		row, err := service.loadSessionForOperation(ctx, tx, studentUserID, sessionID, operationToken)
+		if err != nil {
+			return err
+		}
+		now := latestTime(service.now(), row.lastActivityAt)
+		_, eventSequence, err := nextSequences(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO minor_safety_incidents(
+    id,student_id,session_id,policy_version,category,severity,fixed_action,parent_escalated,created_at
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			uuid.New(), row.studentID, sessionID, safety.PolicyVersion, classification.Category,
+			classification.Severity, classification.Action, classification.EscalateToParent, now); err != nil {
+			return err
+		}
+		studentPayload, _ := json.Marshal(map[string]any{
+			"policy_version":  safety.PolicyVersion,
+			"category":        classification.Category,
+			"severity":        classification.Severity,
+			"fixed_action":    classification.Action,
+			"message":         classification.StudentMessage,
+			"parent_notified": classification.EscalateToParent,
+		})
+		parentPayload := json.RawMessage(`{}`)
+		if classification.EscalateToParent {
+			parentPayload, _ = json.Marshal(map[string]any{
+				"policy_version": safety.PolicyVersion,
+				"category":       classification.Category,
+				"severity":       classification.Severity,
+				"fixed_action":   classification.Action,
+				"occurred_at":    now,
+			})
+		}
+		event = makeEvent(row.studentID, sessionID, eventSequence, realtime.EventSafetyIntervention, studentPayload, parentPayload, now)
+		event.ParentSuppressed = !classification.EscalateToParent
+		if err := insertEvent(ctx, tx, event); err != nil {
+			return err
+		}
+		result = sessionSubmitResult(row, sessionID, row.version, row.state, row.fails, classification.StudentMessage, now)
+		result.Safety = &SafetyNotice{
+			PolicyVersion:  safety.PolicyVersion,
+			Category:       classification.Category,
+			Severity:       classification.Severity,
+			FixedAction:    classification.Action,
+			ParentNotified: classification.EscalateToParent,
+		}
+		return nil
+	})
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if service.hub != nil {
+		_ = service.hub.Publish(event)
 	}
 	return result, nil
 }

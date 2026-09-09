@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, CalendarCheck2, Lightbulb, Pause, RefreshCw, Send, StopCircle, Volume2 } from '@lucide/vue'
+import { ArrowLeft, CalendarCheck2, Lightbulb, Pause, RefreshCw, Send, ShieldAlert, StopCircle, Volume2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -182,6 +182,36 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <p class="whitespace-pre-line leading-7 text-zinc-700">
             {{ currentTutorTurn?.text }}
           </p>
+        </div>
+
+        <div
+          v-if="learning.safetyNotice"
+          data-testid="safety-notice"
+          class="mt-6 border-y border-amber-300 bg-amber-50 px-4 py-4 text-amber-950"
+          role="alert"
+          aria-live="assertive"
+        >
+          <div class="flex items-start gap-3">
+            <ShieldAlert
+              :size="20"
+              class="mt-0.5 shrink-0 text-amber-700"
+              aria-hidden="true"
+            />
+            <div class="min-w-0">
+              <p class="font-semibold">
+                安全提醒
+              </p>
+              <p class="mt-1 whitespace-pre-line text-sm leading-6">
+                {{ learning.safetyNotice.message }}
+              </p>
+              <p
+                v-if="learning.safetyNotice.parent_notified"
+                class="mt-2 text-xs font-medium text-amber-800"
+              >
+                已按安全规则通知家长，通知中不包含你刚才输入的原话。
+              </p>
+            </div>
+          </div>
         </div>
 
         <p

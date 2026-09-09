@@ -12,7 +12,8 @@ import {
   submitSessionReflection,
   submitStudentAnswer,
   type SessionStatus,
-  type SessionTiming,
+	type SessionTiming,
+	type SafetyNotice,
   type SpeechSegment,
   type StudentSession,
   type StudentSessionTurn,
@@ -27,6 +28,10 @@ interface TimelineItem {
   actor: 'AI' | 'STUDENT' | 'SYSTEM' | 'TUTOR'
   text: string
   meta?: string
+}
+
+interface StudentSafetyNotice extends SafetyNotice {
+	message: string
 }
 
 let sessionLoadSequence = 0
@@ -63,7 +68,8 @@ export const useLearningStore = defineStore('learning', {
     sessionGone: false,
     voiceAudio: '',
     voiceSegments: [] as SpeechSegment[],
-    reflectionStatus: '',
+	    reflectionStatus: '',
+	    safetyNotice: null as StudentSafetyNotice | null,
     timeline: [] as TimelineItem[],
 		operationSequence: 0,
 		timingSequence: 0,
@@ -106,7 +112,8 @@ export const useLearningStore = defineStore('learning', {
       this.sessionGone = false
       this.voiceAudio = ''
       this.voiceSegments = []
-      this.reflectionStatus = ''
+	      this.reflectionStatus = ''
+	      this.safetyNotice = null
       this.timeline = []
     },
 		applySession(session: StudentSession) {
@@ -207,20 +214,26 @@ export const useLearningStore = defineStore('learning', {
       const value = answer.trim()
 			if (!value || this.sessionID !== sessionID || this.loading) return false
 			const operation = ++this.operationSequence
-      this.loading = true
-      this.error = ''
-      try {
-	        const result = await submitStudentAnswer(sessionID, value)
+	      this.loading = true
+	      this.error = ''
+	      this.safetyNotice = null
+	      try {
+		        const result = await submitStudentAnswer(sessionID, value)
 					if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
 					if (result.version < this.version) return false
 					const appendResult = result.version > this.snapshotVersion
-        this.studentAnswer = value
+						if (result.safety) {
+							this.studentAnswer = ''
+							this.safetyNotice = { ...result.safety, message: result.message }
+						} else {
+							this.studentAnswer = value
+						}
 	        this.tutorAction = result.action
 					this.version = result.version
         this.socraticRound = result.socratic_round
         this.voiceAudio = result.voice_audio ?? ''
         this.voiceSegments = result.voice_segments ?? []
-					if (appendResult) {
+						if (appendResult && !result.safety) {
 						this.timeline.push({ id: `pending-${result.version}-student`, actor: 'STUDENT', text: value })
 						this.timeline.push({ id: `pending-${result.version}-tutor`, actor: 'TUTOR', text: result.message, meta: result.action })
 					}

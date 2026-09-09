@@ -88,6 +88,38 @@ test('keeps paused answer controls in the DOM and waits for an explicit resume',
   wrapper.unmount()
 })
 
+test('renders the server safety fallback and transparent parent notice', async () => {
+	const privateInput = 'PRIVATE_SAFETY_INPUT_CANARY'
+	const { learning, wrapper } = await mountPage(vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		if (path.endsWith('/answers')) {
+			return Promise.resolve(response({
+				session_id: 'session-1', version: 1, timing_version: 1,
+				action: 'ASK', socratic_round: 0, message: '请先去找身边可信任的大人。',
+				status: 'ACTIVE', active_seconds: 20, current_active_seconds: 0,
+				timing_observed_at: '2026-08-26T12:00:20Z',
+				safety: {
+					policy_version: 'minor-safety-v1', category: 'SELF_HARM', severity: 'CRITICAL',
+					fixed_action: 'SEEK_URGENT_HELP', parent_notified: true,
+				},
+			}))
+		}
+		return Promise.resolve(response(session({ status: 'ACTIVE', state: 'ASK' })))
+	}))
+	await wrapper.get('#student-answer').setValue(privateInput)
+
+	await wrapper.get('form').trigger('submit')
+	await flushPromises()
+
+	const notice = wrapper.get('[data-testid="safety-notice"]')
+	expect(notice.text()).toContain('请先去找身边可信任的大人。')
+	expect(notice.text()).toContain('已按安全规则通知家长')
+	expect(notice.text()).not.toContain(privateInput)
+	expect(learning.timeline.some((turn) => turn.text.includes(privateInput))).toBe(false)
+	expect(wrapper.get<HTMLInputElement>('#student-answer').element.value).toBe('')
+	wrapper.unmount()
+})
+
 test('deduplicates an explicit resume and enables answers only after it succeeds', async () => {
   const resume = deferred<Response>()
   const requests: string[] = []

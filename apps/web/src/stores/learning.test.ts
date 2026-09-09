@@ -134,6 +134,46 @@ test('ignores a heartbeat that returns after the classroom completes', async () 
   expect(learning.activeSeconds).toBe(12)
 })
 
+test('shows a fixed safety notice without retaining the submitted private text', async () => {
+	const privateInput = 'PRIVATE_SAFETY_INPUT_CANARY'
+	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		if (path.endsWith('/answers')) {
+			return Promise.resolve(jsonResponse({
+				session_id: 'session-1',
+				version: 1,
+				timing_version: 1,
+				action: 'ASK',
+				socratic_round: 0,
+				message: '请先去找身边可信任的大人。',
+				status: 'ACTIVE',
+				active_seconds: 10,
+				current_active_seconds: 10,
+				timing_observed_at: '2026-08-26T12:00:10Z',
+				safety: {
+					policy_version: 'minor-safety-v1',
+					category: 'SELF_HARM',
+					severity: 'CRITICAL',
+					fixed_action: 'SEEK_URGENT_HELP',
+					parent_notified: true,
+				},
+			}))
+		}
+		if (path.endsWith('/sessions/session-1')) return Promise.resolve(jsonResponse(session('session-1')))
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const learning = useLearningStore()
+	learning.applySession(session('session-1'))
+
+	const accepted = await learning.submitAnswer('session-1', privateInput)
+
+	expect(accepted).toBe(true)
+	expect(learning.safetyNotice).toMatchObject({ category: 'SELF_HARM', parent_notified: true })
+	expect(learning.safetyNotice?.message).toBe('请先去找身边可信任的大人。')
+	expect(learning.studentAnswer).toBe('')
+	expect(learning.timeline.some((turn) => turn.text.includes(privateInput))).toBe(false)
+})
+
 test('visibility pause checkpoints time even while an answer is loading', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
     session_id: 'session-1',

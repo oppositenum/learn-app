@@ -29,17 +29,19 @@ const (
 	EventSessionAbandoned      EventType = "SESSION_ABANDONED"
 	EventSessionCompleted      EventType = "SESSION_COMPLETED"
 	EventParentIntervention    EventType = "PARENT_INTERVENTION"
+	EventSafetyIntervention    EventType = "SAFETY_INTERVENTION"
 )
 
 type Event struct {
-	EventID        string
-	StudentID      string
-	SessionID      string
-	Sequence       int64
-	Type           EventType
-	CreatedAt      time.Time
-	StudentPayload json.RawMessage
-	ParentPayload  json.RawMessage
+	EventID          string
+	StudentID        string
+	SessionID        string
+	Sequence         int64
+	Type             EventType
+	CreatedAt        time.Time
+	StudentPayload   json.RawMessage
+	ParentPayload    json.RawMessage
+	ParentSuppressed bool
 }
 
 type StudentEventDTO struct {
