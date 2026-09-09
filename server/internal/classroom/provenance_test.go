@@ -6,25 +6,24 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
 )
 
-func TestLegacyAnswerEvaluationProvenanceSeparatesInputsFromResolution(t *testing.T) {
+func TestAnswerEvaluationProvenanceSeparatesModelInputFromDeterministicResolution(t *testing.T) {
 	modelAccepted := ai.AnalyzeAnswerResult{AnswerCorrect: true, Confidence: 0.95}
 	modelRejected := ai.AnalyzeAnswerResult{AnswerCorrect: false, Confidence: 0.97}
 	for _, test := range []struct {
 		name                 string
 		deterministicCorrect bool
 		analysis             *ai.AnalyzeAnswerResult
-		finalCorrect         bool
 		wantDeterministic    string
 		wantResolution       string
 		wantModel            *bool
 	}{
 		{
-			name: "deterministic match without model", deterministicCorrect: true, finalCorrect: true,
+			name: "deterministic match without model", deterministicCorrect: true,
 			wantDeterministic: "MATCH", wantResolution: "DETERMINISTIC_ACCEPTED",
 		},
 		{
-			name: "model mediated legacy acceptance", analysis: &modelAccepted, finalCorrect: true,
-			wantDeterministic: "NO_MATCH", wantResolution: "MODEL_MEDIATED_ACCEPTED", wantModel: boolPointer(true),
+			name: "model positive cannot authorize acceptance", analysis: &modelAccepted,
+			wantDeterministic: "NO_MATCH", wantResolution: "NOT_ACCEPTED", wantModel: boolPointer(true),
 		},
 		{
 			name: "legacy rejection", analysis: &modelRejected,
@@ -32,8 +31,8 @@ func TestLegacyAnswerEvaluationProvenanceSeparatesInputsFromResolution(t *testin
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got := legacyAnswerEvaluationProvenance(test.deterministicCorrect, test.analysis, test.finalCorrect)
-			if got.deterministicResult != test.wantDeterministic || got.legacyResolution != test.wantResolution || got.finalCorrect != test.finalCorrect {
+			got := answerEvaluationProvenanceForDecision(test.deterministicCorrect, test.analysis)
+			if got.deterministicResult != test.wantDeterministic || got.legacyResolution != test.wantResolution || got.finalCorrect != test.deterministicCorrect {
 				t.Fatalf("provenance result=%s resolution=%s final=%t", got.deterministicResult, got.legacyResolution, got.finalCorrect)
 			}
 			if test.wantModel == nil {

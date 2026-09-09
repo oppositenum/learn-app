@@ -58,13 +58,46 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 		return
 	}
 	var body struct {
-		Answer string `json:"answer"`
+		Answer      *string         `json:"answer,omitempty"`
+		OperationID *uuid.UUID      `json:"operation_id,omitempty"`
+		Stage       Stage           `json:"stage,omitempty"`
+		TaskID      *uuid.UUID      `json:"task_id,omitempty"`
+		TaskVersion string          `json:"task_version,omitempty"`
+		Response    json.RawMessage `json:"response,omitempty"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64<<10)).Decode(&body); err != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
 		http.Error(writer, "invalid answer payload", http.StatusBadRequest)
 		return
 	}
-	result, err := handler.service.Submit(request.Context(), userID, sessionID, body.Answer)
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		http.Error(writer, "invalid answer payload", http.StatusBadRequest)
+		return
+	}
+	stageSession, err := handler.service.hasStageSession(request.Context(), userID, sessionID)
+	if err != nil {
+		http.Error(writer, "answer could not be processed", http.StatusInternalServerError)
+		return
+	}
+	if stageSession {
+		if body.Answer != nil || body.OperationID == nil || body.TaskID == nil {
+			http.Error(writer, "structured stage answer is required", http.StatusBadRequest)
+			return
+		}
+		result, err := handler.service.SubmitStage(request.Context(), userID, StageSubmitRequest{
+			SessionID: sessionID, OperationID: *body.OperationID, Stage: body.Stage,
+			TaskID: *body.TaskID, TaskVersion: body.TaskVersion,
+			Kind: StageAttemptAnswer, Response: body.Response,
+		})
+		handler.writeStageSubmitResult(writer, result, err)
+		return
+	}
+	if body.Answer == nil || body.OperationID != nil || body.TaskID != nil || body.Stage != "" || body.TaskVersion != "" || len(body.Response) != 0 {
+		http.Error(writer, "text answer is required", http.StatusBadRequest)
+		return
+	}
+	result, err := handler.service.Submit(request.Context(), userID, sessionID, *body.Answer)
 	if errors.Is(err, ErrVoiceReturnRequired) {
 		http.Error(writer, "return to the original question before answering", http.StatusConflict)
 		return
@@ -106,6 +139,34 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (handler *Handler) writeStageSubmitResult(writer http.ResponseWriter, result StageSubmitResult, err error) {
+	switch {
+	case errors.Is(err, ErrStageResponseRequired), errors.Is(err, ErrStageTaskMismatch):
+		http.Error(writer, "invalid structured stage answer", http.StatusBadRequest)
+	case errors.Is(err, ErrSessionNotFound):
+		http.Error(writer, "session not found", http.StatusNotFound)
+	case errors.Is(err, ErrSessionNotActive), errors.Is(err, ErrStageSessionComplete),
+		errors.Is(err, ErrStageMismatch), errors.Is(err, ErrStageVersionDrift),
+		errors.Is(err, ErrStageOperationConflict), errors.Is(err, ErrClassroomChanged):
+		http.Error(writer, "classroom changed; reload before retrying", http.StatusConflict)
+	case errors.Is(err, ErrStageUnavailable):
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": "CLASSROOM_STAGE_UNAVAILABLE"})
+	case errors.Is(err, auth.ErrSessionRevoked):
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
+	case errors.Is(err, ai.ErrTutorGenerationBusy):
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorGenerationBusyCode})
+	case errors.Is(err, ai.ErrTutorOutputRephraseRequired):
+		writeJSON(writer, http.StatusUnprocessableEntity, map[string]string{"code": ai.TutorOutputRephraseRequiredCode})
+	case errors.Is(err, ai.ErrTutorOutputReviewUnavailable):
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorOutputReviewUnavailableCode})
+	case err != nil:
+		log.Printf("four-stage classroom submit failed: %v", err)
+		http.Error(writer, "answer could not be processed", http.StatusInternalServerError)
+	default:
+		writeJSON(writer, http.StatusOK, result)
+	}
 }
 
 func (handler *Handler) ReturnFromVoice(writer http.ResponseWriter, request *http.Request) {
@@ -158,7 +219,11 @@ func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http
 		return
 	}
 	var body struct {
-		Type SupportType `json:"type"`
+		Type        SupportType `json:"type"`
+		OperationID *uuid.UUID  `json:"operation_id,omitempty"`
+		Stage       Stage       `json:"stage,omitempty"`
+		TaskID      *uuid.UUID  `json:"task_id,omitempty"`
+		TaskVersion string      `json:"task_version,omitempty"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 8<<10))
 	decoder.DisallowUnknownFields()
@@ -167,6 +232,28 @@ func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http
 		return
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		http.Error(writer, "invalid support request", http.StatusBadRequest)
+		return
+	}
+	stageSession, err := handler.service.hasStageSession(request.Context(), userID, sessionID)
+	if err != nil {
+		http.Error(writer, "support could not be generated", http.StatusInternalServerError)
+		return
+	}
+	if stageSession {
+		if body.OperationID == nil || body.TaskID == nil {
+			http.Error(writer, "structured stage support request is required", http.StatusBadRequest)
+			return
+		}
+		result, err := handler.service.SubmitStage(request.Context(), userID, StageSubmitRequest{
+			SessionID: sessionID, OperationID: *body.OperationID, Stage: body.Stage,
+			TaskID: *body.TaskID, TaskVersion: body.TaskVersion,
+			Kind: StageAttemptHelp, Support: body.Type,
+		})
+		handler.writeStageSubmitResult(writer, result, err)
+		return
+	}
+	if body.OperationID != nil || body.TaskID != nil || body.Stage != "" || body.TaskVersion != "" {
 		http.Error(writer, "invalid support request", http.StatusBadRequest)
 		return
 	}

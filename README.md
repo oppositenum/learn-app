@@ -7,7 +7,7 @@ AI Learning Tutor is a mobile-first, five-subject Socratic learning prototype fo
 - Student, Parent, and Owner authorization with explicit Parent-Student binding, plus answer-free Parent ability and activity reports.
 - PostgreSQL-level public/private answer separation and authenticated Student non-disclosure tests.
 - Five-subject curriculum with all 132 assessable primary/junior-secondary skeleton entries from the V1 product specification, 10 preserved high-quality detail points, prerequisite graph, cross-subject graph, abilities, and misconceptions. The 142 released points are organized into 44 useful subject/grade-band domains rather than the original broad three-domain demo taxonomy.
-- The complete Tutor transition graph is defined, with a three-round Socratic fuse, persisted emotion deescalation, hint/parallel-example support, released-prerequisite backtrack/return, and explicit voice return. Runtime transition enforcement and the real `VARIANT -> ABSTRACT -> VERIFY` path remain pending B4.
+- The production classroom now activates a server-authoritative `ORIGINAL -> VARIANT -> ABSTRACT -> VERIFY -> COMPLETE` flow for complete `READY` task lineages. Every stage uses a versioned deterministic scorer, excludes every task already presented in the session, and requires a fresh independent task after help. Incomplete lineages fail closed; content without a lineage remains on the legacy classroom path while its model correctness override is disabled.
 - Student mobile classroom, supply station, voice player with timed highlighting, growth view, Parent live supervision/preferences, and Owner content/cost views.
 - Planner and deterministic Mastery with evidence-derived scores, real activity-day streaks, idempotent Reward, STT/TTS adapters, and versioned usage accounting. Review-queue consumption and rescheduling remain pending B2.
 - Content provenance, deterministic validation, independent review, database release gate, quarantine, 142 released and source-linked knowledge points, and 15 curated demo questions.
@@ -101,6 +101,6 @@ npm run build
 
 The integration command must target real PostgreSQL. A skipped integration test does not count as passing.
 
-Integration gate baseline: top-level PASS >= 86, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
+Integration gate baseline: top-level PASS >= 91, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
 
 HTTP and WebSocket contracts are documented under [`docs/api/`](docs/api/).

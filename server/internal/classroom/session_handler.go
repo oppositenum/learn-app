@@ -16,30 +16,31 @@ import (
 )
 
 type StudentSession struct {
-	ID             uuid.UUID        `json:"id"`
-	Version        int64            `json:"version"`
-	TimingVersion  int64            `json:"timing_version"`
-	PlanBlockID    *uuid.UUID       `json:"plan_block_id,omitempty"`
-	SubjectCode    string           `json:"subject_code"`
-	SubjectName    string           `json:"subject_name"`
-	KnowledgePoint string           `json:"knowledge_point"`
-	Difficulty     string           `json:"difficulty"`
-	QuestionID     uuid.UUID        `json:"question_id"`
-	Prompt         string           `json:"prompt"`
-	Scene          json.RawMessage  `json:"scene"`
-	InputSchema    json.RawMessage  `json:"input_schema"`
-	StartedAt      time.Time        `json:"started_at"`
-	TargetMinutes  int              `json:"target_minutes"`
-	Status         string           `json:"status"`
-	ActiveSeconds  int              `json:"active_seconds"`
-	CurrentSeconds int              `json:"current_active_seconds"`
-	ActiveSince    *time.Time       `json:"active_since,omitempty"`
-	TimingAt       time.Time        `json:"timing_observed_at"`
-	State          string           `json:"state"`
-	SocraticRound  int              `json:"socratic_round"`
-	Timeline       []StudentTurn    `json:"timeline"`
-	VoiceSegments  []speech.Segment `json:"voice_segments,omitempty"`
-	VoiceAudio     string           `json:"voice_audio,omitempty"`
+	ID             uuid.UUID         `json:"id"`
+	Version        int64             `json:"version"`
+	TimingVersion  int64             `json:"timing_version"`
+	PlanBlockID    *uuid.UUID        `json:"plan_block_id,omitempty"`
+	SubjectCode    string            `json:"subject_code"`
+	SubjectName    string            `json:"subject_name"`
+	KnowledgePoint string            `json:"knowledge_point"`
+	Difficulty     string            `json:"difficulty"`
+	QuestionID     uuid.UUID         `json:"question_id"`
+	Prompt         string            `json:"prompt"`
+	Scene          json.RawMessage   `json:"scene"`
+	InputSchema    json.RawMessage   `json:"input_schema"`
+	StartedAt      time.Time         `json:"started_at"`
+	TargetMinutes  int               `json:"target_minutes"`
+	Status         string            `json:"status"`
+	ActiveSeconds  int               `json:"active_seconds"`
+	CurrentSeconds int               `json:"current_active_seconds"`
+	ActiveSince    *time.Time        `json:"active_since,omitempty"`
+	TimingAt       time.Time         `json:"timing_observed_at"`
+	State          string            `json:"state"`
+	SocraticRound  int               `json:"socratic_round"`
+	Timeline       []StudentTurn     `json:"timeline"`
+	VoiceSegments  []speech.Segment  `json:"voice_segments,omitempty"`
+	VoiceAudio     string            `json:"voice_audio,omitempty"`
+	StageFlow      *StudentStageFlow `json:"stage_flow,omitempty"`
 }
 
 type StudentTurn struct {
@@ -85,6 +86,7 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 		var mode, blockStatus string
 		var subjectCode, knowledgePointName, prompt string
 		var originalTaskID, reviewQueueID *uuid.UUID
+		var stageStart *stageTask
 		if err := tx.QueryRow(request.Context(), `SELECT id FROM students WHERE user_id=$1 FOR NO KEY UPDATE`, userID).Scan(&studentID); err != nil {
 			return err
 		}
@@ -129,6 +131,17 @@ FOR UPDATE`, *reviewQueueID, studentID, knowledgePointID, now).Scan(&lockedQueue
 				return err
 			}
 		}
+		if mode != "REVIEW" {
+			task, found, err := loadReadyStageStartTask(request.Context(), tx, knowledgePointID)
+			if err != nil {
+				return err
+			}
+			if found {
+				stageStart = &task
+				questionID = task.ID
+				prompt = task.Prompt
+			}
+		}
 		sessionID = uuid.New()
 		evidenceForm := "LIFE"
 		switch mode {
@@ -139,23 +152,37 @@ FOR UPDATE`, *reviewQueueID, studentID, knowledgePointID, now).Scan(&lockedQueue
 		case "MICRO_BACKTRACK":
 			evidenceForm = "TEXTBOOK"
 		}
-		if _, err := tx.Exec(request.Context(), `INSERT INTO learning_sessions(id,student_id,plan_block_id,review_queue_id,subject_id,current_question_id,started_at,status,target_minutes,current_state,original_task_id,active_task_id,evidence_form,last_resumed_at,last_activity_at)VALUES($1,$2,$3,$4,$5,$6,$11,'ACTIVE',$7,'ASK',$8,$9,$10,$11,$11)`, sessionID, studentID, body.PlanBlockID, reviewQueueID, subjectID, questionID, minutes, originalTaskID, knowledgePointID, evidenceForm, now); err != nil {
+		initialState := "ASK"
+		if stageStart != nil {
+			initialState = string(StageOriginal)
+			evidenceForm = stageStart.EvidenceForm
+		}
+		if _, err := tx.Exec(request.Context(), `INSERT INTO learning_sessions(id,student_id,plan_block_id,review_queue_id,subject_id,current_question_id,started_at,status,target_minutes,current_state,original_task_id,active_task_id,evidence_form,last_resumed_at,last_activity_at)VALUES($1,$2,$3,$4,$5,$6,$11,'ACTIVE',$7,$12,$8,$9,$10,$11,$11)`, sessionID, studentID, body.PlanBlockID, reviewQueueID, subjectID, questionID, minutes, originalTaskID, knowledgePointID, evidenceForm, now, initialState); err != nil {
 			return err
+		}
+		if stageStart != nil {
+			if _, err := tx.Exec(request.Context(), `
+INSERT INTO classroom_stage_sessions(
+    session_id,lineage_id,knowledge_point_id,current_task_id,current_task_version,started_at
+) VALUES($1,$2,$3,$4,$5,$6)`, sessionID, stageStart.LineageID,
+				knowledgePointID, stageStart.ID, stageStart.ContentVersion, now); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(request.Context(), `UPDATE learning_plan_blocks SET status='ACTIVE' WHERE id=$1`, body.PlanBlockID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(request.Context(), `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private)SELECT $1,$2,1,'TUTOR','ASK',prompt_public,'server selected released plan content' FROM questions WHERE id=$3`, uuid.New(), sessionID, questionID); err != nil {
+		if _, err := tx.Exec(request.Context(), `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private)SELECT $1,$2,1,'TUTOR',$4,prompt_public,$5 FROM questions WHERE id=$3`, uuid.New(), sessionID, questionID, initialState, map[bool]string{true: "server selected complete released four-stage lineage", false: "server selected released plan content"}[stageStart != nil]); err != nil {
 			return err
 		}
-		startedStudent, _ := json.Marshal(map[string]any{"action": "ASK", "subject": subjectCode, "knowledge_point": knowledgePointName})
-		startedParent, _ := json.Marshal(map[string]any{"action": "ASK", "subject": subjectCode, "knowledge_point": knowledgePointName, "target_minutes": minutes})
+		startedStudent, _ := json.Marshal(map[string]any{"action": initialState, "subject": subjectCode, "knowledge_point": knowledgePointName})
+		startedParent, _ := json.Marshal(map[string]any{"action": initialState, "subject": subjectCode, "knowledge_point": knowledgePointName, "target_minutes": minutes})
 		started := makeEvent(studentID, sessionID, 1, realtime.EventSessionStarted, startedStudent, startedParent, now)
 		if err := insertEvent(request.Context(), tx, started); err != nil {
 			return err
 		}
-		questionStudent, _ := json.Marshal(map[string]any{"action": "ASK", "prompt": prompt})
-		questionParent, _ := json.Marshal(map[string]any{"action": "ASK", "prompt": prompt, "question_id": questionID})
+		questionStudent, _ := json.Marshal(map[string]any{"action": initialState, "prompt": prompt})
+		questionParent, _ := json.Marshal(map[string]any{"action": initialState, "prompt": prompt, "question_id": questionID})
 		presented := makeEvent(studentID, sessionID, 2, realtime.EventQuestionPresented, questionStudent, questionParent, now)
 		if err := insertEvent(request.Context(), tx, presented); err != nil {
 			return err
@@ -170,6 +197,10 @@ FOR UPDATE`, *reviewQueueID, studentID, knowledgePointID, now).Scan(&lockedQueue
 	}
 	if errors.Is(err, ErrAnotherSessionOpen) {
 		http.Error(writer, "finish or leave the current session before starting another", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, ErrStagePreparationIncomplete) {
+		writeJSON(writer, http.StatusConflict, map[string]string{"code": "CLASSROOM_STAGE_CONTENT_INCOMPLETE"})
 		return
 	}
 	if errors.Is(err, auth.ErrSessionRevoked) {
@@ -276,13 +307,15 @@ func readStudentSession(ctx context.Context, db studentSessionQueryer, userID, s
 	var session StudentSession
 	var accumulatedSeconds int
 	var lastResumedAt *time.Time
+	var stageTaskVersion *string
 	err := db.QueryRow(ctx, `
-	SELECT ls.id,ls.version,ls.timing_version,ls.plan_block_id,s.code,s.name_zh,kp.name,q.difficulty,q.id,q.prompt_public,q.scene_public_json,q.input_schema_json,ls.started_at,ls.target_minutes,ls.status,ls.accumulated_seconds,ls.last_resumed_at,ls.current_state,ls.socratic_fail_count
-	FROM learning_sessions ls JOIN students st ON st.id=ls.student_id
-	JOIN subjects s ON s.id=ls.subject_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED'
-	JOIN knowledge_points kp ON kp.id=q.knowledge_point_id
-		WHERE ls.id=$1 AND st.user_id=$2
-		  AND (NOT $3 OR ls.status IN ('ACTIVE','PAUSED'))`, sessionID, userID, requireOpen).Scan(&session.ID, &session.Version, &session.TimingVersion, &session.PlanBlockID, &session.SubjectCode, &session.SubjectName, &session.KnowledgePoint, &session.Difficulty, &session.QuestionID, &session.Prompt, &session.Scene, &session.InputSchema, &session.StartedAt, &session.TargetMinutes, &session.Status, &accumulatedSeconds, &lastResumedAt, &session.State, &session.SocraticRound)
+		SELECT ls.id,ls.version,ls.timing_version,ls.plan_block_id,s.code,s.name_zh,kp.name,q.difficulty,q.id,q.prompt_public,q.scene_public_json,q.input_schema_json,ls.started_at,ls.target_minutes,ls.status,ls.accumulated_seconds,ls.last_resumed_at,ls.current_state,ls.socratic_fail_count,stage_session.current_task_version
+		FROM learning_sessions ls JOIN students st ON st.id=ls.student_id
+		JOIN subjects s ON s.id=ls.subject_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED'
+		JOIN knowledge_points kp ON kp.id=q.knowledge_point_id
+		LEFT JOIN classroom_stage_sessions stage_session ON stage_session.session_id=ls.id
+			WHERE ls.id=$1 AND st.user_id=$2
+			  AND (NOT $3 OR ls.status IN ('ACTIVE','PAUSED'))`, sessionID, userID, requireOpen).Scan(&session.ID, &session.Version, &session.TimingVersion, &session.PlanBlockID, &session.SubjectCode, &session.SubjectName, &session.KnowledgePoint, &session.Difficulty, &session.QuestionID, &session.Prompt, &session.Scene, &session.InputSchema, &session.StartedAt, &session.TargetMinutes, &session.Status, &accumulatedSeconds, &lastResumedAt, &session.State, &session.SocraticRound, &stageTaskVersion)
 	if err != nil {
 		return session, err
 	}
@@ -291,6 +324,9 @@ func readStudentSession(ctx context.Context, db studentSessionQueryer, userID, s
 	session.CurrentSeconds = timing.CurrentActiveSeconds
 	session.ActiveSince = timing.ActiveSince
 	session.TimingAt = timing.TimingObservedAt
+	if stageTaskVersion != nil {
+		session.StageFlow = &StudentStageFlow{Version: stageFlowVersion, Stage: Stage(session.State), TaskVersion: *stageTaskVersion}
+	}
 	rows, err := db.Query(ctx, `SELECT sequence,actor,action,message,created_at FROM tutor_turns WHERE session_id=$1 ORDER BY sequence`, sessionID)
 	if err != nil {
 		return session, err
