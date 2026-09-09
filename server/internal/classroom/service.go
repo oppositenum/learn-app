@@ -187,11 +187,18 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 			return ErrClassroomChanged
 		}
 		now = latestTime(service.now(), row.lastActivityAt)
-		correct := normalized(answer) == normalized(row.answer)
+		deterministicCorrect := normalized(answer) == normalized(row.answer)
+		correct := deterministicCorrect
 		if prepared != nil && prepared.analysis.AnswerCorrect && prepared.analysis.Confidence >= 0.9 {
 			correct = true
 		}
 		answerID := uuid.New()
+		evaluationProvenanceID := uuid.New()
+		var rawAnalysis *ai.AnalyzeAnswerResult
+		if prepared != nil {
+			rawAnalysis = &prepared.analysis
+		}
+		provenance := legacyAnswerEvaluationProvenance(deterministicCorrect, rawAnalysis, correct)
 		turnSequence, eventSequence, err := nextSequences(ctx, tx, sessionID)
 		if err != nil {
 			return err
@@ -228,6 +235,9 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 			}
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO answer_analyses (id,student_answer_id,answer_correct,reasoning_quality,confidence,error_type,misconceptions_private_json,emotion_signal,engagement,recommended_action) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.New(), answerID, correct, reasoningQuality, confidence, errorType, misconceptionPayload(correct, analysisMisconceptions), emotionSignal, engagement, recommended); err != nil {
+			return err
+		}
+		if err := insertAnswerEvaluationProvenance(ctx, tx, evaluationProvenanceID, answerID, provenance, now); err != nil {
 			return err
 		}
 		misconceptionCode := firstMisconception(analysisMisconceptions)
@@ -267,7 +277,7 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 
 		if correct {
 			var completedEvents []realtime.Event
-			result, completedEvents, err = service.complete(ctx, tx, row, sessionID, turnSequence+1, eventSequence, now)
+			result, completedEvents, err = service.complete(ctx, tx, row, sessionID, answerID, evaluationProvenanceID, provenance, turnSequence+1, eventSequence, now)
 			published = append(published, completedEvents...)
 			if result.Action == tutor.StateComplete {
 				planStudentID = row.studentID
@@ -809,7 +819,7 @@ func sessionSubmitResult(row sessionRow, sessionID uuid.UUID, version int64, act
 	}
 }
 
-func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID uuid.UUID, turnSequence, eventSequence int64, now time.Time) (SubmitResult, []realtime.Event, error) {
+func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID, studentAnswerID, evaluationProvenanceID uuid.UUID, provenance answerEvaluationProvenance, turnSequence, eventSequence int64, now time.Time) (SubmitResult, []realtime.Event, error) {
 	skill, err := loadSkill(ctx, tx, row.studentID, row.knowledgePointID)
 	if err != nil {
 		return SubmitResult{}, nil, err
@@ -825,6 +835,11 @@ func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow,
 	score := mastery.NewEngine().Score(skill)
 	if err := saveSkill(ctx, tx, row.studentID, row.knowledgePointID, skill, score, now); err != nil {
 		return SubmitResult{}, nil, err
+	}
+	if independent {
+		if err := insertMasteryEvidenceProvenance(ctx, tx, studentAnswerID, evaluationProvenanceID, row, provenance, now); err != nil {
+			return SubmitResult{}, nil, err
+		}
 	}
 	rewardType, rewardSource := reward.Effort, sessionID.String()
 	if skill.State == mastery.Mastered {
