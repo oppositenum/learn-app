@@ -77,6 +77,9 @@ func createDraft(ctx context.Context, tx pgx.Tx, asset Asset, generation Generat
 	if err != nil {
 		return fmt.Errorf("encode public choices: %w", err)
 	}
+	if asset.QuestionType == "STRUCTURED_INTERACTION" {
+		sceneJSON = asset.Scene
+	}
 
 	var subject string
 	if err := tx.QueryRow(ctx, `SELECT s.code FROM knowledge_points kp JOIN subjects s ON s.id=kp.subject_id WHERE kp.id=$1 AND kp.status='RELEASED'`, knowledgePointID).Scan(&subject); err != nil {

@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { getStudentSession, requestStudentSupport, submitStudentAnswer } from './student'
+import { getStudentSession, requestStudentStageSupport, requestStudentSupport, submitStudentAnswer, submitStudentStageResponse } from './student'
 
 function response(body: unknown, status: number): Response {
   return { ok: false, status, json: async () => body } as Response
@@ -84,4 +84,27 @@ test('maps generation throttling on EXPLAIN to the same child-safe busy contract
     code: 'TUTOR_GENERATION_BUSY',
     message: '现在有点挤，老师马上就来。请稍等一下再试一次',
   })
+})
+
+test('sends the complete stage identity and response without a free-text answer', async () => {
+  const requests: Array<{ path: string; body: string }> = []
+  const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    requests.push({ path: String(input), body: String(init?.body ?? '') })
+    return { ok: true, status: 200, json: async () => ({}) } as Response
+  })
+  vi.stubGlobal('fetch', fetch)
+  const identity = { stage: 'VARIANT' as const, task_id: 'task-2', task_version: 'content-v2' }
+
+  await submitStudentStageResponse('session-1', identity, { selected_option_ids: ['a'] }, 'operation-1')
+  await requestStudentStageSupport('session-1', identity, 'HINT', 'operation-2')
+
+  expect(JSON.parse(requests[0].body)).toEqual({
+    operation_id: 'operation-1', stage: 'VARIANT', task_id: 'task-2', task_version: 'content-v2',
+    response: { selected_option_ids: ['a'] },
+  })
+  expect(JSON.parse(requests[1].body)).toEqual({
+    type: 'HINT', operation_id: 'operation-2', stage: 'VARIANT', task_id: 'task-2', task_version: 'content-v2',
+  })
+  expect(requests[0].path).toContain('/answers')
+  expect(requests[0].body).not.toContain('"answer"')
 })

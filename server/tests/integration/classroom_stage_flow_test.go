@@ -21,6 +21,7 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/database"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/parent"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 	"github.com/oppositenum/ai-learning-tutor/server/migrations"
 )
 
@@ -91,6 +92,9 @@ func TestFourStageClassroomCompletesRealStagesWithoutAIOrPrivateDisclosure(t *te
 	if session.StageFlow == nil || session.StageFlow.Stage != classroom.StageOriginal || session.State != string(classroom.StageOriginal) {
 		t.Fatalf("stage start=%+v flow=%+v", session, session.StageFlow)
 	}
+	if session.Interaction.Version != studentinteraction.Version || session.Interaction.Renderer != studentinteraction.RendererSingleChoice || session.Interaction.Fallback || session.Interaction.Scene == nil {
+		t.Fatalf("student interaction=%+v", session.Interaction)
+	}
 
 	wantStages := []classroom.Stage{classroom.StageVariant, classroom.StageAbstract, classroom.StageVerify, classroom.StageComplete}
 	for _, wantStage := range wantStages {
@@ -158,6 +162,39 @@ FROM student_skill_states WHERE student_id=$1 AND knowledge_point_id=$2`, fixtur
 	}
 	if state != "UNDERSTOOD" || independent != 4 || life != 1 || variant != 2 || textbook != 1 {
 		t.Fatalf("skill state=%s independent=%d forms=%d/%d/%d", state, independent, life, variant, textbook)
+	}
+}
+
+func TestStudentInteractionSessionContractFailsClosedAfterMaterialDrift(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedCompleteStageFixture(t, ctx, pool)
+	router := stageRouter(pool, classroom.NewService(pool, nil, nil, nil))
+	session := startStageSession(t, router, fixture)
+	if session.Interaction.Version != studentinteraction.Version || session.Interaction.Fallback || session.Interaction.Scene == nil {
+		t.Fatalf("valid material=%+v", session.Interaction)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE questions SET scene_public_json=jsonb_set(scene_public_json,'{renderer}','"UNKNOWN"') WHERE id=$1`, session.QuestionID); err != nil {
+		t.Fatal(err)
+	}
+	read := performJSON(router, http.MethodGet, "/api/v1/student/sessions/"+session.ID.String(), fixture.security.studentToken, nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("read drifted material=%d %s", read.Code, read.Body.String())
+	}
+	assertStudentPayloadHasNoPrivateFields(t, read.Body.Bytes())
+	var drifted classroom.StudentSession
+	if err := json.Unmarshal(read.Body.Bytes(), &drifted); err != nil {
+		t.Fatal(err)
+	}
+	if !drifted.Interaction.Fallback || drifted.Interaction.Renderer != studentinteraction.RendererTextFallback || string(drifted.Scene) != "{}" || strings.Contains(read.Body.String(), "UNKNOWN") {
+		t.Fatalf("drifted material was not sanitized: %s", read.Body.String())
+	}
+	var attempts int
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM classroom_stage_attempts WHERE session_id=$1`, session.ID).Scan(&attempts); err != nil || attempts != 0 {
+		t.Fatalf("fallback read wrote attempts=%d err=%v", attempts, err)
 	}
 }
 
@@ -284,6 +321,20 @@ func TestFourStageContentPreflightAndRuntimeDriftFailClosed(t *testing.T) {
 	}
 	complete := seedAdditionalReadyLineage(t, ctx, pool, fixture, 3)
 	fixture.lineageID = complete
+	var invalidQuestionID uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT question_id FROM classroom_stage_tasks WHERE lineage_id=$1 ORDER BY stage_role,selection_order LIMIT 1`, complete).Scan(&invalidQuestionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE questions SET scene_public_json=jsonb_set(scene_public_json,'{version}','"student-interaction-v2"') WHERE id=$1`, invalidQuestionID); err != nil {
+		t.Fatal(err)
+	}
+	invalidStart := performJSON(router, http.MethodPost, "/api/v1/student/sessions", fixture.security.studentToken, map[string]any{"plan_block_id": fixture.planBlockID})
+	if invalidStart.Code != http.StatusConflict || !strings.Contains(invalidStart.Body.String(), "CLASSROOM_STAGE_CONTENT_INCOMPLETE") {
+		t.Fatalf("unknown interaction version preflight=%d %s", invalidStart.Code, invalidStart.Body.String())
+	}
+	if _, err := pool.Exec(ctx, `UPDATE questions SET scene_public_json=jsonb_set(scene_public_json,'{version}','"student-interaction-v1"') WHERE id=$1`, invalidQuestionID); err != nil {
+		t.Fatal(err)
+	}
 	session := startStageSession(t, router, fixture)
 	if _, err := pool.Exec(ctx, `UPDATE questions SET status='QUARANTINED' WHERE id=$1`, session.QuestionID); err != nil {
 		t.Fatal(err)
@@ -429,15 +480,20 @@ VALUES($1,'four-stage integration fixture','INTERNAL_RULE','INTERNAL')`, sourceI
 		for order := 1; order <= tasksPerStage; order++ {
 			questionID := uuid.New()
 			optionPrefix := strings.ToLower(string(stage)) + fmt.Sprintf("-%d", order)
-			scene, _ := json.Marshal(map[string]any{
-				"kind": "CHOICE_SET",
-				"options": []map[string]string{
-					{"id": optionPrefix + "-a", "text": "选项一"},
-					{"id": optionPrefix + "-b", "text": "选项二"},
-					{"id": optionPrefix + "-c", "text": "选项三"},
+			interactionScene := studentinteraction.Scene{
+				Version: studentinteraction.Version, Renderer: studentinteraction.RendererSingleChoice,
+				AccessibleFallback: "请选择唯一符合题目要求的选项。",
+				Options: []studentinteraction.Item{
+					{ID: optionPrefix + "-a", Label: "选项一"},
+					{ID: optionPrefix + "-b", Label: "选项二"},
+					{ID: optionPrefix + "-c", Label: "选项三"},
 				},
-			})
-			schema := `{"type":"object","properties":{"selected_option_ids":{"type":"array","items":{"type":"string"}}},"required":["selected_option_ids"],"additionalProperties":false}`
+			}
+			scene, _ := json.Marshal(interactionScene)
+			schema, ok := studentinteraction.AnswerSchema(interactionScene)
+			if !ok {
+				t.Fatal("integration scene did not produce a schema")
+			}
 			if _, err := pool.Exec(ctx, `
 INSERT INTO questions(id,knowledge_point_id,difficulty,question_type,prompt_public,scene_public_json,input_schema_json,status,content_version)
 VALUES($1,$2,'L2','STRUCTURED_SELECTION',$3,$4,$5,'DRAFT',$6)`, questionID,

@@ -20,8 +20,8 @@ Browser credentials are held only in a `HttpOnly`, `SameSite=Strict` cookie. The
 | `GET` | `/api/v1/student/today` | Proposed/active plans and blocks | Student's own record only |
 | `POST` | `/api/v1/student/sessions` | Starts the released question selected for a current plan block, or returns the open session already bound to that block | Student's own current-day block only; a different open block returns 409 |
 | `GET` | `/api/v1/student/sessions/current` | Current `ACTIVE` or `PAUSED` session, or `204 No Content` | Student's own record only |
-| `GET` | `/api/v1/student/sessions/{session_id}` | Versioned public classroom prompt, public timeline, status, and authoritative timing snapshot | Student must own session; no private answer fields |
-| `POST` | `/api/v1/student/sessions/{session_id}/answers` | Tutor action, Socratic round, safe message, optional voice audio/segments, safe mastery/reward summary, or a fixed versioned safety notice | Student must own active session; no answer echo |
+| `GET` | `/api/v1/student/sessions/{session_id}` | Versioned public classroom prompt, normalized `student-interaction-v1` material or sanitized text fallback, public timeline, status, and authoritative timing snapshot | Student must own session; no private answer fields |
+| `POST` | `/api/v1/student/sessions/{session_id}/answers` | Legacy text answer, or a stage-bound structured response with operation, stage, task, and content-version identity | Student must own active session; no answer echo; stage success is deterministic only |
 | `POST` | `/api/v1/student/sessions/{session_id}/pause` | Checkpoints active study time and changes `ACTIVE` to `PAUSED` | Student must own session; idempotent while paused |
 | `POST` | `/api/v1/student/sessions/{session_id}/resume` | Starts a new active timing interval and changes `PAUSED` to `ACTIVE` | Student must own session; idempotent while active |
 | `POST` | `/api/v1/student/sessions/{session_id}/abandon` | Ends an open session and releases its plan block | Student must own session; idempotent once abandoned |
@@ -55,7 +55,9 @@ The browser pauses when a classroom becomes hidden and heartbeats while it remai
 
 Student session DTOs are assembled from one repeatable-read database snapshot, so the session header, public timeline, persisted voice assets, and timing revision describe one database view. Clients must ignore lower teaching versions, lower timing versions, and a conflicting status carrying the same timing version. If a lifecycle response reports a teaching version newer than the client's last full session snapshot, the client must refresh the full session instead of advancing only the timing state.
 
-Support request bodies are exactly `{"type":"HINT"}` or `{"type":"EXPLAIN"}`. Unknown fields, unsupported types, and trailing JSON are rejected. Generated support is validated against the server-authorized action and answer non-disclosure schema before a Tutor turn is persisted.
+Legacy support request bodies are exactly `{"type":"HINT"}` or `{"type":"EXPLAIN"}`. Four-stage requests additionally carry `operation_id`, `stage`, `task_id`, and `task_version`. Unknown fields, unsupported types, and trailing JSON are rejected. Generated support is validated against the server-authorized action and answer non-disclosure schema before a Tutor turn is persisted.
+
+The complete public structured-material and response contract is documented in [`student-interaction-v1.md`](student-interaction-v1.md).
 
 Tutor output passes the existing independent answer-disclosure audit and then the deterministic `tutor-number-material-v1` gate before publication. `PROBE`, `HINT`, `SCAFFOLD`, and `ANALOGY` may only use numeric material present in the released original prompt. `EXPLAIN` and `VOICE_EXPLAIN` may use a different-number parallel example, and the server appends a fixed return-to-original verification instruction after the audited model output.
 

@@ -88,6 +88,99 @@ test('keeps paused answer controls in the DOM and waits for an explicit resume',
   wrapper.unmount()
 })
 
+test('renders stage progress and retries a structured draft with the same operation id', async () => {
+  let answerRequests = 0
+  let advanced = false
+  const submitted: Array<Record<string, unknown>> = []
+  const stageInteraction = {
+    version: 'student-interaction-v1' as const,
+    renderer: 'SINGLE_CHOICE' as const,
+    scene: {
+      version: 'student-interaction-v1' as const,
+      renderer: 'SINGLE_CHOICE' as const,
+      accessible_fallback: '从甲和乙中选择一项。',
+      options: [{ id: 'a', label: '甲' }, { id: 'b', label: '乙' }],
+    },
+    answer_schema: {}, accessible_fallback: '从甲和乙中选择一项。', fallback: false,
+  }
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const path = String(input)
+    if (path.endsWith('/answers')) {
+      answerRequests++
+      submitted.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      if (answerRequests === 1) return response({ code: 'TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE' }, 503)
+      advanced = true
+      return response({
+        session_id: 'session-1', version: 2, timing_version: 1, action: 'VARIANT', stage: 'VARIANT',
+        task_id: 'question-2', task_version: 'content-v1', evidence_kind: 'INDEPENDENT', stage_completed: true,
+        message: '这一阶段已独立完成，继续下一阶段。', status: 'ACTIVE', active_seconds: 20,
+        current_active_seconds: 1, timing_observed_at: '2026-08-26T12:00:21Z',
+      })
+    }
+    return response(session({
+      version: advanced ? 2 : 1,
+      status: 'ACTIVE', state: advanced ? 'VARIANT' : 'ORIGINAL',
+      question_id: advanced ? 'question-2' : 'question-1',
+      prompt: advanced ? '第二阶段任务' : '第一阶段任务',
+      interaction: stageInteraction,
+      stage_flow: { version: 'classroom-stage-flow-v1', stage: advanced ? 'VARIANT' : 'ORIGINAL', task_version: 'content-v1' },
+    }))
+  }))
+
+  expect(wrapper.get('[aria-current="step"]').text()).toBe('原题')
+  expect(wrapper.get('details').text()).toContain('从甲和乙中选择一项。')
+  await wrapper.findAll<HTMLInputElement>('input[type="radio"]')[0].setValue(true)
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(learning.error).toBe('老师正在想，等一下再试一次')
+  expect(wrapper.findAll<HTMLInputElement>('input[type="radio"]')[0].element.checked).toBe(true)
+
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(answerRequests).toBe(2)
+  expect(submitted[0].operation_id).toBe(submitted[1].operation_id)
+  expect(submitted[0]).toMatchObject({
+    stage: 'ORIGINAL', task_id: 'question-1', task_version: 'content-v1',
+    response: { selected_option_ids: ['a'] },
+  })
+  expect(submitted[0]).not.toHaveProperty('answer')
+  expect(wrapper.get('[aria-current="step"]').text()).toBe('变式')
+  expect(learning.structuredDraft).toEqual({ selected_option_ids: [] })
+  wrapper.unmount()
+})
+
+test('uses the text composer for a server-declared fallback material', async () => {
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({
+    status: 'ACTIVE', state: 'ASK',
+    interaction: {
+      version: 'student-text-fallback-v1', renderer: 'TEXT_FALLBACK', answer_schema: { type: 'string' },
+      accessible_fallback: '保留的文字任务', fallback: true,
+    },
+  }))))
+
+  expect(wrapper.find('[data-renderer]').exists()).toBe(false)
+  expect(wrapper.find('#student-answer').exists()).toBe(true)
+  wrapper.unmount()
+})
+
+test('keeps an invalidated stage task answer-free and recoverable', async () => {
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({
+    status: 'ACTIVE', state: 'ORIGINAL',
+    interaction: {
+      version: 'student-text-fallback-v1', renderer: 'TEXT_FALLBACK', answer_schema: { type: 'string' },
+      accessible_fallback: '保留的文字任务', fallback: true,
+    },
+    stage_flow: { version: 'classroom-stage-flow-v1', stage: 'ORIGINAL', task_version: 'content-v1' },
+  }))))
+
+  expect(wrapper.find('form').exists()).toBe(false)
+  expect(wrapper.get('[role="alert"]').text()).toContain('本次不会记录答题证据')
+  expect(wrapper.get('[role="alert"] button').text()).toContain('重新加载任务')
+  wrapper.unmount()
+})
+
 test('renders the server safety fallback and transparent parent notice', async () => {
 	const privateInput = 'PRIVATE_SAFETY_INPUT_CANARY'
 	const { learning, wrapper } = await mountPage(vi.fn((input: string | URL | Request) => {

@@ -8,17 +8,23 @@ import {
   heartbeatStudentSession,
   pauseStudentSession,
   requestStudentSupport,
+  requestStudentStageSupport,
   resumeStudentSession,
   submitSessionReflection,
   submitStudentAnswer,
-  type SessionStatus,
+  submitStudentStageResponse,
+  type StageIdentity,
+	  type SessionStatus,
 	type SessionTiming,
 	type SafetyNotice,
   type SpeechSegment,
   type StudentSession,
+  type StudentInteraction,
+  type StudentStageFlow,
   type StudentSessionTurn,
   type TutorAction,
 } from '../api/student'
+import { initialStructuredResponse, isStructuredInteraction, newOperationID, stageIdentity, stageTaskKey } from '../lib/studentInteraction'
 import { useGrowthStore } from './growth'
 
 export type { TutorAction } from '../api/student'
@@ -52,6 +58,9 @@ export const useLearningStore = defineStore('learning', {
     startedAt: '',
     targetMinutes: 0,
     prompt: '',
+    questionID: '',
+    interaction: null as StudentInteraction | null,
+    stageFlow: null as StudentStageFlow | null,
     studentAnswer: '',
     answerDraftSessionID: '',
     answerDraft: '',
@@ -73,6 +82,12 @@ export const useLearningStore = defineStore('learning', {
     timeline: [] as TimelineItem[],
 		operationSequence: 0,
 		timingSequence: 0,
+		structuredDraftKey: '',
+		structuredDraft: {} as Record<string, unknown>,
+		stageAnswerOperationKey: '',
+		stageAnswerOperationID: '',
+		stageSupportOperationKey: '',
+		stageSupportOperationID: '',
   }),
   actions: {
 		reset() {
@@ -86,6 +101,9 @@ export const useLearningStore = defineStore('learning', {
 			this.loading = false
 			this.answerDraftSessionID = ''
 			this.answerDraft = ''
+			this.structuredDraftKey = ''
+			this.structuredDraft = {}
+			this.clearStageOperations()
 			this.resetSession()
 		},
     resetSession() {
@@ -100,6 +118,9 @@ export const useLearningStore = defineStore('learning', {
       this.startedAt = ''
       this.targetMinutes = 0
       this.prompt = ''
+      this.questionID = ''
+      this.interaction = null
+      this.stageFlow = null
       this.studentAnswer = ''
       this.status = ''
       this.activeSeconds = 0
@@ -132,6 +153,22 @@ export const useLearningStore = defineStore('learning', {
       this.startedAt = session.started_at
       this.targetMinutes = session.target_minutes
       this.prompt = session.prompt
+			this.questionID = session.question_id
+			this.interaction = session.interaction ?? null
+			this.stageFlow = session.stage_flow ?? null
+			const identity = stageIdentity(session.id, session.question_id, session.stage_flow)
+			if (identity && session.interaction && isStructuredInteraction(session.interaction, session.stage_flow)) {
+				const key = stageTaskKey(session.id, identity)
+				if (this.structuredDraftKey !== key) {
+					this.structuredDraftKey = key
+					this.structuredDraft = initialStructuredResponse(session.interaction)
+					this.clearStageOperations()
+				}
+			} else {
+				this.structuredDraftKey = ''
+				this.structuredDraft = {}
+				this.clearStageOperations()
+			}
 			if (applyTiming) {
 				this.status = session.status
 				this.activeSeconds = session.active_seconds
@@ -153,6 +190,15 @@ export const useLearningStore = defineStore('learning', {
 			},
 			answerDraftFor(sessionID: string) {
 				return this.answerDraftSessionID === sessionID ? this.answerDraft : ''
+			},
+			setStructuredDraft(key: string, value: Record<string, unknown>) {
+				if (this.structuredDraftKey === key) this.structuredDraft = value
+			},
+			clearStageOperations() {
+				this.stageAnswerOperationKey = ''
+				this.stageAnswerOperationID = ''
+				this.stageSupportOperationKey = ''
+				this.stageSupportOperationID = ''
 			},
 	    applyTiming(timing: SessionTiming) {
 	      if (timing.session_id !== this.sessionID || timing.timing_version < this.timingVersion) return false
@@ -210,7 +256,7 @@ export const useLearningStore = defineStore('learning', {
 				return false
 			}
 		},
-    async submitAnswer(sessionID: string, answer: string) {
+	    async submitAnswer(sessionID: string, answer: string) {
       const value = answer.trim()
 			if (!value || this.sessionID !== sessionID || this.loading) return false
 			const operation = ++this.operationSequence
@@ -230,7 +276,7 @@ export const useLearningStore = defineStore('learning', {
 						}
 	        this.tutorAction = result.action
 					this.version = result.version
-        this.socraticRound = result.socratic_round
+	        this.socraticRound = result.socratic_round ?? this.socraticRound
         this.voiceAudio = result.voice_audio ?? ''
         this.voiceSegments = result.voice_segments ?? []
 						if (appendResult && !result.safety) {
@@ -261,9 +307,48 @@ export const useLearningStore = defineStore('learning', {
         return false
       } finally {
 				if (operation === this.operationSequence) this.loading = false
-      }
-    },
-    async requestSupport(sessionID: string, type: 'HINT' | 'EXPLAIN') {
+	      }
+	    },
+	    async submitStageResponse(sessionID: string, response: Record<string, unknown>) {
+			const identity = stageIdentity(this.sessionID, this.questionID, this.stageFlow ?? undefined)
+			if (!identity || this.sessionID !== sessionID || this.loading || !this.interaction || !isStructuredInteraction(this.interaction, this.stageFlow ?? undefined)) return false
+			const key = stageTaskKey(sessionID, identity)
+			if (this.structuredDraftKey !== key) return false
+			if (this.stageAnswerOperationKey !== key) {
+				this.stageAnswerOperationKey = key
+				this.stageAnswerOperationID = newOperationID()
+			}
+			const operation = ++this.operationSequence
+			this.loading = true
+			this.error = ''
+			try {
+				const result = await submitStudentStageResponse(sessionID, identity as StageIdentity, response, this.stageAnswerOperationID)
+				if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
+				if (result.version < this.version) return false
+				this.version = result.version
+				this.tutorAction = result.action
+				if (result.version > this.snapshotVersion) this.timeline.push({ id: `pending-${result.version}-tutor`, actor: 'TUTOR', text: result.message, meta: result.action })
+				if (result.status) this.applyTiming({ session_id: result.session_id, version: result.version, timing_version: result.timing_version, status: result.status, active_seconds: result.active_seconds ?? this.activeSeconds, current_active_seconds: result.current_active_seconds ?? (result.status === 'ACTIVE' ? this.currentActiveSeconds : 0), timing_observed_at: result.timing_observed_at })
+				if (result.action === 'COMPLETE') {
+					this.timingSequence++
+					useGrowthStore().invalidate()
+				}
+				if (!await this.refreshSession(sessionID)) {
+					this.error = '新任务暂时没有载入，请再次提交以恢复课堂'
+					return false
+				}
+				this.clearStageOperations()
+				return true
+			} catch (error) {
+				if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
+				if (error instanceof ApiError && error.status === 404) this.sessionGone = true
+				this.error = error instanceof Error ? error.message : '课堂暂时无法提交'
+				return false
+			} finally {
+				if (operation === this.operationSequence) this.loading = false
+			}
+	    },
+	    async requestSupport(sessionID: string, type: 'HINT' | 'EXPLAIN') {
 			if (this.sessionID !== sessionID || this.loading) return false
 			const operation = ++this.operationSequence
       this.loading = true
@@ -286,9 +371,44 @@ export const useLearningStore = defineStore('learning', {
         return false
       } finally {
 				if (operation === this.operationSequence) this.loading = false
-      }
-    },
-    async returnFromVoice(sessionID: string) {
+	      }
+	    },
+	    async requestStageSupport(sessionID: string, type: 'HINT' | 'EXPLAIN') {
+			const identity = stageIdentity(this.sessionID, this.questionID, this.stageFlow ?? undefined)
+			if (!identity || this.sessionID !== sessionID || this.loading) return false
+			const key = `${stageTaskKey(sessionID, identity)}:${type}`
+			if (this.stageSupportOperationKey !== key) {
+				this.stageSupportOperationKey = key
+				this.stageSupportOperationID = newOperationID()
+			}
+			const operation = ++this.operationSequence
+			this.loading = true
+			this.error = ''
+			try {
+				const result = await requestStudentStageSupport(sessionID, identity, type, this.stageSupportOperationID)
+				if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
+				if (result.version < this.version) return false
+				this.version = result.version
+				this.tutorAction = result.action
+				if (result.version > this.snapshotVersion) this.timeline.push({ id: `pending-${result.version}-tutor`, actor: 'TUTOR', text: result.message, meta: result.action })
+				if (result.status) this.applyTiming({ session_id: result.session_id, version: result.version, timing_version: result.timing_version, status: result.status, active_seconds: result.active_seconds ?? this.activeSeconds, current_active_seconds: result.current_active_seconds ?? (result.status === 'ACTIVE' ? this.currentActiveSeconds : 0), timing_observed_at: result.timing_observed_at })
+				if (!await this.refreshSession(sessionID)) {
+					this.error = '课堂状态暂时没有载入，请再次请求帮助'
+					return false
+				}
+				this.stageSupportOperationKey = ''
+				this.stageSupportOperationID = ''
+				return true
+			} catch (error) {
+				if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
+				if (error instanceof ApiError && error.status === 404) this.sessionGone = true
+				this.error = error instanceof Error ? error.message : '暂时无法生成帮助'
+				return false
+			} finally {
+				if (operation === this.operationSequence) this.loading = false
+			}
+	    },
+	    async returnFromVoice(sessionID: string) {
 			if (this.sessionID !== sessionID || this.loading) return false
 			const operation = ++this.operationSequence
       this.loading = true
@@ -300,7 +420,7 @@ export const useLearningStore = defineStore('learning', {
 					const appendResult = result.version > this.snapshotVersion
 					this.version = result.version
         this.tutorAction = result.action
-        this.socraticRound = result.socratic_round
+	        this.socraticRound = result.socratic_round ?? this.socraticRound
 					if (appendResult) this.timeline.push({ id: `pending-${result.version}-tutor`, actor: 'TUTOR', text: result.message, meta: result.action })
 					if (result.status) this.applyTiming({ session_id: result.session_id, version: result.version, timing_version: result.timing_version, status: result.status, active_seconds: result.active_seconds ?? this.activeSeconds, current_active_seconds: result.current_active_seconds ?? (result.status === 'ACTIVE' ? this.currentActiveSeconds : 0), timing_observed_at: result.timing_observed_at })
 					await this.refreshSession(sessionID)

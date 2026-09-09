@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 )
 
 var validSubjects = map[string]bool{"MATH": true, "CHINESE": true, "ENGLISH": true, "PHYSICS": true, "CHEMISTRY": true}
@@ -21,6 +23,7 @@ type Validator struct{ Duplicates DuplicateLookup }
 func (validator Validator) Validate(asset Asset) Validation {
 	checks := []Check{
 		check("schema", requiredValid(asset), "required fields, enums, JSON, and DRAFT state"),
+		check("student_interaction", interactionValid(asset), "structured material must satisfy student-interaction-v1"),
 		check("answer_not_public", !leaksAnswer(asset), "public prompt must not contain a standalone private answer"),
 		check("numeric_answer", numericConsistent(asset), "numeric answer and solution result must agree"),
 		check("unit", unitConsistent(asset), "unit-bearing numeric content must declare an expected unit"),
@@ -43,7 +46,14 @@ func requiredValid(asset Asset) bool {
 		return false
 	}
 	var schema any
-	return len(asset.InputSchema) > 0 && json.Unmarshal(asset.InputSchema, &schema) == nil
+	return len(asset.InputSchema) > 0 && json.Unmarshal(asset.InputSchema, &schema) == nil && interactionValid(asset)
+}
+
+func interactionValid(asset Asset) bool {
+	if asset.QuestionType != "STRUCTURED_INTERACTION" {
+		return len(asset.Scene) == 0
+	}
+	return studentinteraction.Valid(asset.Scene, asset.InputSchema)
 }
 
 func leaksAnswer(asset Asset) bool {

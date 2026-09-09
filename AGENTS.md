@@ -40,7 +40,7 @@ Task 004, Student Answer Non-Disclosure, is the first product safety gate. Do no
 - Add tests in proportion to the affected security or state boundary.
 - Run `go vet ./server/... ./schemas/...`, `go test -count=1 ./server/internal/... ./server/cmd/... ./schemas/...`, `go test -count=1 ./server/tests/integration`, `npm test`, `npm run lint`, and `npm run build` before declaring a task complete.
 - Run the integration command with `TEST_DATABASE_URL` pointing to real PostgreSQL. A skipped integration test does not count as passing.
-- Integration gate baseline: top-level PASS >= 91, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
+- Integration gate baseline: top-level PASS >= 92, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
 - Integration tests must derive business dates from the same PostgreSQL session as their fixtures; do not mix Go process dates with PostgreSQL session dates.
 - Before using a timezone run as defect-fix evidence, execute `TEST_DATABASE_URL='<real postgres>' scripts/assert-timezone-date-split.sh "$TZ_SPLIT_ZONE"`. The assertion must pass before the test run; an unchanged process/database calendar date is invalid evidence.
 - Never commit secrets, provider keys, raw child audio, or unnecessary personal data.

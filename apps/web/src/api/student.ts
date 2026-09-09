@@ -1,7 +1,32 @@
 export interface SpeechSegment { id: string; text: string; start_ms: number; end_ms: number }
-export type TutorAction = 'INTRO' | 'ASK' | 'WAIT' | 'ANALYZE' | 'PROBE' | 'HINT' | 'SCAFFOLD' | 'ANALOGY' | 'BACKTRACK' | 'EXPLAIN' | 'VOICE_EXPLAIN' | 'RETURN' | 'VARIANT' | 'ABSTRACT' | 'VERIFY' | 'REVIEW' | 'BREAK' | 'COMPLETE'
+export type TutorAction = 'INTRO' | 'ASK' | 'WAIT' | 'ANALYZE' | 'PROBE' | 'HINT' | 'SCAFFOLD' | 'ANALOGY' | 'BACKTRACK' | 'EXPLAIN' | 'VOICE_EXPLAIN' | 'RETURN' | 'ORIGINAL' | 'VARIANT' | 'ABSTRACT' | 'VERIFY' | 'REVIEW' | 'BREAK' | 'COMPLETE'
 export type SessionStatus = 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'ABANDONED'
 export type PlanBlockStatus = 'AVAILABLE' | 'ACTIVE' | 'COMPLETED'
+export type ClassroomStage = 'ORIGINAL' | 'VARIANT' | 'ABSTRACT' | 'VERIFY' | 'COMPLETE'
+export type StudentInteractionRenderer = 'SINGLE_CHOICE' | 'MULTIPLE_CHOICE' | 'ORDERING' | 'MATCHING' | 'GROUPING' | 'NUMBER_LINE' | 'FILL_BLANKS' | 'TEXT_FALLBACK'
+export interface StudentInteractionItem { id: string; label: string }
+export interface StudentInteractionScene {
+  version: 'student-interaction-v1'
+  renderer: Exclude<StudentInteractionRenderer, 'TEXT_FALLBACK'>
+  accessible_fallback: string
+  options?: StudentInteractionItem[]
+  items?: StudentInteractionItem[]
+  left?: StudentInteractionItem[]
+  right?: StudentInteractionItem[]
+  groups?: StudentInteractionItem[]
+  slots?: StudentInteractionItem[]
+  number_line?: { label: string; min: number; max: number; step: number }
+}
+export interface StudentInteraction {
+  version: 'student-interaction-v1' | 'student-text-fallback-v1'
+  renderer: StudentInteractionRenderer
+  scene?: StudentInteractionScene
+  answer_schema: Record<string, unknown>
+  accessible_fallback: string
+  fallback: boolean
+}
+export interface StudentStageFlow { version: 'classroom-stage-flow-v1'; stage: ClassroomStage; task_version: string }
+export interface StageIdentity { stage: Exclude<ClassroomStage, 'COMPLETE'>; task_id: string; task_version: string }
 export interface SafetyNotice {
   policy_version: string
   category: 'OFF_TOPIC_LONG' | 'PERSONAL_INFORMATION' | 'FAMILY_PRIVACY' | 'DANGEROUS_EXPERIMENT' | 'HEALTH' | 'SELF_HARM' | 'BULLYING' | 'SEXUAL_CONTENT'
@@ -14,7 +39,7 @@ export interface SubmitAnswerResult {
   version: number
   timing_version: number
   action: TutorAction
-  socratic_round: number
+  socratic_round?: number
   message: string
   status?: SessionStatus
   active_seconds?: number
@@ -26,6 +51,11 @@ export interface SubmitAnswerResult {
   energy?: number
   tomorrow_plan_changed?: boolean
   safety?: SafetyNotice
+  stage?: ClassroomStage
+  task_id?: string
+  task_version?: string
+  evidence_kind?: 'NONE' | 'ASSISTED' | 'INDEPENDENT'
+  stage_completed?: boolean
 }
 
 export interface PlanBlock { id: string; sequence: number; subject: string; knowledge_point_id: string; minutes: number; mode: string; reason: string; focus: string; original_task_id?: string | null; status: PlanBlockStatus; session_id?: string | null; session_status?: SessionStatus | null }
@@ -45,6 +75,7 @@ export interface StudentSession {
   prompt: string
   scene: Record<string, unknown>
   input_schema: Record<string, unknown>
+  interaction?: StudentInteraction
   started_at: string
   target_minutes: number
   status: SessionStatus
@@ -57,6 +88,7 @@ export interface StudentSession {
   timeline: StudentSessionTurn[]
   voice_segments?: SpeechSegment[]
   voice_audio?: string
+  stage_flow?: StudentStageFlow
 }
 
 export interface SessionTiming {
@@ -155,9 +187,25 @@ export async function submitStudentAnswer(sessionID: string, answer: string): Pr
   return response.json() as Promise<SubmitAnswerResult>
 }
 
+export async function submitStudentStageResponse(sessionID: string, identity: StageIdentity, responseBody: Record<string, unknown>, operationID: string): Promise<SubmitAnswerResult> {
+  const response = await fetch(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/answers`, {
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ operation_id: operationID, ...identity, response: responseBody }),
+  })
+  if (!response.ok) throw await studentApiError(response, '课堂暂时无法提交')
+  return response.json() as Promise<SubmitAnswerResult>
+}
+
 export async function requestStudentSupport(sessionID: string, type: 'HINT' | 'EXPLAIN'): Promise<SubmitAnswerResult> {
   return studentJSON<SubmitAnswerResult>(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/support`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type }),
+  }, type === 'HINT' ? tutorHintRephraseMessage : tutorExplainRephraseMessage)
+}
+
+export async function requestStudentStageSupport(sessionID: string, identity: StageIdentity, type: 'HINT' | 'EXPLAIN', operationID: string): Promise<SubmitAnswerResult> {
+  return studentJSON<SubmitAnswerResult>(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/support`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, operation_id: operationID, ...identity }),
   }, type === 'HINT' ? tutorHintRephraseMessage : tutorExplainRephraseMessage)
 }
 

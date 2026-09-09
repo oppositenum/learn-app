@@ -13,6 +13,7 @@ export const tutorActionLabels = {
 	EXPLAIN: '用相似例子讲一遍',
 	VOICE_EXPLAIN: '听一段简短讲解',
 	RETURN: '回到原问题验证',
+	ORIGINAL: '先独立完成原题',
 	VARIANT: '试试一个变化后的问题',
 	ABSTRACT: '把刚才的方法说清楚',
 	VERIFY: '再独立验证一次',

@@ -65,7 +65,15 @@ func TestStudentQuestionResponseDoesNotDisclosePrivateAnswer(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	assertNoForbiddenKeys(t, payload, "response")
-
+	responsePayload := payload.(map[string]any)
+	interaction := responsePayload["interaction"].(map[string]any)
+	if interaction["renderer"] != "TEXT_FALLBACK" || interaction["fallback"] != true {
+		t.Fatalf("interaction=%v", interaction)
+	}
+	question := responsePayload["question"].(map[string]any)
+	if scene := question["scene"].(map[string]any); len(scene) != 0 {
+		t.Fatalf("unknown scene reached Student response: %v", scene)
+	}
 }
 
 func TestStudentResponseTypeCannotContainPrivateAnswer(t *testing.T) {

@@ -9,10 +9,12 @@ import (
 
 	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 )
 
 type questionResponse struct {
-	Question content.QuestionPublic `json:"question"`
+	Question    content.QuestionPublic      `json:"question"`
+	Interaction studentinteraction.Material `json:"interaction"`
 }
 
 type QuestionHandler struct {
@@ -50,6 +52,11 @@ func (handler *QuestionHandler) Get(writer http.ResponseWriter, request *http.Re
 		return
 	}
 
+	interaction := studentinteraction.Resolve(question.Prompt, question.Scene, question.InputSchema)
+	if interaction.Fallback {
+		question.Scene = json.RawMessage(`{}`)
+		question.InputSchema = interaction.AnswerSchema
+	}
 	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(questionResponse{Question: question})
+	_ = json.NewEncoder(writer).Encode(questionResponse{Question: question, Interaction: interaction})
 }

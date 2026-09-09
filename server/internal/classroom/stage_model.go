@@ -71,7 +71,14 @@ const (
 	StageEvidenceIndependent StageEvidenceKind = "INDEPENDENT"
 )
 
-const stageScoringExactOptionSetV1 = "exact-option-set-v1"
+const (
+	stageScoringExactOptionSetV1 = "exact-option-set-v1"
+	stageScoringExactOrderV1     = "exact-order-v1"
+	stageScoringExactPairsV1     = "exact-pairs-v1"
+	stageScoringExactGroupingV1  = "exact-grouping-v1"
+	stageScoringExactNumberV1    = "exact-number-v1"
+	stageScoringExactFillV1      = "exact-fill-v1"
+)
 
 const (
 	stageFlowVersion                = "classroom-stage-flow-v1"

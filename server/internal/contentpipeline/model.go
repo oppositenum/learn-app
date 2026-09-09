@@ -39,6 +39,7 @@ type Asset struct {
 	PromptPublic     string          `json:"prompt_public"`
 	TeacherPrivate   PrivateAnswer   `json:"teacher_private"`
 	Choices          []Choice        `json:"choices,omitempty"`
+	Scene            json.RawMessage `json:"scene,omitempty"`
 	InputSchema      json.RawMessage `json:"input_schema"`
 	SourceID         string          `json:"source_id"`
 	ContentVersion   string          `json:"content_version"`

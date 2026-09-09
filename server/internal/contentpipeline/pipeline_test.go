@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 )
 
 func number(value float64) *float64 { return &value }
@@ -63,6 +65,33 @@ func TestReleaseCannotSkipIndependentReview(t *testing.T) {
 	}
 	if _, err := NewReviewService("openai:model-a", "openai:model-a", fakeReviewer{}); err == nil {
 		t.Fatal("same generator and reviewer accepted")
+	}
+}
+
+func TestStructuredInteractionRequiresTheVersionedPublicContract(t *testing.T) {
+	scene := studentinteraction.Scene{
+		Version: studentinteraction.Version, Renderer: studentinteraction.RendererSingleChoice,
+		AccessibleFallback: "从两个选项中选择一项。",
+		Options:            []studentinteraction.Item{{ID: "a", Label: "甲"}, {ID: "b", Label: "乙"}},
+	}
+	rawScene, err := json.Marshal(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, ok := studentinteraction.AnswerSchema(scene)
+	if !ok {
+		t.Fatal("interaction schema was not built")
+	}
+	asset := validAsset()
+	asset.QuestionType = "STRUCTURED_INTERACTION"
+	asset.Scene = rawScene
+	asset.InputSchema = schema
+	if validation := (Validator{}).Validate(asset); !validation.Passed {
+		t.Fatalf("valid structured interaction rejected: %+v", validation.Checks)
+	}
+	asset.Scene = json.RawMessage(`{"version":"student-interaction-v2","renderer":"SINGLE_CHOICE","accessible_fallback":"文字","options":[{"id":"a","label":"甲"},{"id":"b","label":"乙"}]}`)
+	if validation := (Validator{}).Validate(asset); validation.Passed {
+		t.Fatal("unknown interaction version passed validation")
 	}
 }
 

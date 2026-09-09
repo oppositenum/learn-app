@@ -13,34 +13,36 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/auth"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/speech"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 )
 
 type StudentSession struct {
-	ID             uuid.UUID         `json:"id"`
-	Version        int64             `json:"version"`
-	TimingVersion  int64             `json:"timing_version"`
-	PlanBlockID    *uuid.UUID        `json:"plan_block_id,omitempty"`
-	SubjectCode    string            `json:"subject_code"`
-	SubjectName    string            `json:"subject_name"`
-	KnowledgePoint string            `json:"knowledge_point"`
-	Difficulty     string            `json:"difficulty"`
-	QuestionID     uuid.UUID         `json:"question_id"`
-	Prompt         string            `json:"prompt"`
-	Scene          json.RawMessage   `json:"scene"`
-	InputSchema    json.RawMessage   `json:"input_schema"`
-	StartedAt      time.Time         `json:"started_at"`
-	TargetMinutes  int               `json:"target_minutes"`
-	Status         string            `json:"status"`
-	ActiveSeconds  int               `json:"active_seconds"`
-	CurrentSeconds int               `json:"current_active_seconds"`
-	ActiveSince    *time.Time        `json:"active_since,omitempty"`
-	TimingAt       time.Time         `json:"timing_observed_at"`
-	State          string            `json:"state"`
-	SocraticRound  int               `json:"socratic_round"`
-	Timeline       []StudentTurn     `json:"timeline"`
-	VoiceSegments  []speech.Segment  `json:"voice_segments,omitempty"`
-	VoiceAudio     string            `json:"voice_audio,omitempty"`
-	StageFlow      *StudentStageFlow `json:"stage_flow,omitempty"`
+	ID             uuid.UUID                   `json:"id"`
+	Version        int64                       `json:"version"`
+	TimingVersion  int64                       `json:"timing_version"`
+	PlanBlockID    *uuid.UUID                  `json:"plan_block_id,omitempty"`
+	SubjectCode    string                      `json:"subject_code"`
+	SubjectName    string                      `json:"subject_name"`
+	KnowledgePoint string                      `json:"knowledge_point"`
+	Difficulty     string                      `json:"difficulty"`
+	QuestionID     uuid.UUID                   `json:"question_id"`
+	Prompt         string                      `json:"prompt"`
+	Scene          json.RawMessage             `json:"scene"`
+	InputSchema    json.RawMessage             `json:"input_schema"`
+	StartedAt      time.Time                   `json:"started_at"`
+	TargetMinutes  int                         `json:"target_minutes"`
+	Status         string                      `json:"status"`
+	ActiveSeconds  int                         `json:"active_seconds"`
+	CurrentSeconds int                         `json:"current_active_seconds"`
+	ActiveSince    *time.Time                  `json:"active_since,omitempty"`
+	TimingAt       time.Time                   `json:"timing_observed_at"`
+	State          string                      `json:"state"`
+	SocraticRound  int                         `json:"socratic_round"`
+	Timeline       []StudentTurn               `json:"timeline"`
+	VoiceSegments  []speech.Segment            `json:"voice_segments,omitempty"`
+	VoiceAudio     string                      `json:"voice_audio,omitempty"`
+	StageFlow      *StudentStageFlow           `json:"stage_flow,omitempty"`
+	Interaction    studentinteraction.Material `json:"interaction"`
 }
 
 type StudentTurn struct {
@@ -326,6 +328,11 @@ func readStudentSession(ctx context.Context, db studentSessionQueryer, userID, s
 	session.TimingAt = timing.TimingObservedAt
 	if stageTaskVersion != nil {
 		session.StageFlow = &StudentStageFlow{Version: stageFlowVersion, Stage: Stage(session.State), TaskVersion: *stageTaskVersion}
+	}
+	session.Interaction = studentinteraction.Resolve(session.Prompt, session.Scene, session.InputSchema)
+	if session.Interaction.Fallback {
+		session.Scene = json.RawMessage(`{}`)
+		session.InputSchema = session.Interaction.AnswerSchema
 	}
 	rows, err := db.Query(ctx, `SELECT sequence,actor,action,message,created_at FROM tutor_turns WHERE session_id=$1 ORDER BY sequence`, sessionID)
 	if err != nil {

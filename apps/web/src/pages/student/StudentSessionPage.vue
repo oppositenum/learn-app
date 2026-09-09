@@ -4,7 +4,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import VoiceCaptureButton from '../../components/VoiceCaptureButton.vue'
+import StudentInteractionRenderer from '../../components/StudentInteractionRenderer.vue'
 import { difficultyLabels, tutorActionLabels } from '../../lib/learningLabels'
+import { classroomStageLabels, classroomStages, isStructuredInteraction, stageIdentity, stageTaskKey, structuredResponseComplete } from '../../lib/studentInteraction'
 import { useLearningStore } from '../../stores/learning'
 
 const learning = useLearningStore()
@@ -25,6 +27,18 @@ const currentSeconds = computed(() => learning.currentActiveSeconds + runningDel
 const currentTutorTurn = computed(() => learning.timeline.filter((item) => item.actor === 'TUTOR').at(-1))
 const showTutorTurn = computed(() => learning.tutorAction !== 'ASK' && currentTutorTurn.value?.meta !== 'ASK')
 const complete = computed(() => learning.tutorAction === 'COMPLETE' || learning.status === 'COMPLETED')
+const structured = computed(() => isStructuredInteraction(learning.interaction ?? undefined, learning.stageFlow ?? undefined))
+const activeStageIdentity = computed(() => stageIdentity(learning.sessionID, learning.questionID, learning.stageFlow ?? undefined))
+const structuredDraft = computed({
+  get: () => learning.structuredDraft,
+  set: (value: Record<string, unknown>) => {
+    if (!activeStageIdentity.value) return
+    learning.setStructuredDraft(stageTaskKey(learning.sessionID, activeStageIdentity.value), value)
+  },
+})
+const structuredComplete = computed(() => Boolean(structured.value && learning.interaction && structuredResponseComplete(learning.interaction, structuredDraft.value)))
+const activeStageIndex = computed(() => classroomStages.indexOf(learning.stageFlow?.stage as (typeof classroomStages)[number]))
+const stageMaterialUnavailable = computed(() => Boolean(learning.stageFlow && learning.interaction?.fallback && !complete.value))
 
 function formatDuration(seconds: number) {
   const safe = Math.max(0, Math.floor(seconds))
@@ -42,6 +56,11 @@ async function openSession(sessionID: string) {
 
 async function submit() {
 	if (learning.status !== 'ACTIVE') return
+	if (structured.value) {
+		if (!structuredComplete.value) return
+		await learning.submitStageResponse(String(route.params.id), structuredDraft.value)
+		return
+	}
   const accepted = await learning.submitAnswer(String(route.params.id), answer.value)
   if (!accepted) return
   answer.value = ''
@@ -50,7 +69,9 @@ async function submit() {
 
 async function support(type: 'HINT' | 'EXPLAIN') {
 	if (learning.status !== 'ACTIVE') return
-  const accepted = await learning.requestSupport(String(route.params.id), type)
+	const accepted = structured.value
+		? await learning.requestStageSupport(String(route.params.id), type)
+		: await learning.requestSupport(String(route.params.id), type)
   if (accepted && type === 'EXPLAIN') await router.push(`/student/session/${String(route.params.id)}/supply`)
 }
 
@@ -160,6 +181,21 @@ onBeforeUnmount(() => window.clearInterval(timer))
             :class="step <= learning.socraticRound ? 'bg-teal-600' : 'bg-zinc-200'"
           />
         </div>
+        <ol
+          v-if="learning.stageFlow && !complete"
+          class="mt-3 grid grid-cols-4 gap-1"
+          aria-label="课堂阶段"
+        >
+          <li
+            v-for="(stage, index) in classroomStages"
+            :key="stage"
+            class="min-w-0 border-t-2 pt-1 text-center text-[0.7rem] font-semibold"
+            :class="index <= activeStageIndex ? 'border-teal-600 text-teal-800' : 'border-zinc-300 text-zinc-500'"
+            :aria-current="stage === learning.stageFlow.stage ? 'step' : undefined"
+          >
+            {{ classroomStageLabels[stage] }}
+          </li>
+        </ol>
       </header>
 
       <section
@@ -238,7 +274,28 @@ onBeforeUnmount(() => window.clearInterval(timer))
         </div>
 
         <div
-          v-if="!complete && learning.status !== 'ABANDONED'"
+          v-if="stageMaterialUnavailable"
+          class="mt-7 border-y border-amber-300 bg-amber-50 py-5 text-amber-950"
+          role="alert"
+        >
+          <p class="font-semibold">
+            当前任务暂时只能显示文字题面
+          </p>
+          <p class="mt-1 text-sm leading-6">
+            校验材料没有完整载入，本次不会记录答题证据。
+          </p>
+          <button
+            type="button"
+            class="secondary-button mt-3"
+            :disabled="learning.preparing"
+            @click="openSession(String(route.params.id))"
+          >
+            <RefreshCw :size="17" />重新加载任务
+          </button>
+        </div>
+
+        <div
+          v-if="!complete && learning.status !== 'ABANDONED' && !stageMaterialUnavailable"
           data-testid="classroom-composer"
           data-layout-contract="normal-flow"
           class="classroom-composer mt-8 border-t border-zinc-200 bg-[#f5f5f1] py-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
@@ -276,38 +333,47 @@ onBeforeUnmount(() => window.clearInterval(timer))
               :aria-disabled="learning.status !== 'ACTIVE' || learning.loading"
             >
               <label
+                v-if="!structured"
                 for="student-answer"
                 class="text-sm font-semibold"
               >把你的想法写下来</label>
               <textarea
+                v-if="!structured"
                 id="student-answer"
                 v-model="answer"
                 rows="3"
                 class="mt-2 w-full resize-none border border-zinc-300 bg-white p-4 text-base leading-7 outline-none transition-colors focus:border-teal-600 focus:ring-2 focus:ring-teal-100"
                 placeholder="不必只写答案，也可以说说你准备先算什么"
               />
+              <StudentInteractionRenderer
+                v-else-if="learning.interaction"
+                v-model="structuredDraft"
+                :interaction="learning.interaction"
+                :disabled="learning.loading"
+              />
               <div class="mt-3 flex items-center justify-between gap-3">
                 <VoiceCaptureButton
+                  v-if="!structured"
                   :session-id="String(route.params.id)"
                   @transcript="answer = $event"
                 />
                 <button
                   type="submit"
                   class="primary-button min-w-0 flex-1"
-                  :disabled="!answer.trim() || learning.loading"
+                  :disabled="structured ? !structuredComplete || learning.loading : !answer.trim() || learning.loading"
                 >
                   <Send
                     :size="18"
                     aria-hidden="true"
                   />
-                  {{ learning.loading ? '分析中' : '提交想法' }}
+                  {{ learning.loading ? '检查中' : structured ? '提交答案' : '提交想法' }}
                 </button>
               </div>
               <p
-                v-if="!answer.trim()"
+                v-if="structured ? !structuredComplete : !answer.trim()"
                 class="mt-2 text-xs text-zinc-500"
               >
-                先写下你的想法
+                {{ structured ? '请完成当前任务' : '先写下你的想法' }}
               </p>
               <div class="mt-4 grid grid-cols-2 gap-3">
                 <button
