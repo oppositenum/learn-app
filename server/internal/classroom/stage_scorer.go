@@ -233,7 +233,7 @@ func scoreFill(rawRule, response json.RawMessage) StageScore {
 	}
 	values := make(map[string]string, len(submitted.Values))
 	for _, value := range submitted.Values {
-		if value.SlotID == "" || value.Value == "" || !contains(rule.AllowedSlotIDs, value.SlotID) {
+		if value.SlotID == "" || value.Value == "" || len([]rune(value.Value)) > 200 || !contains(rule.AllowedSlotIDs, value.SlotID) {
 			return StageScoreIndeterminate
 		}
 		if _, duplicate := values[value.SlotID]; duplicate {

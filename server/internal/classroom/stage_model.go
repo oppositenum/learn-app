@@ -9,6 +9,7 @@ import (
 
 	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/subject"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 )
 
 type Stage string
@@ -88,6 +89,7 @@ const (
 var (
 	ErrStagePreparationIncomplete = errors.New("four-stage classroom content is incomplete")
 	ErrStageUnavailable           = errors.New("four-stage classroom task is unavailable")
+	ErrStageContentExhausted      = errors.New("four-stage classroom has no unpresented task")
 	ErrStageMismatch              = errors.New("four-stage classroom is out of order")
 	ErrStageTaskMismatch          = errors.New("four-stage classroom task does not match")
 	ErrStageVersionDrift          = errors.New("four-stage classroom task version changed")
@@ -127,19 +129,22 @@ type StageSubmitResult struct {
 	SessionID           uuid.UUID         `json:"session_id"`
 	Version             int64             `json:"version"`
 	TimingVersion       int64             `json:"timing_version"`
-	Action              Stage             `json:"action"`
+	Action              tutor.State       `json:"action"`
 	Stage               Stage             `json:"stage"`
 	TaskID              *uuid.UUID        `json:"task_id,omitempty"`
 	TaskVersion         string            `json:"task_version,omitempty"`
 	DeterministicResult StageScore        `json:"-"`
 	EvidenceKind        StageEvidenceKind `json:"evidence_kind"`
 	StageCompleted      bool              `json:"stage_completed"`
+	Code                string            `json:"code,omitempty"`
 	Message             string            `json:"message"`
+	SocraticRound       int               `json:"socratic_round"`
 	Status              string            `json:"status"`
 	ActiveSeconds       int               `json:"active_seconds"`
 	CurrentSeconds      int               `json:"current_active_seconds"`
 	TimingAt            time.Time         `json:"timing_observed_at"`
 	Feedback            *ai.TutorTurn     `json:"-"`
+	Safety              *SafetyNotice     `json:"safety,omitempty"`
 }
 
 type StudentStageFlow struct {
@@ -156,10 +161,14 @@ func stageMessage(code string) string {
 		return "先按这条提示完成当前任务；完成后还要用新任务独立证明。"
 	case "ASSISTED_REPROOF":
 		return "当前任务在帮助下完成，现在换一道不重复的新任务独立证明。"
+	case "SOCRATIC_LIMIT_EXPLAINED":
+		return "已经完成三次有效尝试。先看同结构示范，再回到当前任务验证。"
 	case "NEXT_STAGE":
 		return "这一阶段已独立完成，继续下一阶段。"
 	case "CLASSROOM_COMPLETE":
 		return "变式、抽象和验证都已真实完成。"
+	case "CONTENT_EXHAUSTED":
+		return "当前阶段暂时没有新的不重复任务。这次课堂已安全结束，可以稍后重新开始。"
 	default:
 		return "继续完成当前阶段。"
 	}

@@ -414,6 +414,69 @@ VALUES('metric-success',$1,$2,'openai','test-model','ANSWER_ANALYSIS','SUCCEEDED
 	}
 }
 
+func TestB6LearningEffectDateFiltersUseShanghaiLearningDateWithUTCSession(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPoolWithTimezone(t, ctx, testDatabaseURL(t), "UTC")
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	ownerToken := seedOwner(t, ctx, pool)
+	var subjectID, knowledgePointID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+SELECT knowledge_point.subject_id,question.knowledge_point_id
+FROM questions question
+JOIN knowledge_points knowledge_point ON knowledge_point.id=question.knowledge_point_id
+WHERE question.id=$1`, fixture.releasedQuestionID).Scan(&subjectID, &knowledgePointID); err != nil {
+		t.Fatal(err)
+	}
+	included := time.Date(2042, 2, 1, 16, 30, 0, 0, time.UTC)
+	excluded := time.Date(2042, 2, 2, 16, 30, 0, 0, time.UTC)
+	for _, occurredAt := range []time.Time{included, excluded} {
+		if _, err := pool.Exec(ctx, `
+INSERT INTO learning_effect_events(
+    id,student_id,session_id,subject_id,knowledge_point_id,question_id,event_type,
+    source_kind,source_id,outcome,classroom_state,evidence_form,assistance_level,occurred_at
+) VALUES($1,$2,$3,$4,$5,$6,'TASK_ATTEMPT','ANSWER_ANALYSIS',$7,'CORRECT','VARIANT','VARIANT',0,$8)`,
+			uuid.New(), fixture.studentID, fixture.sessionID, subjectID, knowledgePointID,
+			fixture.releasedQuestionID, uuid.New(), occurredAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO ai_request_outcomes(request_id,student_id,session_id,provider,model,purpose,outcome,latency_ms,occurred_at)
+VALUES('shanghai-date-included',$1,$2,'openai','test-model','ANSWER_ANALYSIS','SUCCEEDED',1,$3),
+      ('shanghai-date-excluded',$1,$2,'openai','test-model','ANSWER_ANALYSIS','PROVIDER_ERROR',1,$4)`,
+		fixture.studentID, fixture.sessionID, included, excluded); err != nil {
+		t.Fatal(err)
+	}
+	router := api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Classroom:    classroom.NewHandler(classroom.NewService(pool, nil, nil, nil), pool, parent.NewRepository(pool)),
+	})
+	response := performJSON(router, http.MethodGet,
+		"/api/v1/owner/learning-effects?student_id="+fixture.studentID.String()+"&date_from=2042-02-02&date_to=2042-02-02",
+		ownerToken, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("learning effects=%d %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Share struct {
+			StudentEvents int `json:"student_events"`
+		} `json:"student_interaction_share"`
+		AI struct {
+			Requests  int `json:"requests"`
+			Anomalies int `json:"anomalies"`
+		} `json:"ai_anomaly"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Share.StudentEvents != 1 || payload.AI.Requests != 1 || payload.AI.Anomalies != 0 {
+		t.Fatalf("Shanghai date boundary report=%s", response.Body.String())
+	}
+}
+
 func TestB6AIRequestOutcomeRecorderStoresOnlyBoundedClassifications(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedPool(t, ctx, testDatabaseURL(t))

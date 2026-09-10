@@ -2,6 +2,8 @@ package classroom
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
@@ -73,6 +75,39 @@ func TestStageScorerFailsClosed(t *testing.T) {
 	invalidScene.Scene = json.RawMessage(`{"version":"student-interaction-v2","renderer":"SINGLE_CHOICE","accessible_fallback":"请选择一项。","options":[{"id":"a","label":"甲"},{"id":"b","label":"乙"}]}`)
 	if got := scoreStageTask(invalidScene, json.RawMessage(`{"selected_option_ids":["a"]}`)); got != StageScoreIndeterminate {
 		t.Fatalf("unknown material version score=%s", got)
+	}
+}
+
+func TestStageFillScorerEnforcesPublishedRuneLimit(t *testing.T) {
+	accepted := strings.Repeat("甲", 200)
+	task := scorerTestTask(t, subject.Chinese, studentinteraction.Scene{
+		Version: studentinteraction.Version, Renderer: studentinteraction.RendererFillBlanks,
+		AccessibleFallback: "填写内容。", Slots: []studentinteraction.Item{{ID: "slot", Label: "内容"}},
+	}, stageScoringExactFillV1, fmt.Sprintf(
+		`{"rule_type":"EXACT_FILL","expected_values":[{"slot_id":"slot","accepted_values":[%q]}],"allowed_slot_ids":["slot"]}`,
+		accepted,
+	))
+	response := func(value string) json.RawMessage {
+		return json.RawMessage(fmt.Sprintf(`{"values":[{"slot_id":"slot","value":%q}]}`, value))
+	}
+	if got := scoreStageTask(task, response(accepted)); got != StageScoreCorrect {
+		t.Fatalf("200-rune response score=%s", got)
+	}
+	if got := scoreStageTask(task, response(accepted+"乙")); got != StageScoreIndeterminate {
+		t.Fatalf("201-rune response score=%s", got)
+	}
+}
+
+func TestStageFillSafetyClassificationScansOnlyChildAuthoredValues(t *testing.T) {
+	task := scorerTestTask(t, subject.Chinese, studentinteraction.Scene{
+		Version: studentinteraction.Version, Renderer: studentinteraction.RendererFillBlanks,
+		AccessibleFallback: "填写内容。", Slots: []studentinteraction.Item{{ID: "slot", Label: "内容"}},
+	}, stageScoringExactFillV1, `{"rule_type":"EXACT_FILL","expected_values":[{"slot_id":"slot","accepted_values":["普通内容"]}],"allowed_slot_ids":["slot"]}`)
+	if classification := classifyStageResponse(task, json.RawMessage(`{"values":[{"slot_id":"unknown","value":"我不想活了"}]}`)); !classification.Matched {
+		t.Fatal("child-authored value bypassed safety classification because its slot was invalid")
+	}
+	if classification := classifyStageResponse(task, json.RawMessage(`{"values":[{"slot_id":"我不想活了","value":"普通内容"}]}`)); classification.Matched {
+		t.Fatal("slot identifier was incorrectly classified as child-authored text")
 	}
 }
 

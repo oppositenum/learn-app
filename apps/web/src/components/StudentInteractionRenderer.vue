@@ -52,6 +52,10 @@ function setPlacement(itemID: string, groupID: string) {
 }
 
 function setNumber(raw: string) {
+	if (!raw.trim()) {
+		emit('update:modelValue', {})
+		return
+	}
   const value = Number(raw)
   if (Number.isFinite(value)) emit('update:modelValue', { value })
 }

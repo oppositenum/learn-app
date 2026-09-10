@@ -91,6 +91,21 @@ export function stageTaskKey(sessionID: string, identity: StageIdentity): string
   return `${sessionID}:${identity.stage}:${identity.task_id}:${identity.task_version}`
 }
 
+export function stageResponseKey(sessionID: string, identity: StageIdentity, response: Record<string, unknown>): string {
+  return `${stageTaskKey(sessionID, identity)}:${canonicalStructuredResponse(response)}`
+}
+
+export function canonicalStructuredResponse(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalStructuredResponse).join(',')}]`
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalStructuredResponse(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
 export function newOperationID(): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
   const bytes = new Uint8Array(16)

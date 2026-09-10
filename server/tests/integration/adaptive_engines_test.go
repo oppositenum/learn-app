@@ -479,6 +479,10 @@ func testDatabaseURL(t *testing.T) string {
 }
 
 func isolatedPool(t *testing.T, ctx context.Context, databaseURL string) *pgxpool.Pool {
+	return isolatedPoolWithTimezone(t, ctx, databaseURL, "Asia/Shanghai")
+}
+
+func isolatedPoolWithTimezone(t *testing.T, ctx context.Context, databaseURL, timezone string) *pgxpool.Pool {
 	t.Helper()
 	admin, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -497,7 +501,7 @@ func isolatedPool(t *testing.T, ctx context.Context, databaseURL string) *pgxpoo
 		t.Fatal(err)
 	}
 	config.ConnConfig.RuntimeParams["search_path"] = schema
-	config.ConnConfig.RuntimeParams["timezone"] = "Asia/Shanghai"
+	config.ConnConfig.RuntimeParams["timezone"] = timezone
 	if config.MaxConns < 4 {
 		config.MaxConns = 4
 	}

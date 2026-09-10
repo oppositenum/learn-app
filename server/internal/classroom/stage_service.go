@@ -19,6 +19,8 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/mastery"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/reward"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/safety"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 )
 
@@ -35,6 +37,7 @@ type stageSnapshot struct {
 	stageVersion        int64
 	learningVersion     int64
 	timingVersion       int64
+	socraticFailCount   int
 	startedAt           time.Time
 	accumulatedSeconds  int
 	lastResumedAt       *time.Time
@@ -57,6 +60,8 @@ type storedStageAttempt struct {
 	responseTaskVersion *string
 	responseVersion     int64
 	responseTiming      int64
+	responseSocratic    int
+	responseAction      tutor.State
 	responseStatus      string
 	activeSeconds       int
 	currentSeconds      int
@@ -200,6 +205,9 @@ func (service *Service) SubmitStage(ctx context.Context, studentUserID uuid.UUID
 	if err := service.validateStageRequest(snapshot, request, operationToken); err != nil {
 		return StageSubmitResult{}, err
 	}
+	if classification := classifyStageResponse(snapshot.task, request.Response); classification.Matched {
+		return service.handleStageSafetyClassification(ctx, studentUserID, operationToken, snapshot, request, classification)
+	}
 	score := StageScoreHelpRequested
 	if request.Kind == StageAttemptAnswer {
 		score = scoreStageTask(snapshot.task, request.Response)
@@ -280,7 +288,7 @@ func queryStageSnapshot(ctx context.Context, db stageSnapshotQueryer, studentUse
 	err := db.QueryRow(ctx, `
 SELECT session.id,session.student_id,stage_session.lineage_id,stage_session.knowledge_point_id,
        session.plan_block_id,session.review_queue_id,session.current_state,session.status,
-       stage_session.version,session.version,session.timing_version,session.started_at,
+       stage_session.version,session.version,session.timing_version,session.socratic_fail_count,session.started_at,
        session.accumulated_seconds,session.last_resumed_at,session.last_activity_at,
        session.processing_token,session.processing_until,
        stage_task.question_id,stage_task.lineage_id,stage_task.stage_role,
@@ -319,7 +327,7 @@ JOIN subjects subject ON subject.id=knowledge_point.subject_id
 WHERE stage_session.session_id=$1 AND student.user_id=$2`+lock, sessionID, studentUserID).Scan(
 		&snapshot.sessionID, &snapshot.studentID, &snapshot.lineageID, &snapshot.knowledgePointID,
 		&snapshot.planBlockID, &snapshot.reviewQueueID, &snapshot.stage, &snapshot.status,
-		&snapshot.stageVersion, &snapshot.learningVersion, &snapshot.timingVersion,
+		&snapshot.stageVersion, &snapshot.learningVersion, &snapshot.timingVersion, &snapshot.socraticFailCount,
 		&snapshot.startedAt, &snapshot.accumulatedSeconds, &snapshot.lastResumedAt,
 		&snapshot.lastActivityAt, &snapshot.processingToken, &snapshot.processingUntil,
 		&snapshot.task.ID, &snapshot.task.LineageID, &snapshot.task.Stage,
@@ -368,8 +376,10 @@ func (service *Service) prepareStageFeedback(ctx context.Context, snapshot stage
 	}
 	action := tutor.StateProbe
 	fallback := "换一道任务，再按问题要求逐项检查。"
-	if score == StageScoreHelpRequested {
-		if request.Support == SupportExplain {
+	explain := request.Support == SupportExplain ||
+		((score == StageScoreIncorrect || score == StageScoreIndeterminate) && snapshot.socraticFailCount+1 >= 3)
+	if score == StageScoreHelpRequested || explain {
+		if explain {
 			action = tutor.StateExplain
 			fallback = "先看一个同结构的完整示范，再回到当前任务自己验证。"
 		} else {
@@ -398,7 +408,7 @@ func (service *Service) prepareStageFeedback(ctx context.Context, snapshot stage
 		},
 	}
 	var turn ai.TutorTurn
-	if request.Support == SupportExplain {
+	if explain {
 		turn, err = service.agent.GenerateParallelExample(ctx, ai.ExampleRequest(generationRequest))
 	} else {
 		turn, err = service.agent.GenerateTurn(ctx, generationRequest)
@@ -410,6 +420,87 @@ func (service *Service) prepareStageFeedback(ctx context.Context, snapshot stage
 		return ai.TutorTurn{}, errors.New("teaching agent action does not match deterministic stage feedback action")
 	}
 	return turn, nil
+}
+
+func classifyStageResponse(task stageTask, response json.RawMessage) safety.Classification {
+	scene, ok := validStageTaskScene(task)
+	if !ok || scene.Renderer != studentinteraction.RendererFillBlanks {
+		return safety.Classification{}
+	}
+	var submitted fillResponse
+	if !strictJSONDecode(response, &submitted) {
+		return safety.Classification{}
+	}
+	for _, value := range submitted.Values {
+		if classification := safety.Classify(value.Value); classification.Matched {
+			return classification
+		}
+	}
+	return safety.Classification{}
+}
+
+func (service *Service) handleStageSafetyClassification(
+	ctx context.Context,
+	studentUserID, operationToken uuid.UUID,
+	prepared stageSnapshot,
+	request StageSubmitRequest,
+	classification safety.Classification,
+) (StageSubmitResult, error) {
+	var result StageSubmitResult
+	var event realtime.Event
+	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		if err := auth.LockPrincipalSession(ctx, tx, studentUserID); err != nil {
+			return err
+		}
+		snapshot, err := queryStageSnapshot(ctx, tx, studentUserID, request.SessionID, true)
+		if err != nil {
+			return err
+		}
+		if snapshot.stageVersion != prepared.stageVersion || snapshot.learningVersion != prepared.learningVersion {
+			return ErrClassroomChanged
+		}
+		if err := service.validateStageRequest(snapshot, request, operationToken); err != nil {
+			return err
+		}
+		now := latestTime(service.now(), snapshot.lastActivityAt)
+		_, eventSequence, err := nextSequences(ctx, tx, request.SessionID)
+		if err != nil {
+			return err
+		}
+		var notice *SafetyNotice
+		event, notice, err = recordSafetyIntervention(
+			ctx, tx, snapshot.studentID, snapshot.sessionID, eventSequence, classification, now,
+		)
+		if err != nil {
+			return err
+		}
+		activeSeconds := checkpointTotal(lifecycleRow{
+			status: snapshot.status, startedAt: snapshot.startedAt,
+			accumulatedSeconds: snapshot.accumulatedSeconds, lastResumedAt: snapshot.lastResumedAt,
+		}, now)
+		currentSeconds := 0
+		if snapshot.status == "ACTIVE" {
+			currentSeconds = max(0, activeSeconds-snapshot.accumulatedSeconds)
+		}
+		taskID := snapshot.task.ID
+		result = StageSubmitResult{
+			SessionID: snapshot.sessionID, Version: snapshot.learningVersion,
+			TimingVersion: snapshot.timingVersion, Action: tutor.State(snapshot.stage), Stage: snapshot.stage,
+			TaskID: &taskID, TaskVersion: snapshot.task.ContentVersion,
+			EvidenceKind: StageEvidenceNone, Message: classification.StudentMessage,
+			SocraticRound: snapshot.socraticFailCount, Status: snapshot.status,
+			ActiveSeconds: activeSeconds, CurrentSeconds: currentSeconds, TimingAt: now,
+			Safety: notice,
+		}
+		return nil
+	})
+	if err != nil {
+		return StageSubmitResult{}, err
+	}
+	if service.hub != nil {
+		_ = service.hub.Publish(event)
+	}
+	return result, nil
 }
 
 func (service *Service) commitStageAttempt(
@@ -455,19 +546,31 @@ func (service *Service) commitStageAttempt(
 		evidenceKind := StageEvidenceNone
 		stageCompleted := false
 		sessionCompleted := false
+		contentExhausted := false
+		responseSocratic := snapshot.socraticFailCount
 		var nextTask *stageTask
 
 		switch score {
 		case StageScoreHelpRequested:
 			// Help keeps the current task active. A later success on this task is assisted.
 		case StageScoreIncorrect, StageScoreIndeterminate:
-			responseCode = "TRY_NEW_TASK"
-			task, err := selectUnpresentedStageTask(ctx, tx, snapshot.lineageID, snapshot.stage, snapshot.sessionID, snapshot.task.ID)
-			if err != nil {
-				return err
+			responseSocratic = min(3, snapshot.socraticFailCount+1)
+			if responseSocratic >= 3 {
+				responseCode = "SOCRATIC_LIMIT_EXPLAINED"
+			} else {
+				responseCode = "TRY_NEW_TASK"
+				task, err := selectUnpresentedStageTask(ctx, tx, snapshot.lineageID, snapshot.stage, snapshot.sessionID, snapshot.task.ID)
+				if errors.Is(err, ErrStageContentExhausted) {
+					contentExhausted = true
+					responseCode = "CONTENT_EXHAUSTED"
+				} else if err != nil {
+					return err
+				} else {
+					nextTask = &task
+				}
 			}
-			nextTask = &task
 		case StageScoreCorrect:
+			responseSocratic = 0
 			assisted, err := stageTaskWasHelped(ctx, tx, snapshot.sessionID, snapshot.task.ID)
 			if err != nil {
 				return err
@@ -476,10 +579,14 @@ func (service *Service) commitStageAttempt(
 				responseCode = "ASSISTED_REPROOF"
 				evidenceKind = StageEvidenceAssisted
 				task, err := selectUnpresentedStageTask(ctx, tx, snapshot.lineageID, snapshot.stage, snapshot.sessionID, snapshot.task.ID)
-				if err != nil {
+				if errors.Is(err, ErrStageContentExhausted) {
+					contentExhausted = true
+					responseCode = "CONTENT_EXHAUSTED"
+				} else if err != nil {
 					return err
+				} else {
+					nextTask = &task
 				}
-				nextTask = &task
 			} else {
 				responseCode = "NEXT_STAGE"
 				evidenceKind = StageEvidenceIndependent
@@ -494,10 +601,14 @@ func (service *Service) commitStageAttempt(
 					sessionCompleted = true
 				} else {
 					task, err := selectUnpresentedStageTask(ctx, tx, snapshot.lineageID, next, snapshot.sessionID, uuid.Nil)
-					if err != nil {
+					if errors.Is(err, ErrStageContentExhausted) {
+						contentExhausted = true
+						responseCode = "CONTENT_EXHAUSTED"
+					} else if err != nil {
 						return err
+					} else {
+						nextTask = &task
 					}
-					nextTask = &task
 				}
 			}
 		default:
@@ -517,12 +628,27 @@ func (service *Service) commitStageAttempt(
 			responseStatus = "COMPLETED"
 			currentSeconds = 0
 			newTimingVersion++
+		} else if contentExhausted {
+			responseStatus = "ABANDONED"
+			currentSeconds = 0
+			newTimingVersion++
+		}
+		turnAction := tutor.State(responseStage)
+		turnMessage := stageMessage(responseCode)
+		turnReason := "deterministic scorer selected the stage outcome"
+		turnResponseID := ""
+		if score != StageScoreCorrect && !contentExhausted {
+			turnAction = feedback.Action
+			turnMessage = feedback.Message
+			turnReason = "feedback only; deterministic scorer selected the stage outcome"
+			turnResponseID = feedback.ResponseID
 		}
 		stored := storedStageAttempt{
 			digest: digest, deterministicResult: score, evidenceKind: evidenceKind,
 			stageCompleted: stageCompleted, responseCode: responseCode,
 			responseStage: responseStage, responseVersion: newLearningVersion,
 			responseTiming: newTimingVersion, responseStatus: responseStatus,
+			responseSocratic: responseSocratic, responseAction: turnAction,
 			activeSeconds: activeSeconds, currentSeconds: currentSeconds,
 			observedAt: now, sessionCompleted: sessionCompleted,
 		}
@@ -566,16 +692,6 @@ INSERT INTO classroom_stage_evidence(
 			}
 		}
 
-		turnAction := tutor.State(responseStage)
-		turnMessage := stageMessage(responseCode)
-		turnReason := "deterministic scorer selected the stage outcome"
-		turnResponseID := ""
-		if score != StageScoreCorrect {
-			turnAction = feedback.Action
-			turnMessage = feedback.Message
-			turnReason = "feedback only; deterministic scorer selected the stage outcome"
-			turnResponseID = feedback.ResponseID
-		}
 		if _, err := tx.Exec(ctx, `
 INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private,response_id)
 VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), snapshot.sessionID,
@@ -589,17 +705,21 @@ VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), snapshot.sessionID
 			}
 			completed := now
 			completedAt = &completed
+		} else if contentExhausted {
+			if err := abandonStageSessionForContentExhaustion(ctx, tx, snapshot, responseSocratic, activeSeconds, now); err != nil {
+				return err
+			}
 		} else {
-			if err := updateActiveStageSession(ctx, tx, snapshot, nextTask, responseStage, score, feedback, now); err != nil {
+			if err := updateActiveStageSession(ctx, tx, snapshot, nextTask, responseStage, score, responseSocratic, feedback, now); err != nil {
 				return err
 			}
 		}
 
 		transitionStudent, _ := json.Marshal(map[string]any{
-			"action": responseStage, "message": stageMessage(responseCode), "stage_completed": stageCompleted,
+			"action": turnAction, "message": stageMessage(responseCode), "stage_completed": stageCompleted,
 		})
 		transitionParent, _ := json.Marshal(map[string]any{
-			"action": responseStage, "message": stageMessage(responseCode), "stage_completed": stageCompleted,
+			"action": turnAction, "message": stageMessage(responseCode), "stage_completed": stageCompleted,
 			"evidence_kind": evidenceKind, "deterministic_result": score,
 		})
 		eventType := realtime.EventTutorActionSelected
@@ -612,6 +732,20 @@ VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), snapshot.sessionID
 		}
 		published = append(published, transition)
 		eventSequence++
+		if contentExhausted {
+			studentAbandoned, _ := json.Marshal(map[string]any{
+				"status": "ABANDONED", "active_seconds": activeSeconds, "code": "CONTENT_EXHAUSTED",
+			})
+			parentAbandoned, _ := json.Marshal(map[string]any{
+				"status": "ABANDONED", "active_seconds": activeSeconds, "reason": "CONTENT_EXHAUSTED",
+			})
+			abandoned := makeEvent(snapshot.studentID, snapshot.sessionID, eventSequence, realtime.EventSessionAbandoned, studentAbandoned, parentAbandoned, now)
+			if err := insertEvent(ctx, tx, abandoned); err != nil {
+				return err
+			}
+			published = append(published, abandoned)
+			eventSequence++
+		}
 
 		if nextTask != nil {
 			questionStudent, _ := json.Marshal(map[string]any{
@@ -642,7 +776,7 @@ VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), snapshot.sessionID
 	return result, published, completedAt, err
 }
 
-func updateActiveStageSession(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, nextTask *stageTask, responseStage Stage, score StageScore, feedback ai.TutorTurn, now time.Time) error {
+func updateActiveStageSession(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, nextTask *stageTask, responseStage Stage, score StageScore, socraticFailCount int, feedback ai.TutorTurn, now time.Time) error {
 	currentTaskID := snapshot.task.ID
 	currentTaskVersion := snapshot.task.ContentVersion
 	evidenceForm := snapshot.task.EvidenceForm
@@ -658,18 +792,37 @@ WHERE session_id=$1`, snapshot.sessionID, currentTaskID, currentTaskVersion); er
 		return err
 	}
 	assistance := 0
-	if score == StageScoreHelpRequested {
+	if score == StageScoreHelpRequested || socraticFailCount >= 3 {
 		assistance = assistanceForState(feedback.Action)
 	}
 	_, err := tx.Exec(ctx, `
 UPDATE learning_sessions
-SET current_question_id=$2,current_state=$3,
-    evidence_form=$4,assistance_level=GREATEST(assistance_level,$5),
-    teaching_response_id=COALESCE(NULLIF($6,''),teaching_response_id),
-    last_activity_at=CASE WHEN status='ACTIVE' THEN $7 ELSE last_activity_at END,
-    processing_token=NULL,processing_until=NULL,version=version+1
-WHERE id=$1`, snapshot.sessionID, currentTaskID, responseStage, evidenceForm, assistance, feedback.ResponseID, now)
+	SET current_question_id=$2,current_state=$3,
+	    evidence_form=$4,assistance_level=GREATEST(assistance_level,$5),
+	    teaching_response_id=COALESCE(NULLIF($6,''),teaching_response_id),
+	    socratic_fail_count=$7,
+	    last_activity_at=CASE WHEN status='ACTIVE' THEN $8 ELSE last_activity_at END,
+	    processing_token=NULL,processing_until=NULL,version=version+1
+	WHERE id=$1`, snapshot.sessionID, currentTaskID, responseStage, evidenceForm, assistance, feedback.ResponseID, socraticFailCount, now)
 	return err
+}
+
+func abandonStageSessionForContentExhaustion(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, socraticFailCount, activeSeconds int, now time.Time) error {
+	if _, err := tx.Exec(ctx, `
+UPDATE learning_sessions
+SET status='ABANDONED',ended_at=$2,accumulated_seconds=$3,actual_seconds=$3,
+    last_resumed_at=NULL,last_activity_at=CASE WHEN status='ACTIVE' THEN $2 ELSE last_activity_at END,
+    socratic_fail_count=$4,processing_token=NULL,processing_until=NULL,
+    version=version+1,timing_version=timing_version+1
+WHERE id=$1`, snapshot.sessionID, now, activeSeconds, socraticFailCount); err != nil {
+		return err
+	}
+	if snapshot.planBlockID != nil {
+		if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status='AVAILABLE' WHERE id=$1 AND status='ACTIVE'`, *snapshot.planBlockID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (service *Service) completeStageSession(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, skill mastery.Skill, now time.Time) error {
@@ -788,71 +941,90 @@ func stageTaskWasHelped(ctx context.Context, tx pgx.Tx, sessionID, taskID uuid.U
 	err := tx.QueryRow(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM classroom_stage_attempts
-    WHERE session_id=$1 AND question_id=$2 AND attempt_kind='HELP'
+    WHERE session_id=$1 AND question_id=$2
+      AND (attempt_kind='HELP' OR response_code='SOCRATIC_LIMIT_EXPLAINED')
 )`, sessionID, taskID).Scan(&helped)
 	return helped, err
 }
 
 func selectUnpresentedStageTask(ctx context.Context, tx pgx.Tx, lineageID uuid.UUID, stage Stage, sessionID, excludeTaskID uuid.UUID) (stageTask, error) {
-	var excluded any
-	if excludeTaskID != uuid.Nil {
-		excluded = excludeTaskID
-	}
-	var task stageTask
-	err := tx.QueryRow(ctx, `
+	rows, err := tx.Query(ctx, `
 SELECT stage_task.question_id,stage_task.lineage_id,lineage.knowledge_point_id,
        subject.code,stage_task.stage_role,stage_task.selection_order,
        question.content_version,stage_task.scoring_rule_version,
        stage_task.scoring_rule_private_json,stage_task.evidence_form,
-       question.prompt_public,question.scene_public_json,question.input_schema_json
+       question.prompt_public,question.scene_public_json,question.input_schema_json,
+       lineage.status,knowledge_point.status,question.status,
+       EXISTS (
+           SELECT 1
+           FROM content_versions version
+           JOIN content_validations validation
+             ON validation.question_id=version.question_id
+            AND validation.content_version=version.version
+            AND validation.schema_version=version.schema_version
+            AND validation.status='PASS'
+           JOIN content_reviews review
+             ON review.question_id=version.question_id
+            AND review.content_version=version.version
+            AND review.schema_version=version.schema_version
+            AND review.result='PASS'
+           JOIN content_release_records release_record
+             ON release_record.question_id=version.question_id
+            AND release_record.validation_id=validation.id
+            AND release_record.review_id=review.id
+            AND release_record.to_status='RELEASED'
+           WHERE version.question_id=question.id AND version.version=question.content_version
+       ) AS release_valid,
+       EXISTS (
+           SELECT 1 FROM classroom_stage_attempts attempt
+           WHERE attempt.session_id=$3 AND attempt.question_id=stage_task.question_id
+       ) AS already_presented
 FROM classroom_stage_tasks stage_task
-JOIN classroom_task_lineages lineage ON lineage.id=stage_task.lineage_id AND lineage.status='READY'
-JOIN questions question ON question.id=stage_task.question_id AND question.status='RELEASED'
-JOIN knowledge_points knowledge_point ON knowledge_point.id=lineage.knowledge_point_id AND knowledge_point.status='RELEASED'
+JOIN classroom_task_lineages lineage ON lineage.id=stage_task.lineage_id
+JOIN questions question ON question.id=stage_task.question_id
+JOIN knowledge_points knowledge_point ON knowledge_point.id=lineage.knowledge_point_id
 JOIN subjects subject ON subject.id=knowledge_point.subject_id
 WHERE stage_task.lineage_id=$1 AND stage_task.stage_role=$2
-  AND ($4::uuid IS NULL OR stage_task.question_id<>$4)
-  AND NOT EXISTS (
-      SELECT 1 FROM classroom_stage_attempts attempt
-      WHERE attempt.session_id=$3 AND attempt.question_id=stage_task.question_id
-  )
-  AND EXISTS (
-      SELECT 1
-      FROM content_versions version
-      JOIN content_validations validation
-        ON validation.question_id=version.question_id
-       AND validation.content_version=version.version
-       AND validation.schema_version=version.schema_version
-       AND validation.status='PASS'
-      JOIN content_reviews review
-        ON review.question_id=version.question_id
-       AND review.content_version=version.version
-       AND review.schema_version=version.schema_version
-       AND review.result='PASS'
-      JOIN content_release_records release_record
-        ON release_record.question_id=version.question_id
-       AND release_record.validation_id=validation.id
-       AND release_record.review_id=review.id
-       AND release_record.to_status='RELEASED'
-      WHERE version.question_id=question.id AND version.version=question.content_version
-  )
-ORDER BY stage_task.selection_order,stage_task.question_id
-LIMIT 1`, lineageID, stage, sessionID, excluded).Scan(
-		&task.ID, &task.LineageID, &task.KnowledgePointID, &task.SubjectCode,
-		&task.Stage, &task.SelectionOrder, &task.ContentVersion,
-		&task.ScoringRuleVersion, &task.ScoringRule, &task.EvidenceForm,
-		&task.Prompt, &task.Scene, &task.InputSchema,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return stageTask{}, ErrStageUnavailable
-	}
+ORDER BY stage_task.selection_order,stage_task.question_id`, lineageID, stage, sessionID)
 	if err != nil {
 		return stageTask{}, err
 	}
-	if !validStageTask(task) || !validEvidenceForm(task.EvidenceForm) {
+	defer rows.Close()
+	found := false
+	valid := true
+	var selected stageTask
+	for rows.Next() {
+		found = true
+		var task stageTask
+		var lineageStatus, knowledgeStatus, questionStatus string
+		var releaseValid, presented bool
+		if err := rows.Scan(
+			&task.ID, &task.LineageID, &task.KnowledgePointID, &task.SubjectCode,
+			&task.Stage, &task.SelectionOrder, &task.ContentVersion,
+			&task.ScoringRuleVersion, &task.ScoringRule, &task.EvidenceForm,
+			&task.Prompt, &task.Scene, &task.InputSchema,
+			&lineageStatus, &knowledgeStatus, &questionStatus, &releaseValid, &presented,
+		); err != nil {
+			return stageTask{}, err
+		}
+		if lineageStatus != "READY" || knowledgeStatus != "RELEASED" || questionStatus != "RELEASED" ||
+			!releaseValid || !validStageTask(task) || !validEvidenceForm(task.EvidenceForm) {
+			valid = false
+		}
+		if selected.ID == uuid.Nil && task.ID != excludeTaskID && !presented {
+			selected = task
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return stageTask{}, err
+	}
+	if !found || !valid {
 		return stageTask{}, ErrStageUnavailable
 	}
-	return task, nil
+	if selected.ID == uuid.Nil {
+		return stageTask{}, ErrStageContentExhausted
+	}
+	return selected, nil
 }
 
 func insertStageAttempt(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, request StageSubmitRequest, stored storedStageAttempt, feedbackDelivered bool, now time.Time) error {
@@ -860,19 +1032,19 @@ func insertStageAttempt(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, req
 INSERT INTO classroom_stage_attempts(
     id,session_id,operation_id,request_digest,submitted_stage,question_id,
     question_version,attempt_kind,support_type,deterministic_result,feedback_delivered,
-    task_success,evidence_kind,stage_completed,response_code,response_stage,
-    response_task_id,response_task_version,response_session_version,
-    response_timing_version,response_status,response_active_seconds,
-    response_current_seconds,response_observed_at,session_completed,created_at
+	    task_success,evidence_kind,stage_completed,response_code,response_stage,
+	    response_task_id,response_task_version,response_session_version,
+	    response_timing_version,response_socratic_round,response_action,response_status,response_active_seconds,
+	    response_current_seconds,response_observed_at,session_completed,created_at
 ) VALUES(
-    $1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),$10,$11,$12,$13,$14,$15,$16,$17,$18,
-    $19,$20,$21,$22,$23,$24,$25,$26
+	    $1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),$10,$11,$12,$13,$14,$15,$16,$17,$18,
+	    $19,$20,$21,$22,$23,$24,$25,$26,$27,$28
 )`, attemptID, request.SessionID, request.OperationID, stored.digest, request.Stage,
 		request.TaskID, request.TaskVersion, request.Kind, request.Support, stored.deterministicResult,
 		feedbackDelivered, stored.evidenceKind != StageEvidenceNone, stored.evidenceKind,
 		stored.stageCompleted, stored.responseCode, stored.responseStage,
 		stored.responseTaskID, stored.responseTaskVersion, stored.responseVersion,
-		stored.responseTiming, stored.responseStatus, stored.activeSeconds,
+		stored.responseTiming, stored.responseSocratic, stored.responseAction, stored.responseStatus, stored.activeSeconds,
 		stored.currentSeconds, stored.observedAt, stored.sessionCompleted, now)
 	return err
 }
@@ -890,9 +1062,9 @@ func loadStoredStageAttempt(ctx context.Context, db stageAttemptQueryer, userID,
 	err := db.QueryRow(ctx, `
 SELECT attempt.request_digest,attempt.deterministic_result,attempt.evidence_kind,
        attempt.stage_completed,attempt.response_code,attempt.response_stage,
-       attempt.response_task_id,attempt.response_task_version,
-       attempt.response_session_version,attempt.response_timing_version,
-       attempt.response_status,attempt.response_active_seconds,
+	       attempt.response_task_id,attempt.response_task_version,
+	       attempt.response_session_version,attempt.response_timing_version,attempt.response_socratic_round,
+	       attempt.response_action,attempt.response_status,attempt.response_active_seconds,
        attempt.response_current_seconds,attempt.response_observed_at,
        attempt.session_completed
 FROM classroom_stage_attempts attempt
@@ -902,7 +1074,7 @@ WHERE attempt.session_id=$1 AND attempt.operation_id=$2 AND student.user_id=$3`,
 		&stored.digest, &stored.deterministicResult, &stored.evidenceKind,
 		&stored.stageCompleted, &stored.responseCode, &stored.responseStage,
 		&stored.responseTaskID, &stored.responseTaskVersion, &stored.responseVersion,
-		&stored.responseTiming, &stored.responseStatus, &stored.activeSeconds,
+		&stored.responseTiming, &stored.responseSocratic, &stored.responseAction, &stored.responseStatus, &stored.activeSeconds,
 		&stored.currentSeconds, &stored.observedAt, &stored.sessionCompleted,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -920,7 +1092,7 @@ func storedStageResult(sessionID uuid.UUID, digest string, stored storedStageAtt
 	}
 	return StageSubmitResult{
 		SessionID: sessionID, Version: stored.responseVersion,
-		TimingVersion: stored.responseTiming, Action: stored.responseStage,
+		TimingVersion: stored.responseTiming, Action: stored.responseAction,
 		Stage: stored.responseStage, TaskID: stored.responseTaskID,
 		TaskVersion: func() string {
 			if stored.responseTaskVersion == nil {
@@ -929,8 +1101,16 @@ func storedStageResult(sessionID uuid.UUID, digest string, stored storedStageAtt
 			return *stored.responseTaskVersion
 		}(),
 		DeterministicResult: stored.deterministicResult, EvidenceKind: stored.evidenceKind,
-		StageCompleted: stored.stageCompleted, Message: stageMessage(stored.responseCode),
+		StageCompleted: stored.stageCompleted, Code: stageResultCode(stored.responseCode),
+		Message: stageMessage(stored.responseCode), SocraticRound: stored.responseSocratic,
 		Status: stored.responseStatus, ActiveSeconds: stored.activeSeconds,
 		CurrentSeconds: stored.currentSeconds, TimingAt: stored.observedAt,
 	}, nil
+}
+
+func stageResultCode(responseCode string) string {
+	if responseCode == "CONTENT_EXHAUSTED" {
+		return responseCode
+	}
+	return ""
 }

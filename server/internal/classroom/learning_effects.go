@@ -85,8 +85,8 @@ type learningEffectFilters struct {
 const learningEffectEventFilter = `
 WHERE ($1::uuid IS NULL OR event.student_id=$1)
   AND ($2='' OR subject.code=$2)
-  AND ($3::date IS NULL OR event.occurred_at::date >= $3)
-  AND ($4::date IS NULL OR event.occurred_at::date <= $4)`
+	  AND ($3::date IS NULL OR (event.occurred_at AT TIME ZONE 'Asia/Shanghai')::date >= $3)
+	  AND ($4::date IS NULL OR (event.occurred_at AT TIME ZONE 'Asia/Shanghai')::date <= $4)`
 
 func (handler *Handler) OwnerLearningEffects(writer http.ResponseWriter, request *http.Request) {
 	studentID, err := optionalUUID(request.URL.Query().Get("student_id"))
@@ -287,14 +287,14 @@ GROUP BY event.classroom_state,event.outcome ORDER BY event.classroom_state,even
 	}
 	rows.Close()
 
-	aiSQL := `SELECT count(*)::int,count(*) FILTER(WHERE outcome<>'SUCCEEDED')::int
+	aiSQL := `SELECT count(*)::int,count(*) FILTER(WHERE outcome.outcome<>'SUCCEEDED')::int
 FROM ai_request_outcomes outcome
 LEFT JOIN learning_sessions session ON session.id=outcome.session_id
 LEFT JOIN subjects subject ON subject.id=session.subject_id
 WHERE ($1::uuid IS NULL OR COALESCE(outcome.student_id,session.student_id)=$1)
   AND ($2='' OR subject.code=$2)
-  AND ($3::date IS NULL OR outcome.occurred_at::date >= $3)
-  AND ($4::date IS NULL OR outcome.occurred_at::date <= $4)`
+	  AND ($3::date IS NULL OR (outcome.occurred_at AT TIME ZONE 'Asia/Shanghai')::date >= $3)
+	  AND ($4::date IS NULL OR (outcome.occurred_at AT TIME ZONE 'Asia/Shanghai')::date <= $4)`
 	if err := queryer.QueryRow(ctx, aiSQL, arguments...).Scan(
 		&report.AIAnomaly.Requests, &report.AIAnomaly.Anomalies,
 	); err != nil {

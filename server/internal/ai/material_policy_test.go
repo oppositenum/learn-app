@@ -1,16 +1,34 @@
 package ai
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
+	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 )
+
+func materialPolicyQuestion(t *testing.T, prompt string, scene *studentinteraction.Scene) content.QuestionPublic {
+	t.Helper()
+	question := content.QuestionPublic{Prompt: prompt}
+	if scene == nil {
+		return question
+	}
+	var err error
+	question.Scene, err = json.Marshal(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	question.InputSchema, _ = studentinteraction.AnswerSchema(*scene)
+	return question
+}
 
 func TestTutorMaterialPolicyRejectsNewNumbersInBoundedActions(t *testing.T) {
 	for _, action := range []tutor.State{tutor.StateProbe, tutor.StateHint, tutor.StateScaffold, tutor.StateAnalogy} {
 		t.Run(string(action), func(t *testing.T) {
-			err := enforceTutorMaterialPolicy("每盒有12支笔，共3盒。", TutorTurn{Action: action, Message: "先想想每盒有10支时会怎样。"})
+			err := enforceTutorMaterialPolicy(materialPolicyQuestion(t, "每盒有12支笔，共3盒。", nil), TutorTurn{Action: action, Message: "先想想每盒有10支时会怎样。"})
 			if !errors.Is(err, ErrTutorMaterialPolicyViolation) {
 				t.Fatalf("error=%v", err)
 			}
@@ -19,10 +37,39 @@ func TestTutorMaterialPolicyRejectsNewNumbersInBoundedActions(t *testing.T) {
 }
 
 func TestTutorMaterialPolicyAllowsOriginalNumbersAndExplanationExample(t *testing.T) {
-	if err := enforceTutorMaterialPolicy("每盒有12支笔，共3盒。", TutorTurn{Action: tutor.StateHint, Message: "先看12和3表示什么。"}); err != nil {
+	question := materialPolicyQuestion(t, "每盒有12支笔，共3盒。", nil)
+	if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateHint, Message: "先看12和3表示什么。"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := enforceTutorMaterialPolicy("每盒有12支笔，共3盒。", TutorTurn{Action: tutor.StateExplain, Message: "用每盒10支、2盒做平行例子。"}); err != nil {
+	if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateExplain, Message: "用每盒10支、2盒做平行例子。"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTutorMaterialPolicyUsesStructuredPublicMaterialWithoutIdentifiers(t *testing.T) {
+	scene := studentinteraction.Scene{
+		Version: studentinteraction.Version, Renderer: studentinteraction.RendererNumberLine,
+		AccessibleFallback: "在数轴上标出三。",
+		NumberLine:         &studentinteraction.NumberLine{Label: "目标位置", Min: 0, Max: 5, Step: 1},
+	}
+	question := materialPolicyQuestion(t, "选择合适的位置。", &scene)
+	if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateHint, Message: "先找到三和5的位置。"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateHint, Message: "先找到四的位置。"}); !errors.Is(err, ErrTutorMaterialPolicyViolation) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestTutorMaterialPolicyChecksSingleChineseNumeralsAndExemptsOrdinals(t *testing.T) {
+	question := materialPolicyQuestion(t, "把三个物品分组，第一步先观察。", nil)
+	if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateProbe, Message: "先找三个物品。"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateProbe, Message: "先找五个物品。"}); !errors.Is(err, ErrTutorMaterialPolicyViolation) {
+		t.Fatalf("error=%v", err)
+	}
+	if err := enforceTutorMaterialPolicy(materialPolicyQuestion(t, "第一步先观察。", nil), TutorTurn{Action: tutor.StateProbe, Message: "第二步再分类。"}); err != nil {
 		t.Fatal(err)
 	}
 }

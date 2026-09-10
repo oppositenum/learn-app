@@ -402,45 +402,13 @@ func (service *Service) handleSafetyClassification(ctx context.Context, studentU
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `
-INSERT INTO minor_safety_incidents(
-    id,student_id,session_id,policy_version,category,severity,fixed_action,parent_escalated,created_at
-) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-			uuid.New(), row.studentID, sessionID, safety.PolicyVersion, classification.Category,
-			classification.Severity, classification.Action, classification.EscalateToParent, now); err != nil {
-			return err
-		}
-		studentPayload, _ := json.Marshal(map[string]any{
-			"policy_version":  safety.PolicyVersion,
-			"category":        classification.Category,
-			"severity":        classification.Severity,
-			"fixed_action":    classification.Action,
-			"message":         classification.StudentMessage,
-			"parent_notified": classification.EscalateToParent,
-		})
-		parentPayload := json.RawMessage(`{}`)
-		if classification.EscalateToParent {
-			parentPayload, _ = json.Marshal(map[string]any{
-				"policy_version": safety.PolicyVersion,
-				"category":       classification.Category,
-				"severity":       classification.Severity,
-				"fixed_action":   classification.Action,
-				"occurred_at":    now,
-			})
-		}
-		event = makeEvent(row.studentID, sessionID, eventSequence, realtime.EventSafetyIntervention, studentPayload, parentPayload, now)
-		event.ParentSuppressed = !classification.EscalateToParent
-		if err := insertEvent(ctx, tx, event); err != nil {
+		var notice *SafetyNotice
+		event, notice, err = recordSafetyIntervention(ctx, tx, row.studentID, sessionID, eventSequence, classification, now)
+		if err != nil {
 			return err
 		}
 		result = sessionSubmitResult(row, sessionID, row.version, row.state, row.fails, classification.StudentMessage, now)
-		result.Safety = &SafetyNotice{
-			PolicyVersion:  safety.PolicyVersion,
-			Category:       classification.Category,
-			Severity:       classification.Severity,
-			FixedAction:    classification.Action,
-			ParentNotified: classification.EscalateToParent,
-		}
+		result.Safety = notice
 		return nil
 	})
 	if err != nil {
@@ -450,6 +418,54 @@ INSERT INTO minor_safety_incidents(
 		_ = service.hub.Publish(event)
 	}
 	return result, nil
+}
+
+func recordSafetyIntervention(
+	ctx context.Context,
+	tx pgx.Tx,
+	studentID, sessionID uuid.UUID,
+	eventSequence int64,
+	classification safety.Classification,
+	now time.Time,
+) (realtime.Event, *SafetyNotice, error) {
+	if _, err := tx.Exec(ctx, `
+INSERT INTO minor_safety_incidents(
+    id,student_id,session_id,policy_version,category,severity,fixed_action,parent_escalated,created_at
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		uuid.New(), studentID, sessionID, safety.PolicyVersion, classification.Category,
+		classification.Severity, classification.Action, classification.EscalateToParent, now); err != nil {
+		return realtime.Event{}, nil, err
+	}
+	studentPayload, _ := json.Marshal(map[string]any{
+		"policy_version":  safety.PolicyVersion,
+		"category":        classification.Category,
+		"severity":        classification.Severity,
+		"fixed_action":    classification.Action,
+		"message":         classification.StudentMessage,
+		"parent_notified": classification.EscalateToParent,
+	})
+	parentPayload := json.RawMessage(`{}`)
+	if classification.EscalateToParent {
+		parentPayload, _ = json.Marshal(map[string]any{
+			"policy_version": safety.PolicyVersion,
+			"category":       classification.Category,
+			"severity":       classification.Severity,
+			"fixed_action":   classification.Action,
+			"occurred_at":    now,
+		})
+	}
+	event := makeEvent(studentID, sessionID, eventSequence, realtime.EventSafetyIntervention, studentPayload, parentPayload, now)
+	event.ParentSuppressed = !classification.EscalateToParent
+	if err := insertEvent(ctx, tx, event); err != nil {
+		return realtime.Event{}, nil, err
+	}
+	return event, &SafetyNotice{
+		PolicyVersion:  safety.PolicyVersion,
+		Category:       classification.Category,
+		Severity:       classification.Severity,
+		FixedAction:    classification.Action,
+		ParentNotified: classification.EscalateToParent,
+	}, nil
 }
 
 func (service *Service) beginBacktrack(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID uuid.UUID, turnSequence, eventSequence int64, now time.Time, responseID, engagement string) (SubmitResult, realtime.Event, bool, error) {

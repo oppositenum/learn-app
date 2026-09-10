@@ -31,6 +31,23 @@ function session(id: string, overrides: Partial<StudentSession> = {}): StudentSe
   }
 }
 
+function stageSession(overrides: Partial<StudentSession> = {}): StudentSession {
+	return session('session-stage', {
+		question_id: 'question-1',
+		interaction: {
+			version: 'student-interaction-v1', renderer: 'FILL_BLANKS', fallback: false,
+			accessible_fallback: '填写内容。', answer_schema: {},
+			scene: {
+				version: 'student-interaction-v1', renderer: 'FILL_BLANKS', accessible_fallback: '填写内容。',
+				slots: [{ id: 'slot-1', label: '内容' }],
+			},
+		},
+		stage_flow: { version: 'classroom-stage-flow-v1', stage: 'ORIGINAL', task_version: 'content-v1' },
+		state: 'ORIGINAL',
+		...overrides,
+	})
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as Response
 }
@@ -315,4 +332,91 @@ test('rejects a conflicting status with the same timing version and timestamp', 
 
 	expect(applied).toBe(false)
 	expect(learning.status).toBe('ACTIVE')
+})
+
+test('binds a stage operation id to the exact canonical response', async () => {
+	const bodies: Array<Record<string, unknown>> = []
+	vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+		bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+		throw new Error('connection lost')
+	}))
+	const learning = useLearningStore()
+	learning.applySession(stageSession())
+
+	await learning.submitStageResponse('session-stage', { values: [{ slot_id: 'slot-1', value: '甲' }] })
+	await learning.submitStageResponse('session-stage', { values: [{ value: '甲', slot_id: 'slot-1' }] })
+	await learning.submitStageResponse('session-stage', { values: [{ slot_id: 'slot-1', value: '乙' }] })
+
+	expect(bodies).toHaveLength(3)
+	expect(bodies[1].operation_id).toBe(bodies[0].operation_id)
+	expect(bodies[2].operation_id).not.toBe(bodies[0].operation_id)
+})
+
+test('reconciles a committed stage response after a stale changed draft gets 409', async () => {
+	const advanced = stageSession({
+		version: 2,
+		question_id: 'question-2',
+		stage_flow: { version: 'classroom-stage-flow-v1', stage: 'VARIANT', task_version: 'content-v2' },
+		state: 'VARIANT',
+	})
+	let answerCalls = 0
+	let refreshCalls = 0
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+		const path = String(input)
+		if (path.endsWith('/answers')) {
+			answerCalls++
+			if (answerCalls === 1) return jsonResponse({
+				session_id: 'session-stage', version: 2, timing_version: 1,
+				action: 'VARIANT', stage: 'VARIANT', task_id: 'question-2', task_version: 'content-v2',
+				evidence_kind: 'INDEPENDENT', stage_completed: true, message: '继续下一阶段。',
+				status: 'ACTIVE', active_seconds: 10, current_active_seconds: 10,
+				timing_observed_at: '2026-08-26T12:00:10Z',
+			})
+			return jsonResponse({ code: 'CLASSROOM_CHANGED' }, 409)
+		}
+		if (path.endsWith('/sessions/session-stage')) {
+			refreshCalls++
+			return refreshCalls === 1 ? jsonResponse({}, 503) : jsonResponse(advanced)
+		}
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const learning = useLearningStore()
+	learning.applySession(stageSession())
+
+	expect(await learning.submitStageResponse('session-stage', { values: [{ slot_id: 'slot-1', value: '甲' }] })).toBe(false)
+	expect(await learning.submitStageResponse('session-stage', { values: [{ slot_id: 'slot-1', value: '乙' }] })).toBe(false)
+
+	expect(answerCalls).toBe(2)
+	expect(refreshCalls).toBe(2)
+	expect(learning.questionID).toBe('question-2')
+	expect(learning.stageFlow?.stage).toBe('VARIANT')
+	expect(learning.stageAnswerOperationID).toBe('')
+	expect(learning.structuredDraftKey).toContain('question-2')
+})
+
+test('handles a structured safety result without retaining child-authored fill text', async () => {
+	const privateInput = 'PRIVATE_STRUCTURED_SAFETY_CANARY'
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+		const path = String(input)
+		if (path.endsWith('/answers')) return jsonResponse({
+			session_id: 'session-stage', version: 1, timing_version: 1,
+			action: 'ORIGINAL', stage: 'ORIGINAL', task_id: 'question-1', task_version: 'content-v1',
+			message: '请先去找身边可信任的大人。', status: 'ACTIVE', active_seconds: 10,
+			current_active_seconds: 10, timing_observed_at: '2026-08-26T12:00:10Z',
+			safety: {
+				policy_version: 'minor-safety-v1', category: 'SELF_HARM', severity: 'CRITICAL',
+				fixed_action: 'SEEK_URGENT_HELP', parent_notified: true,
+			},
+		})
+		if (path.endsWith('/sessions/session-stage')) return jsonResponse(stageSession())
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const learning = useLearningStore()
+	learning.applySession(stageSession())
+	learning.setStructuredDraft(learning.structuredDraftKey, { values: [{ slot_id: 'slot-1', value: privateInput }] })
+
+	expect(await learning.submitStageResponse('session-stage', learning.structuredDraft)).toBe(true)
+	expect(learning.safetyNotice).toMatchObject({ category: 'SELF_HARM', parent_notified: true })
+	expect(learning.structuredDraft).toEqual({})
+	expect(JSON.stringify(learning.timeline)).not.toContain(privateInput)
 })

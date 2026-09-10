@@ -323,7 +323,7 @@ func TestCodexProviderCarriesResponseContext(t *testing.T) {
 	client := &structuredClientStub{result: StructuredResult{
 		ResponseID: "resp_next",
 		OutputJSON: json.RawMessage(`{
-            "message":"配送费是哪一部分？",
+			"message":"配送费属于哪部分？",
             "action":"PROBE",
             "answer_revealed":false,
             "segments":[]
@@ -351,7 +351,7 @@ func TestCodexProviderCarriesResponseContext(t *testing.T) {
 
 func TestCodexProviderConstrainsActionEnumToServerDecision(t *testing.T) {
 	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{
-        "message":"给你一个方向。",
+	        "message":"给你提示方向。",
         "action":"HINT",
         "answer_revealed":false,
         "segments":[]

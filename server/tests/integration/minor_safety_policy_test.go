@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/parent"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/safety"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 	"github.com/oppositenum/ai-learning-tutor/server/migrations"
 )
 
@@ -47,6 +49,7 @@ func (agent *countingSafetyAgent) GenerateExplanation(context.Context, ai.Explai
 
 type safetyBusinessSnapshot struct {
 	answers, analyses, turns, skillStates, rewards, reviews, planBlocks int
+	stageAttempts, stageEvidence, activityDays, energy                  int
 }
 
 func TestMinorSafetyGatePreventsAgentAndLearningMutation(t *testing.T) {
@@ -157,6 +160,103 @@ func TestNonEscalatedSafetyCategoryIsNotPublishedToParent(t *testing.T) {
 	}
 }
 
+func TestStructuredFillSafetyGatePreventsPersistenceAgentAndLearningMutation(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedCompleteStageFixture(t, ctx, pool)
+	var questionID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+SELECT question_id FROM classroom_stage_tasks
+WHERE lineage_id=$1 AND stage_role='ORIGINAL' AND selection_order=1`, fixture.lineageID).Scan(&questionID); err != nil {
+		t.Fatal(err)
+	}
+	scene := studentinteraction.Scene{
+		Version: studentinteraction.Version, Renderer: studentinteraction.RendererFillBlanks,
+		AccessibleFallback: "填写内容。", Slots: []studentinteraction.Item{{ID: "slot-1", Label: "内容"}},
+	}
+	rawScene, err := json.Marshal(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, ok := studentinteraction.AnswerSchema(scene)
+	if !ok {
+		t.Fatal("fill scene did not produce answer schema")
+	}
+	rule := json.RawMessage(`{"rule_type":"EXACT_FILL","expected_values":[{"slot_id":"slot-1","accepted_values":["已发布值"]}],"allowed_slot_ids":["slot-1"]}`)
+	if _, err := pool.Exec(ctx, `UPDATE questions SET question_type='FILL_BLANKS',scene_public_json=$2,input_schema_json=$3 WHERE id=$1`,
+		questionID, rawScene, schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE classroom_stage_tasks SET scoring_rule_version='exact-fill-v1',scoring_rule_private_json=$2 WHERE question_id=$1`,
+		questionID, rule); err != nil {
+		t.Fatal(err)
+	}
+	agent := &countingSafetyAgent{}
+	hub := realtime.NewHub()
+	studentEvents, stopStudent := hub.Subscribe(fixture.security.studentID.String(), auth.RoleStudent)
+	defer stopStudent()
+	parentEvents, stopParent := hub.Subscribe(fixture.security.studentID.String(), auth.RoleParent)
+	defer stopParent()
+	service := classroom.NewService(pool, hub, nil, nil).WithTeachingAgent(agent)
+	router := stageRouter(pool, service)
+	session := startStageSession(t, router, fixture)
+	stageSecurity := fixture.security
+	stageSecurity.sessionID = session.ID
+	before := readSafetyBusinessSnapshot(t, ctx, pool, stageSecurity)
+
+	escalatedInput := "我不想活了，PRIVATE_STRUCTURED_SAFETY_CANARY"
+	request := func(value string) *httptest.ResponseRecorder {
+		return performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, map[string]any{
+			"operation_id": uuid.New(), "stage": session.StageFlow.Stage,
+			"task_id": session.QuestionID, "task_version": session.StageFlow.TaskVersion,
+			"response": map[string]any{"values": []map[string]string{{"slot_id": "slot-1", "value": value}}},
+		})
+	}
+	escalated := request(escalatedInput)
+	if escalated.Code != http.StatusOK || strings.Contains(escalated.Body.String(), escalatedInput) || !strings.Contains(escalated.Body.String(), `"category":"SELF_HARM"`) {
+		t.Fatalf("structured escalated safety=%d %s", escalated.Code, escalated.Body.String())
+	}
+	studentEvent := awaitEventType(t, studentEvents, string(realtime.EventSafetyIntervention))
+	parentEvent := awaitEventType(t, parentEvents, string(realtime.EventSafetyIntervention))
+	if strings.Contains(string(studentEvent), escalatedInput) || strings.Contains(string(parentEvent), escalatedInput) {
+		t.Fatalf("structured safety realtime exposed child text: student=%s parent=%s", studentEvent, parentEvent)
+	}
+
+	nonEscalatedInput := "我的手机号是 13812345678，PRIVATE_STRUCTURED_PHONE_CANARY"
+	nonEscalated := request(nonEscalatedInput)
+	if nonEscalated.Code != http.StatusOK || strings.Contains(nonEscalated.Body.String(), nonEscalatedInput) || !strings.Contains(nonEscalated.Body.String(), `"parent_notified":false`) {
+		t.Fatalf("structured non-escalated safety=%d %s", nonEscalated.Code, nonEscalated.Body.String())
+	}
+	studentEvent = awaitEventType(t, studentEvents, string(realtime.EventSafetyIntervention))
+	if strings.Contains(string(studentEvent), nonEscalatedInput) {
+		t.Fatalf("structured safety Student realtime exposed child text: %s", studentEvent)
+	}
+	select {
+	case event := <-parentEvents:
+		t.Fatalf("Parent received non-escalated structured safety event: %s", event)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	after := readSafetyBusinessSnapshot(t, ctx, pool, stageSecurity)
+	if before != after || agent.calls != 0 {
+		t.Fatalf("structured safety changed learning state or called model: before=%+v after=%+v calls=%d", before, after, agent.calls)
+	}
+	var incidents, leakedTurns int
+	if err := pool.QueryRow(ctx, `
+SELECT
+  (SELECT count(*)::int FROM minor_safety_incidents WHERE session_id=$1),
+  (SELECT count(*)::int FROM tutor_turns WHERE session_id=$1 AND (message LIKE '%PRIVATE_STRUCTURED_SAFETY_CANARY%' OR message LIKE '%PRIVATE_STRUCTURED_PHONE_CANARY%'))`,
+		session.ID).Scan(&incidents, &leakedTurns); err != nil {
+		t.Fatal(err)
+	}
+	if incidents != 2 || leakedTurns != 0 {
+		t.Fatalf("structured safety incidents=%d leaked_turns=%d", incidents, leakedTurns)
+	}
+}
+
 func readSafetyBusinessSnapshot(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture securityFixture) safetyBusinessSnapshot {
 	t.Helper()
 	var snapshot safetyBusinessSnapshot
@@ -168,9 +268,14 @@ SELECT
   (SELECT count(*) FROM student_skill_states WHERE student_id=$2),
   (SELECT count(*) FROM reward_events WHERE student_id=$2),
   (SELECT count(*) FROM review_queue WHERE student_id=$2),
-  (SELECT count(*) FROM learning_plan_blocks block JOIN learning_plans plan ON plan.id=block.plan_id WHERE plan.student_id=$2)`, fixture.sessionID, fixture.studentID).Scan(
+	  (SELECT count(*) FROM learning_plan_blocks block JOIN learning_plans plan ON plan.id=block.plan_id WHERE plan.student_id=$2),
+	  (SELECT count(*) FROM classroom_stage_attempts WHERE session_id=$1),
+	  (SELECT count(*) FROM classroom_stage_evidence WHERE session_id=$1),
+	  (SELECT count(*) FROM student_activity_days WHERE student_id=$2),
+	  (SELECT COALESCE(max(total_energy),0) FROM student_growth WHERE student_id=$2)`, fixture.sessionID, fixture.studentID).Scan(
 		&snapshot.answers, &snapshot.analyses, &snapshot.turns, &snapshot.skillStates,
-		&snapshot.rewards, &snapshot.reviews, &snapshot.planBlocks,
+		&snapshot.rewards, &snapshot.reviews, &snapshot.planBlocks, &snapshot.stageAttempts,
+		&snapshot.stageEvidence, &snapshot.activityDays, &snapshot.energy,
 	)
 	if err != nil {
 		t.Fatal(err)

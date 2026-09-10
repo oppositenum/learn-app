@@ -24,7 +24,7 @@ import {
   type StudentSessionTurn,
   type TutorAction,
 } from '../api/student'
-import { initialStructuredResponse, isStructuredInteraction, newOperationID, stageIdentity, stageTaskKey } from '../lib/studentInteraction'
+import { initialStructuredResponse, isStructuredInteraction, newOperationID, stageIdentity, stageResponseKey, stageTaskKey } from '../lib/studentInteraction'
 import { useGrowthStore } from './growth'
 
 export type { TutorAction } from '../api/student'
@@ -309,25 +309,32 @@ export const useLearningStore = defineStore('learning', {
 				if (operation === this.operationSequence) this.loading = false
 	      }
 	    },
-	    async submitStageResponse(sessionID: string, response: Record<string, unknown>) {
+		async submitStageResponse(sessionID: string, response: Record<string, unknown>) {
 			const identity = stageIdentity(this.sessionID, this.questionID, this.stageFlow ?? undefined)
 			if (!identity || this.sessionID !== sessionID || this.loading || !this.interaction || !isStructuredInteraction(this.interaction, this.stageFlow ?? undefined)) return false
-			const key = stageTaskKey(sessionID, identity)
-			if (this.structuredDraftKey !== key) return false
-			if (this.stageAnswerOperationKey !== key) {
-				this.stageAnswerOperationKey = key
+			const taskKey = stageTaskKey(sessionID, identity)
+			if (this.structuredDraftKey !== taskKey) return false
+			const operationKey = stageResponseKey(sessionID, identity, response)
+			if (this.stageAnswerOperationKey !== operationKey) {
+				this.stageAnswerOperationKey = operationKey
 				this.stageAnswerOperationID = newOperationID()
 			}
 			const operation = ++this.operationSequence
 			this.loading = true
 			this.error = ''
+			this.safetyNotice = null
 			try {
 				const result = await submitStudentStageResponse(sessionID, identity as StageIdentity, response, this.stageAnswerOperationID)
 				if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
 				if (result.version < this.version) return false
 				this.version = result.version
 				this.tutorAction = result.action
-				if (result.version > this.snapshotVersion) this.timeline.push({ id: `pending-${result.version}-tutor`, actor: 'TUTOR', text: result.message, meta: result.action })
+				if (result.safety) {
+					this.safetyNotice = { ...result.safety, message: result.message }
+					this.structuredDraft = {}
+				} else if (result.version > this.snapshotVersion) {
+					this.timeline.push({ id: `pending-${result.version}-tutor`, actor: 'TUTOR', text: result.message, meta: result.action })
+				}
 				if (result.status) this.applyTiming({ session_id: result.session_id, version: result.version, timing_version: result.timing_version, status: result.status, active_seconds: result.active_seconds ?? this.activeSeconds, current_active_seconds: result.current_active_seconds ?? (result.status === 'ACTIVE' ? this.currentActiveSeconds : 0), timing_observed_at: result.timing_observed_at })
 				if (result.action === 'COMPLETE') {
 					this.timingSequence++
@@ -342,12 +349,20 @@ export const useLearningStore = defineStore('learning', {
 			} catch (error) {
 				if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
 				if (error instanceof ApiError && error.status === 404) this.sessionGone = true
+				if (error instanceof ApiError && error.status === 409) {
+					const reconciled = await this.refreshSession(sessionID)
+					if (reconciled) {
+						this.clearStageOperations()
+						this.error = '课堂状态已更新，请在当前任务继续'
+						return false
+					}
+				}
 				this.error = error instanceof Error ? error.message : '课堂暂时无法提交'
 				return false
 			} finally {
 				if (operation === this.operationSequence) this.loading = false
 			}
-	    },
+		},
 	    async requestSupport(sessionID: string, type: 'HINT' | 'EXPLAIN') {
 			if (this.sessionID !== sessionID || this.loading) return false
 			const operation = ++this.operationSequence

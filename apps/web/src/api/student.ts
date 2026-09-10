@@ -58,6 +58,7 @@ export interface SubmitAnswerResult {
   task_version?: string
   evidence_kind?: 'NONE' | 'ASSISTED' | 'INDEPENDENT'
   stage_completed?: boolean
+	code?: string
 }
 
 export interface PlanBlock { id: string; sequence: number; subject: string; knowledge_point_id: string; minutes: number; mode: string; reason: string; focus: string; original_task_id?: string | null; status: PlanBlockStatus; session_id?: string | null; session_status?: SessionStatus | null }

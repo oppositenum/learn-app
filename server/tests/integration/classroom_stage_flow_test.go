@@ -21,6 +21,7 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/database"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/parent"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 	"github.com/oppositenum/ai-learning-tutor/server/migrations"
 )
@@ -298,6 +299,124 @@ WHERE session_id=$1 AND submitted_stage='ORIGINAL'`, session.ID).Scan(&presented
 	}
 }
 
+func TestFourStageSocraticLimitAndContentExhaustionTerminateSafely(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedCompleteStageFixture(t, ctx, pool)
+	reviewQueueID := uuid.New()
+	if _, err := pool.Exec(ctx, `
+INSERT INTO review_queue(id,student_id,knowledge_point_id,source,due_at)
+VALUES($1,$2,$3,'MASTERY',now())`, reviewQueueID, fixture.security.studentID, fixture.knowledgePointID); err != nil {
+		t.Fatal(err)
+	}
+	hub := realtime.NewHub()
+	studentEvents, stopStudent := hub.Subscribe(fixture.security.studentID.String(), auth.RoleStudent)
+	defer stopStudent()
+	agent := &provenanceTeachingAgent{}
+	service := classroom.NewService(pool, hub, nil, nil).WithTeachingAgent(agent)
+	router := stageRouter(pool, service)
+	session := startStageSession(t, router, fixture)
+	if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET review_queue_id=$2,evidence_form='REVIEW' WHERE id=$1`,
+		session.ID, reviewQueueID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE learning_plan_blocks SET review_queue_id=$2,mode='REVIEW' WHERE id=$1`,
+		fixture.planBlockID, reviewQueueID); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[uuid.UUID]struct{}{session.QuestionID: {}}
+	for wantRound := 1; wantRound <= 3; wantRound++ {
+		current := readStageSession(t, router, fixture.security.studentToken, session.ID)
+		operationID := uuid.New()
+		body := map[string]any{
+			"operation_id": operationID, "stage": current.StageFlow.Stage,
+			"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
+			"response": incorrectStageResponse(t, ctx, pool, current.QuestionID),
+		}
+		response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, body)
+		if response.Code != http.StatusOK {
+			t.Fatalf("failure round %d=%d %s", wantRound, response.Code, response.Body.String())
+		}
+		var result classroom.StageSubmitResult
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.SocraticRound != wantRound {
+			t.Fatalf("failure round result=%+v want=%d", result, wantRound)
+		}
+		if wantRound < 3 {
+			if result.TaskID == nil {
+				t.Fatalf("round %d did not select a task: %+v", wantRound, result)
+			}
+			if _, duplicate := seen[*result.TaskID]; duplicate {
+				t.Fatalf("round %d repeated task %s", wantRound, *result.TaskID)
+			}
+			seen[*result.TaskID] = struct{}{}
+		} else if result.TaskID == nil || *result.TaskID != current.QuestionID || result.Action != "EXPLAIN" {
+			t.Fatalf("third failure did not keep and explain current task: %+v", result)
+		}
+		repeated := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, body)
+		if repeated.Code != http.StatusOK || repeated.Body.String() != response.Body.String() {
+			t.Fatalf("round %d idempotency first=%s repeated=%d/%s", wantRound, response.Body.String(), repeated.Code, repeated.Body.String())
+		}
+	}
+	if len(seen) != 3 || agent.generateCalls != 3 {
+		t.Fatalf("presented=%d feedback_calls=%d", len(seen), agent.generateCalls)
+	}
+
+	current := readStageSession(t, router, fixture.security.studentToken, session.ID)
+	finalOperation := uuid.New()
+	finalBody := map[string]any{
+		"operation_id": finalOperation, "stage": current.StageFlow.Stage,
+		"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
+		"response": correctStageResponse(t, ctx, pool, current.QuestionID),
+	}
+	final := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, finalBody)
+	if final.Code != http.StatusOK {
+		t.Fatalf("content exhaustion=%d %s", final.Code, final.Body.String())
+	}
+	var result classroom.StageSubmitResult
+	if err := json.Unmarshal(final.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Code != "CONTENT_EXHAUSTED" || result.Status != "ABANDONED" || result.EvidenceKind != classroom.StageEvidenceAssisted || result.StageCompleted {
+		t.Fatalf("content exhaustion result=%+v", result)
+	}
+	repeatedFinal := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, finalBody)
+	if repeatedFinal.Code != http.StatusOK || repeatedFinal.Body.String() != final.Body.String() {
+		t.Fatalf("content exhaustion idempotency first=%s repeated=%d/%s", final.Body.String(), repeatedFinal.Code, repeatedFinal.Body.String())
+	}
+
+	var attempts, independentEvidence, rewards, activityDays int
+	var status, blockStatus, reviewStatus string
+	var reviewAttempts int
+	if err := pool.QueryRow(ctx, `
+SELECT
+  (SELECT count(*)::int FROM classroom_stage_attempts WHERE session_id=$1),
+  (SELECT count(*)::int FROM classroom_stage_evidence WHERE session_id=$1 AND authorized_for_mastery),
+  (SELECT count(*)::int FROM reward_events WHERE session_id=$1),
+  (SELECT count(*)::int FROM student_activity_days WHERE student_id=$2),
+  (SELECT status FROM learning_sessions WHERE id=$1),
+  (SELECT status FROM learning_plan_blocks WHERE id=$3),
+  (SELECT status FROM review_queue WHERE id=$4),
+  (SELECT attempts FROM review_queue WHERE id=$4)`,
+		session.ID, fixture.security.studentID, fixture.planBlockID, reviewQueueID).Scan(
+		&attempts, &independentEvidence, &rewards, &activityDays,
+		&status, &blockStatus, &reviewStatus, &reviewAttempts,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 4 || independentEvidence != 0 || rewards != 0 || activityDays != 0 || status != "ABANDONED" || blockStatus != "AVAILABLE" || reviewStatus != "PENDING" || reviewAttempts != 0 {
+		t.Fatalf("terminal state attempts=%d independent=%d rewards=%d activity=%d session=%s block=%s review=%s/%d",
+			attempts, independentEvidence, rewards, activityDays, status, blockStatus, reviewStatus, reviewAttempts)
+	}
+	awaitEventType(t, studentEvents, string(realtime.EventSessionAbandoned))
+}
+
 func TestFourStageContentPreflightAndRuntimeDriftFailClosed(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedPool(t, ctx, testDatabaseURL(t))
@@ -336,6 +455,31 @@ func TestFourStageContentPreflightAndRuntimeDriftFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := startStageSession(t, router, fixture)
+	var driftedCandidateID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+SELECT question_id FROM classroom_stage_tasks
+WHERE lineage_id=$1 AND stage_role='ORIGINAL' AND question_id<>$2
+ORDER BY selection_order LIMIT 1`, fixture.lineageID, session.QuestionID).Scan(&driftedCandidateID); err != nil {
+		t.Fatal(err)
+	}
+	var originalCandidateRule json.RawMessage
+	if err := pool.QueryRow(ctx, `SELECT scoring_rule_private_json FROM classroom_stage_tasks WHERE question_id=$1`, driftedCandidateID).Scan(&originalCandidateRule); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE classroom_stage_tasks SET scoring_rule_private_json='{}' WHERE question_id=$1`, driftedCandidateID); err != nil {
+		t.Fatal(err)
+	}
+	driftedSelection := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, map[string]any{
+		"operation_id": uuid.New(), "stage": session.StageFlow.Stage,
+		"task_id": session.QuestionID, "task_version": session.StageFlow.TaskVersion,
+		"response": incorrectStageResponse(t, ctx, pool, session.QuestionID),
+	})
+	if driftedSelection.Code != http.StatusServiceUnavailable || !strings.Contains(driftedSelection.Body.String(), "CLASSROOM_STAGE_UNAVAILABLE") || strings.Contains(driftedSelection.Body.String(), "CONTENT_EXHAUSTED") {
+		t.Fatalf("drifted candidate selection=%d %s", driftedSelection.Code, driftedSelection.Body.String())
+	}
+	if _, err := pool.Exec(ctx, `UPDATE classroom_stage_tasks SET scoring_rule_private_json=$2 WHERE question_id=$1`, driftedCandidateID, originalCandidateRule); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE questions SET status='QUARANTINED' WHERE id=$1`, session.QuestionID); err != nil {
 		t.Fatal(err)
 	}

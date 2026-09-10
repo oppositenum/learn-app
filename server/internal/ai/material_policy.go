@@ -3,9 +3,12 @@ package ai
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 
+	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 )
 
@@ -13,10 +16,10 @@ const TutorMaterialPolicyVersion = "tutor-number-material-v1"
 
 var ErrTutorMaterialPolicyViolation = errors.New("Tutor output violates the number material policy")
 
-func enforceTutorMaterialPolicy(question string, turn TutorTurn) error {
+func enforceTutorMaterialPolicy(question content.QuestionPublic, turn TutorTurn) error {
 	switch turn.Action {
 	case tutor.StateProbe, tutor.StateHint, tutor.StateScaffold, tutor.StateAnalogy:
-		allowed := numericMaterial(question)
+		allowed := numericMaterial(questionMaterialText(question))
 		for token := range numericMaterial(turnText(turn)) {
 			if _, ok := allowed[token]; !ok {
 				return fmt.Errorf("%w: action %s introduced numeric material", ErrTutorMaterialPolicyViolation, turn.Action)
@@ -24,6 +27,33 @@ func enforceTutorMaterialPolicy(question string, turn TutorTurn) error {
 		}
 	}
 	return nil
+}
+
+func questionMaterialText(question content.QuestionPublic) string {
+	parts := []string{question.Prompt}
+	scene, ok := studentinteraction.Parse(question.Scene, question.InputSchema)
+	if !ok {
+		return strings.Join(parts, "\n")
+	}
+	parts = append(parts, scene.AccessibleFallback)
+	appendLabels := func(items []studentinteraction.Item) {
+		for _, item := range items {
+			parts = append(parts, item.Label)
+		}
+	}
+	appendLabels(scene.Options)
+	appendLabels(scene.Items)
+	appendLabels(scene.Left)
+	appendLabels(scene.Right)
+	appendLabels(scene.Groups)
+	appendLabels(scene.Slots)
+	if scene.NumberLine != nil {
+		parts = append(parts, scene.NumberLine.Label,
+			strconv.FormatFloat(scene.NumberLine.Min, 'g', -1, 64),
+			strconv.FormatFloat(scene.NumberLine.Max, 'g', -1, 64),
+			strconv.FormatFloat(scene.NumberLine.Step, 'g', -1, 64))
+	}
+	return strings.Join(parts, "\n")
 }
 
 func ensureOriginalTaskVerification(turn TutorTurn) TutorTurn {
@@ -78,9 +108,8 @@ func numericMaterial(value string) map[string]struct{} {
 				index++
 			}
 			token := string(runes[start:index])
-			// Single Chinese number characters occur frequently in prose such as
-			// "第一步". Multi-character forms still catch substituted values.
-			if len([]rune(token)) > 1 {
+			// Ordinal prose describes sequence rather than task material.
+			if start == 0 || runes[start-1] != '第' {
 				result[token] = struct{}{}
 			}
 			continue
@@ -101,5 +130,5 @@ func normalizeDigit(value rune) rune {
 }
 
 func isChineseNumberRune(value rune) bool {
-	return strings.ContainsRune("零〇一二两三四五六七八九十百千万亿点分之半", value)
+	return strings.ContainsRune("零〇一二两三四五六七八九十百千万亿点半", value)
 }

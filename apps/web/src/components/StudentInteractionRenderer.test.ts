@@ -64,6 +64,8 @@ test('renders number-line and fill contracts with labelled native inputs', async
   const numberWrapper = mount(StudentInteractionRenderer, { props: { interaction: numberLine, modelValue: { value: -1 } } })
   await numberWrapper.get('input[type="number"]').setValue('0.5')
   expect(latest(numberWrapper)).toEqual({ value: 0.5 })
+	await numberWrapper.get('input[type="number"]').setValue('')
+	expect(latest(numberWrapper)).toEqual({})
 
   const fill = material({ version: 'student-interaction-v1', renderer: 'FILL_BLANKS', accessible_fallback: '填写两个空格。', slots: items })
   const fillWrapper = mount(StudentInteractionRenderer, { props: { interaction: fill, modelValue: { values: [] } } })
