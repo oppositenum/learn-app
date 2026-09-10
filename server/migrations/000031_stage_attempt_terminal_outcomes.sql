@@ -26,7 +26,12 @@ ALTER TABLE classroom_stage_attempts
     ADD COLUMN response_action text;
 
 UPDATE classroom_stage_attempts
-SET response_action=response_stage;
+SET response_action=CASE
+    WHEN attempt_kind='HELP' THEN support_type
+    WHEN response_code='SOCRATIC_LIMIT_EXPLAINED' THEN 'EXPLAIN'
+    WHEN deterministic_result IN ('INCORRECT','INDETERMINATE') THEN 'PROBE'
+    ELSE response_stage
+END;
 
 ALTER TABLE classroom_stage_attempts
     ALTER COLUMN response_action SET NOT NULL,

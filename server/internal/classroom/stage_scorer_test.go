@@ -109,6 +109,12 @@ func TestStageFillSafetyClassificationScansOnlyChildAuthoredValues(t *testing.T)
 	if classification := classifyStageResponse(task, json.RawMessage(`{"values":[{"slot_id":"我不想活了","value":"普通内容"}]}`)); classification.Matched {
 		t.Fatal("slot identifier was incorrectly classified as child-authored text")
 	}
+	if classification := classifyStageResponse(task, json.RawMessage(`{"values":[{"slot_id":"slot","value":"我不想活了","future_field":"ignored by safety only"}],"future_envelope":true}`)); !classification.Matched {
+		t.Fatal("unknown response fields bypassed child-authored value safety classification")
+	}
+	if got := scoreStageTask(task, json.RawMessage(`{"values":[{"slot_id":"slot","value":"普通内容","future_field":"rejected by scorer"}]}`)); got != StageScoreIndeterminate {
+		t.Fatalf("deterministic scorer accepted unknown response field: %s", got)
+	}
 }
 
 func scorerTestTask(t *testing.T, code subject.Code, scene studentinteraction.Scene, ruleVersion, rule string) stageTask {

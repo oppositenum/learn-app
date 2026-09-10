@@ -74,6 +74,33 @@ func TestTutorMaterialPolicyChecksSingleChineseNumeralsAndExemptsOrdinals(t *tes
 	}
 }
 
+func TestTutorMaterialPolicyAllowsOrdinaryChineseProse(t *testing.T) {
+	question := materialPolicyQuestion(t, "请根据题目继续思考。", nil)
+	for _, message := range []string{
+		"我们一起检查已知条件。",
+		"先看这个知识点和题目的关系。",
+		"想一想哪个条件还没用到。",
+	} {
+		if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateProbe, Message: message}); err != nil {
+			t.Fatalf("ordinary prose %q was rejected: %v", message, err)
+		}
+	}
+}
+
+func TestTutorMaterialPolicyRecognizesChineseQuantitiesAndDecimals(t *testing.T) {
+	question := materialPolicyQuestion(t, "用三个容器装三点五升水。", nil)
+	for _, message := range []string{"先找三个容器。", "先看三点五升表示什么。"} {
+		if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateHint, Message: message}); err != nil {
+			t.Fatalf("original Chinese quantity %q was rejected: %v", message, err)
+		}
+	}
+	for _, message := range []string{"先找五个容器。", "先看三点六升表示什么。"} {
+		if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateHint, Message: message}); !errors.Is(err, ErrTutorMaterialPolicyViolation) {
+			t.Fatalf("new Chinese quantity %q error=%v", message, err)
+		}
+	}
+}
+
 func TestExplanationAlwaysReturnsToOriginalTask(t *testing.T) {
 	turn := ensureOriginalTaskVerification(TutorTurn{Action: tutor.StateExplain, Message: "先看一个平行例子。"})
 	if turn.Message != "先看一个平行例子。 现在回到原题，请你再独立试一次。" {

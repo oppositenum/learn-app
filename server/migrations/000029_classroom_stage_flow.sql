@@ -102,7 +102,7 @@ CREATE UNIQUE INDEX classroom_stage_one_task_evidence
 ON classroom_stage_evidence(session_id, stage_role, attempt_id);
 
 COMMENT ON TABLE classroom_stage_attempts IS
-    'Minimal deterministic stage outcomes. Structured Student responses and model prose are not stored.';
+    'Minimal deterministic stage outcomes. Response bodies and model prose are absent; request_digest is a response-derived operation fingerprint retained for exact idempotency conflict detection.';
 
 COMMENT ON TABLE classroom_stage_evidence IS
     'Task-derived evidence provenance. Only independent deterministic stage completions authorize mastery counters.';

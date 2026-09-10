@@ -208,14 +208,36 @@ WHERE lineage_id=$1 AND stage_role='ORIGINAL' AND selection_order=1`, fixture.li
 	before := readSafetyBusinessSnapshot(t, ctx, pool, stageSecurity)
 
 	escalatedInput := "我不想活了，PRIVATE_STRUCTURED_SAFETY_CANARY"
-	request := func(value string) *httptest.ResponseRecorder {
-		return performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, map[string]any{
-			"operation_id": uuid.New(), "stage": session.StageFlow.Stage,
-			"task_id": session.QuestionID, "task_version": session.StageFlow.TaskVersion,
+	requestBody := func(operationID, taskID uuid.UUID, value string) map[string]any {
+		return map[string]any{
+			"operation_id": operationID, "stage": session.StageFlow.Stage,
+			"task_id": taskID, "task_version": session.StageFlow.TaskVersion,
 			"response": map[string]any{"values": []map[string]string{{"slot_id": "slot-1", "value": value}}},
+		}
+	}
+	request := func(body map[string]any) *httptest.ResponseRecorder {
+		return performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, map[string]any{
+			"operation_id": body["operation_id"], "stage": body["stage"],
+			"task_id": body["task_id"], "task_version": body["task_version"],
+			"response": body["response"],
 		})
 	}
-	escalated := request(escalatedInput)
+	assertNoRealtime := func() {
+		t.Helper()
+		select {
+		case event := <-studentEvents:
+			t.Fatalf("idempotent safety replay republished Student event: %s", event)
+		case <-time.After(30 * time.Millisecond):
+		}
+		select {
+		case event := <-parentEvents:
+			t.Fatalf("idempotent safety replay republished Parent event: %s", event)
+		case <-time.After(30 * time.Millisecond):
+		}
+	}
+	escalatedOperation := uuid.New()
+	escalatedBody := requestBody(escalatedOperation, session.QuestionID, escalatedInput)
+	escalated := request(escalatedBody)
 	if escalated.Code != http.StatusOK || strings.Contains(escalated.Body.String(), escalatedInput) || !strings.Contains(escalated.Body.String(), `"category":"SELF_HARM"`) {
 		t.Fatalf("structured escalated safety=%d %s", escalated.Code, escalated.Body.String())
 	}
@@ -224,9 +246,25 @@ WHERE lineage_id=$1 AND stage_role='ORIGINAL' AND selection_order=1`, fixture.li
 	if strings.Contains(string(studentEvent), escalatedInput) || strings.Contains(string(parentEvent), escalatedInput) {
 		t.Fatalf("structured safety realtime exposed child text: student=%s parent=%s", studentEvent, parentEvent)
 	}
+	replayed := request(escalatedBody)
+	if replayed.Code != http.StatusOK || replayed.Body.String() != escalated.Body.String() {
+		t.Fatalf("structured safety replay first=%d/%s replay=%d/%s", escalated.Code, escalated.Body.String(), replayed.Code, replayed.Body.String())
+	}
+	assertNoRealtime()
+
+	changedBodyReplay := request(requestBody(escalatedOperation, session.QuestionID, "我的手机号是 13812345678"))
+	if changedBodyReplay.Code != http.StatusOK || changedBodyReplay.Body.String() != escalated.Body.String() {
+		t.Fatalf("privacy-preserving first-write replay=%d/%s", changedBodyReplay.Code, changedBodyReplay.Body.String())
+	}
+	assertNoRealtime()
+	changedIdentity := request(requestBody(escalatedOperation, uuid.New(), escalatedInput))
+	if changedIdentity.Code != http.StatusConflict {
+		t.Fatalf("changed public safety identity=%d %s", changedIdentity.Code, changedIdentity.Body.String())
+	}
+	assertNoRealtime()
 
 	nonEscalatedInput := "我的手机号是 13812345678，PRIVATE_STRUCTURED_PHONE_CANARY"
-	nonEscalated := request(nonEscalatedInput)
+	nonEscalated := request(requestBody(uuid.New(), session.QuestionID, nonEscalatedInput))
 	if nonEscalated.Code != http.StatusOK || strings.Contains(nonEscalated.Body.String(), nonEscalatedInput) || !strings.Contains(nonEscalated.Body.String(), `"parent_notified":false`) {
 		t.Fatalf("structured non-escalated safety=%d %s", nonEscalated.Code, nonEscalated.Body.String())
 	}
@@ -244,16 +282,25 @@ WHERE lineage_id=$1 AND stage_role='ORIGINAL' AND selection_order=1`, fixture.li
 	if before != after || agent.calls != 0 {
 		t.Fatalf("structured safety changed learning state or called model: before=%+v after=%+v calls=%d", before, after, agent.calls)
 	}
-	var incidents, leakedTurns int
+	var incidents, safetyOperations, safetyEvents, leakedTurns, forbiddenColumns int
 	if err := pool.QueryRow(ctx, `
 SELECT
   (SELECT count(*)::int FROM minor_safety_incidents WHERE session_id=$1),
-  (SELECT count(*)::int FROM tutor_turns WHERE session_id=$1 AND (message LIKE '%PRIVATE_STRUCTURED_SAFETY_CANARY%' OR message LIKE '%PRIVATE_STRUCTURED_PHONE_CANARY%'))`,
-		session.ID).Scan(&incidents, &leakedTurns); err != nil {
+	  (SELECT count(*)::int FROM classroom_stage_safety_operations WHERE session_id=$1),
+	  (SELECT count(*)::int FROM tutor_events WHERE session_id=$1 AND type='SAFETY_INTERVENTION'),
+	  (SELECT count(*)::int FROM tutor_turns WHERE session_id=$1 AND (message LIKE '%PRIVATE_STRUCTURED_SAFETY_CANARY%' OR message LIKE '%PRIVATE_STRUCTURED_PHONE_CANARY%')),
+	  (SELECT count(*)::int FROM information_schema.columns
+	   WHERE table_schema=current_schema() AND table_name='classroom_stage_safety_operations'
+	     AND (column_name ILIKE '%answer%' OR column_name ILIKE '%digest%' OR column_name ILIKE '%hash%'
+	       OR column_name ILIKE '%body%' OR column_name ILIKE '%reason%' OR column_name ILIKE '%excerpt%'
+	       OR column_name ILIKE '%input%' OR column_name ILIKE '%text%' OR column_name ILIKE '%content%'
+	       OR column_name ILIKE '%value%' OR column_name ILIKE '%model%' OR column_name ILIKE '%provider%'))`,
+		session.ID).Scan(&incidents, &safetyOperations, &safetyEvents, &leakedTurns, &forbiddenColumns); err != nil {
 		t.Fatal(err)
 	}
-	if incidents != 2 || leakedTurns != 0 {
-		t.Fatalf("structured safety incidents=%d leaked_turns=%d", incidents, leakedTurns)
+	if incidents != 2 || safetyOperations != 2 || safetyEvents != 2 || leakedTurns != 0 || forbiddenColumns != 0 {
+		t.Fatalf("structured safety incidents=%d operations=%d events=%d leaked_turns=%d forbidden_columns=%d",
+			incidents, safetyOperations, safetyEvents, leakedTurns, forbiddenColumns)
 	}
 }
 

@@ -403,7 +403,7 @@ func (service *Service) handleSafetyClassification(ctx context.Context, studentU
 			return err
 		}
 		var notice *SafetyNotice
-		event, notice, err = recordSafetyIntervention(ctx, tx, row.studentID, sessionID, eventSequence, classification, now)
+		_, event, notice, err = recordSafetyIntervention(ctx, tx, row.studentID, sessionID, eventSequence, classification, now)
 		if err != nil {
 			return err
 		}
@@ -427,14 +427,15 @@ func recordSafetyIntervention(
 	eventSequence int64,
 	classification safety.Classification,
 	now time.Time,
-) (realtime.Event, *SafetyNotice, error) {
+) (uuid.UUID, realtime.Event, *SafetyNotice, error) {
+	incidentID := uuid.New()
 	if _, err := tx.Exec(ctx, `
 INSERT INTO minor_safety_incidents(
     id,student_id,session_id,policy_version,category,severity,fixed_action,parent_escalated,created_at
 ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		uuid.New(), studentID, sessionID, safety.PolicyVersion, classification.Category,
+		incidentID, studentID, sessionID, safety.PolicyVersion, classification.Category,
 		classification.Severity, classification.Action, classification.EscalateToParent, now); err != nil {
-		return realtime.Event{}, nil, err
+		return uuid.Nil, realtime.Event{}, nil, err
 	}
 	studentPayload, _ := json.Marshal(map[string]any{
 		"policy_version":  safety.PolicyVersion,
@@ -457,9 +458,9 @@ INSERT INTO minor_safety_incidents(
 	event := makeEvent(studentID, sessionID, eventSequence, realtime.EventSafetyIntervention, studentPayload, parentPayload, now)
 	event.ParentSuppressed = !classification.EscalateToParent
 	if err := insertEvent(ctx, tx, event); err != nil {
-		return realtime.Event{}, nil, err
+		return uuid.Nil, realtime.Event{}, nil, err
 	}
-	return event, &SafetyNotice{
+	return incidentID, event, &SafetyNotice{
 		PolicyVersion:  safety.PolicyVersion,
 		Category:       classification.Category,
 		Severity:       classification.Severity,

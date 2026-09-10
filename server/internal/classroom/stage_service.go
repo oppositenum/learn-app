@@ -69,6 +69,25 @@ type storedStageAttempt struct {
 	sessionCompleted    bool
 }
 
+type storedStageSafetyOperation struct {
+	attemptKind      StageAttemptKind
+	submittedStage   Stage
+	questionID       uuid.UUID
+	questionVersion  string
+	policyVersion    string
+	category         safety.Category
+	severity         safety.Severity
+	fixedAction      safety.Action
+	parentEscalated  bool
+	responseVersion  int64
+	responseTiming   int64
+	responseSocratic int
+	responseStatus   string
+	activeSeconds    int
+	currentSeconds   int
+	observedAt       time.Time
+}
+
 func loadReadyStageStartTask(ctx context.Context, tx pgx.Tx, knowledgePointID uuid.UUID) (stageTask, bool, error) {
 	rows, err := tx.Query(ctx, `
 SELECT lineage.id,stage_task.question_id,lineage.knowledge_point_id,subject.code,
@@ -177,6 +196,11 @@ func (service *Service) SubmitStage(ctx context.Context, studentUserID uuid.UUID
 	if err := validateStageSubmitRequest(request); err != nil {
 		return StageSubmitResult{}, err
 	}
+	if stored, found, err := service.loadStoredStageSafetyOperation(ctx, studentUserID, request.SessionID, request.OperationID); err != nil {
+		return StageSubmitResult{}, err
+	} else if found {
+		return storedStageSafetyResult(request, stored)
+	}
 	digest, err := stageRequestDigest(request)
 	if err != nil {
 		return StageSubmitResult{}, err
@@ -191,6 +215,9 @@ func (service *Service) SubmitStage(ctx context.Context, studentUserID uuid.UUID
 	}
 	operationToken, err := service.beginSessionOperation(ctx, studentUserID, request.SessionID)
 	if err != nil {
+		if stored, found, loadErr := service.loadStoredStageSafetyOperation(ctx, studentUserID, request.SessionID, request.OperationID); loadErr == nil && found {
+			return storedStageSafetyResult(request, stored)
+		}
 		if stored, found, loadErr := service.loadStoredStageAttempt(ctx, studentUserID, request.SessionID, request.OperationID); loadErr == nil && found {
 			return storedStageResult(request.SessionID, digest, stored)
 		}
@@ -428,7 +455,7 @@ func classifyStageResponse(task stageTask, response json.RawMessage) safety.Clas
 		return safety.Classification{}
 	}
 	var submitted fillResponse
-	if !strictJSONDecode(response, &submitted) {
+	if err := json.Unmarshal(response, &submitted); err != nil {
 		return safety.Classification{}
 	}
 	for _, value := range submitted.Values {
@@ -448,12 +475,19 @@ func (service *Service) handleStageSafetyClassification(
 ) (StageSubmitResult, error) {
 	var result StageSubmitResult
 	var event realtime.Event
+	publish := false
 	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
 		if err := auth.LockPrincipalSession(ctx, tx, studentUserID); err != nil {
 			return err
 		}
 		snapshot, err := queryStageSnapshot(ctx, tx, studentUserID, request.SessionID, true)
 		if err != nil {
+			return err
+		}
+		if stored, found, err := loadStoredStageSafetyOperation(ctx, tx, studentUserID, request.SessionID, request.OperationID); err != nil {
+			return err
+		} else if found {
+			result, err = storedStageSafetyResult(request, stored)
 			return err
 		}
 		if snapshot.stageVersion != prepared.stageVersion || snapshot.learningVersion != prepared.learningVersion {
@@ -468,12 +502,13 @@ func (service *Service) handleStageSafetyClassification(
 			return err
 		}
 		var notice *SafetyNotice
-		event, notice, err = recordSafetyIntervention(
+		incidentID, recordedEvent, notice, err := recordSafetyIntervention(
 			ctx, tx, snapshot.studentID, snapshot.sessionID, eventSequence, classification, now,
 		)
 		if err != nil {
 			return err
 		}
+		event = recordedEvent
 		activeSeconds := checkpointTotal(lifecycleRow{
 			status: snapshot.status, startedAt: snapshot.startedAt,
 			accumulatedSeconds: snapshot.accumulatedSeconds, lastResumedAt: snapshot.lastResumedAt,
@@ -492,12 +527,16 @@ func (service *Service) handleStageSafetyClassification(
 			ActiveSeconds: activeSeconds, CurrentSeconds: currentSeconds, TimingAt: now,
 			Safety: notice,
 		}
+		if err := insertStageSafetyOperation(ctx, tx, incidentID, request, result, now); err != nil {
+			return err
+		}
+		publish = true
 		return nil
 	})
 	if err != nil {
 		return StageSubmitResult{}, err
 	}
-	if service.hub != nil {
+	if publish && service.hub != nil {
 		_ = service.hub.Publish(event)
 	}
 	return result, nil
@@ -1049,8 +1088,86 @@ INSERT INTO classroom_stage_attempts(
 	return err
 }
 
+func insertStageSafetyOperation(ctx context.Context, tx pgx.Tx, incidentID uuid.UUID, request StageSubmitRequest, result StageSubmitResult, now time.Time) error {
+	_, err := tx.Exec(ctx, `
+INSERT INTO classroom_stage_safety_operations(
+    session_id,operation_id,incident_id,attempt_kind,submitted_stage,question_id,
+    question_version,response_session_version,response_timing_version,
+    response_socratic_round,response_status,response_active_seconds,
+    response_current_seconds,response_observed_at,created_at
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		request.SessionID, request.OperationID, incidentID, request.Kind, request.Stage,
+		request.TaskID, request.TaskVersion, result.Version, result.TimingVersion,
+		result.SocraticRound, result.Status, result.ActiveSeconds, result.CurrentSeconds,
+		result.TimingAt, now)
+	return err
+}
+
 type stageAttemptQueryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (service *Service) loadStoredStageSafetyOperation(ctx context.Context, userID, sessionID, operationID uuid.UUID) (storedStageSafetyOperation, bool, error) {
+	return loadStoredStageSafetyOperation(ctx, service.pool, userID, sessionID, operationID)
+}
+
+func loadStoredStageSafetyOperation(ctx context.Context, db stageAttemptQueryer, userID, sessionID, operationID uuid.UUID) (storedStageSafetyOperation, bool, error) {
+	var stored storedStageSafetyOperation
+	err := db.QueryRow(ctx, `
+SELECT operation.attempt_kind,operation.submitted_stage,operation.question_id,
+       operation.question_version,incident.policy_version,incident.category,
+       incident.severity,incident.fixed_action,incident.parent_escalated,
+       operation.response_session_version,operation.response_timing_version,
+       operation.response_socratic_round,operation.response_status,
+       operation.response_active_seconds,operation.response_current_seconds,
+       operation.response_observed_at
+FROM classroom_stage_safety_operations operation
+JOIN minor_safety_incidents incident ON incident.id=operation.incident_id
+JOIN learning_sessions session ON session.id=operation.session_id
+JOIN students student ON student.id=session.student_id
+WHERE operation.session_id=$1 AND operation.operation_id=$2 AND student.user_id=$3`,
+		sessionID, operationID, userID).Scan(
+		&stored.attemptKind, &stored.submittedStage, &stored.questionID,
+		&stored.questionVersion, &stored.policyVersion, &stored.category,
+		&stored.severity, &stored.fixedAction, &stored.parentEscalated,
+		&stored.responseVersion, &stored.responseTiming, &stored.responseSocratic,
+		&stored.responseStatus, &stored.activeSeconds, &stored.currentSeconds,
+		&stored.observedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storedStageSafetyOperation{}, false, nil
+	}
+	if err != nil {
+		return storedStageSafetyOperation{}, false, err
+	}
+	return stored, true, nil
+}
+
+func storedStageSafetyResult(request StageSubmitRequest, stored storedStageSafetyOperation) (StageSubmitResult, error) {
+	if request.Kind != stored.attemptKind || request.Stage != stored.submittedStage ||
+		request.TaskID != stored.questionID || request.TaskVersion != stored.questionVersion {
+		return StageSubmitResult{}, ErrStageOperationConflict
+	}
+	classification, ok := safety.FixedClassification(stored.policyVersion, stored.category)
+	if !ok || classification.Severity != stored.severity || classification.Action != stored.fixedAction ||
+		classification.EscalateToParent != stored.parentEscalated {
+		return StageSubmitResult{}, errors.New("stored stage safety classification is inconsistent")
+	}
+	taskID := stored.questionID
+	return StageSubmitResult{
+		SessionID: request.SessionID, Version: stored.responseVersion,
+		TimingVersion: stored.responseTiming, Action: tutor.State(stored.submittedStage),
+		Stage: stored.submittedStage, TaskID: &taskID, TaskVersion: stored.questionVersion,
+		EvidenceKind: StageEvidenceNone, Message: classification.StudentMessage,
+		SocraticRound: stored.responseSocratic, Status: stored.responseStatus,
+		ActiveSeconds: stored.activeSeconds, CurrentSeconds: stored.currentSeconds,
+		TimingAt: stored.observedAt,
+		Safety: &SafetyNotice{
+			PolicyVersion: stored.policyVersion, Category: stored.category,
+			Severity: stored.severity, FixedAction: stored.fixedAction,
+			ParentNotified: stored.parentEscalated,
+		},
+	}, nil
 }
 
 func (service *Service) loadStoredStageAttempt(ctx context.Context, userID, sessionID, operationID uuid.UUID) (storedStageAttempt, bool, error) {

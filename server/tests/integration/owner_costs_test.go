@@ -20,7 +20,7 @@ import (
 
 func TestOwnerCostReportFiltersAndSummary(t *testing.T) {
 	ctx := context.Background()
-	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	pool := isolatedPoolWithTimezone(t, ctx, testDatabaseURL(t), "UTC")
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
 		t.Fatal(err)
 	}
@@ -55,12 +55,17 @@ VALUES($1,'openai','strong-model',now()-interval '1 day',1,0.5,2,'STRONG'),
 	if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET status='COMPLETED' WHERE id=$1`, fixture.sessionID); err != nil {
 		t.Fatal(err)
 	}
+	includedAt := time.Date(2042, 2, 1, 16, 30, 0, 0, time.UTC)
+	includedLater := includedAt.Add(time.Hour)
+	excludedAt := time.Date(2042, 2, 2, 16, 30, 0, 0, time.UTC)
 	if _, err := pool.Exec(ctx, `
 INSERT INTO ai_usage_records(request_id,student_id,session_id,provider,model,purpose,input_tokens,cached_input_tokens,output_tokens,audio_input_seconds,audio_output_seconds,estimated_cost_usd,price_catalog_id,created_at)
 VALUES
-('cost-a',$1,$2,'openai','strong-model','ANSWER_ANALYSIS',100,20,50,0,0,0.300000000,$4,current_date+interval '12 hours'),
-('cost-b',$1,$2,'openai','standard-model','TTS_EXPLANATION',50,0,50,0,8,0.200000000,$5,current_date+interval '13 hours'),
-('cost-c',$3,$6,'openai','standard-model','STT_TRANSCRIPTION',25,0,25,5,0,0.500000000,$5,current_date-interval '1 day'+interval '12 hours')`, fixture.studentID, fixture.sessionID, otherStudent, strongPrice, standardPrice, otherSession); err != nil {
+('cost-a',$1,$2,'openai','strong-model','ANSWER_ANALYSIS',100,20,50,0,0,0.300000000,$4,$7),
+('cost-b',$1,$2,'openai','standard-model','TTS_EXPLANATION',50,0,50,0,8,0.200000000,$5,$8),
+('cost-c',$3,$6,'openai','standard-model','STT_TRANSCRIPTION',25,0,25,5,0,0.500000000,$5,$9)`,
+		fixture.studentID, fixture.sessionID, otherStudent, strongPrice, standardPrice, otherSession,
+		includedAt, includedLater, excludedAt); err != nil {
 		t.Fatal(err)
 	}
 	var knowledgePointID uuid.UUID
@@ -73,10 +78,7 @@ VALUES
 
 	service := classroom.NewService(pool, nil, nil, nil)
 	router := api.NewRouter(api.Dependencies{Authenticate: auth.NewSessionAuthenticator(pool).Middleware, Classroom: classroom.NewHandler(service, pool, parent.NewRepository(pool))})
-	var today string
-	if err := pool.QueryRow(ctx, `SELECT current_date::text`).Scan(&today); err != nil {
-		t.Fatal(err)
-	}
+	const today = "2042-02-02"
 	filters := []struct {
 		name, query  string
 		wantRequests int64
@@ -98,7 +100,8 @@ VALUES
 			}
 			var report struct {
 				Records []struct {
-					Requests int64 `json:"requests"`
+					Date     string `json:"date"`
+					Requests int64  `json:"requests"`
 				} `json:"records"`
 				Summary map[string]string `json:"summary"`
 			}
@@ -111,6 +114,13 @@ VALUES
 			}
 			if requests != test.wantRequests || report.Summary["total_cost_usd"] != test.wantCost {
 				t.Fatalf("requests=%d cost=%s report=%s", requests, report.Summary["total_cost_usd"], response.Body.String())
+			}
+			if test.name == "date" {
+				for _, record := range report.Records {
+					if record.Date != today {
+						t.Fatalf("Shanghai report date=%q want=%q", record.Date, today)
+					}
+				}
 			}
 			if test.name == "combined" {
 				assertCostSummary(t, report.Summary)

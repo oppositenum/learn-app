@@ -419,6 +419,7 @@ func assertLegacySchemaUnchanged(t *testing.T, ctx context.Context, pool *pgxpoo
 		"classroom_stage_sessions",
 		"classroom_stage_attempts",
 		"classroom_stage_evidence",
+		"classroom_stage_safety_operations",
 		"learning_effect_events",
 		"ai_request_outcomes",
 	})

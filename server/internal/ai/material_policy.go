@@ -102,14 +102,22 @@ func numericMaterial(value string) map[string]struct{} {
 			result[token.String()] = struct{}{}
 			continue
 		}
-		if isChineseNumberRune(current) {
+		if isChineseNumeralRune(current) {
 			start := index
-			for index < len(runes) && isChineseNumberRune(runes[index]) {
-				index++
+			for index < len(runes) {
+				if isChineseNumeralRune(runes[index]) {
+					index++
+					continue
+				}
+				if runes[index] == '点' && index > start && index+1 < len(runes) && isChineseNumeralRune(runes[index+1]) {
+					index++
+					continue
+				}
+				break
 			}
 			token := string(runes[start:index])
 			// Ordinal prose describes sequence rather than task material.
-			if start == 0 || runes[start-1] != '第' {
+			if (start == 0 || runes[start-1] != '第') && chineseNumeralHasMaterialContext(runes, start, index) {
 				result[token] = struct{}{}
 			}
 			continue
@@ -129,6 +137,32 @@ func normalizeDigit(value rune) rune {
 	return unicode.ToLower(value)
 }
 
-func isChineseNumberRune(value rune) bool {
-	return strings.ContainsRune("零〇一二两三四五六七八九十百千万亿点半", value)
+func isChineseNumeralRune(value rune) bool {
+	return strings.ContainsRune("零〇一二两三四五六七八九十百千万亿半", value)
+}
+
+func chineseNumeralHasMaterialContext(runes []rune, start, end int) bool {
+	if end-start > 1 || strings.ContainsRune(string(runes[start:end]), '点') {
+		return true
+	}
+	if end < len(runes) && strings.ContainsRune("个只支盒杯元角分毫厘米克斤吨秒时天周月年次道题人本张页辆件份组排行列步倍层段颗朵条", runes[end]) {
+		return true
+	}
+	if adjacentToNumericOperator(runes, start, end) {
+		return true
+	}
+	prefixStart := max(0, start-6)
+	prefix := string(runes[prefixStart:start])
+	for _, cue := range []string{"数字", "数值", "数量", "等于", "读作", "写作", "标出", "找到", "选择", "计算"} {
+		if strings.HasSuffix(prefix, cue) {
+			return true
+		}
+	}
+	return start == 0 && end == len(runes)
+}
+
+func adjacentToNumericOperator(runes []rune, start, end int) bool {
+	const operators = "+-−×÷=<>%/＋－＝＜＞％加减乘除比和"
+	return start > 0 && strings.ContainsRune(operators, runes[start-1]) ||
+		end < len(runes) && strings.ContainsRune(operators, runes[end])
 }

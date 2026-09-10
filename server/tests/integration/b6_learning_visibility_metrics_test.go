@@ -432,14 +432,17 @@ WHERE question.id=$1`, fixture.releasedQuestionID).Scan(&subjectID, &knowledgePo
 	}
 	included := time.Date(2042, 2, 1, 16, 30, 0, 0, time.UTC)
 	excluded := time.Date(2042, 2, 2, 16, 30, 0, 0, time.UTC)
-	for _, occurredAt := range []time.Time{included, excluded} {
+	for _, item := range []struct {
+		occurredAt time.Time
+		outcome    string
+	}{{included, "CORRECT"}, {excluded, "INCORRECT"}} {
 		if _, err := pool.Exec(ctx, `
 INSERT INTO learning_effect_events(
     id,student_id,session_id,subject_id,knowledge_point_id,question_id,event_type,
     source_kind,source_id,outcome,classroom_state,evidence_form,assistance_level,occurred_at
-) VALUES($1,$2,$3,$4,$5,$6,'TASK_ATTEMPT','ANSWER_ANALYSIS',$7,'CORRECT','VARIANT','VARIANT',0,$8)`,
+) VALUES($1,$2,$3,$4,$5,$6,'TASK_ATTEMPT','ANSWER_ANALYSIS',$7,$8,'VARIANT','VARIANT',0,$9)`,
 			uuid.New(), fixture.studentID, fixture.sessionID, subjectID, knowledgePointID,
-			fixture.releasedQuestionID, uuid.New(), occurredAt); err != nil {
+			fixture.releasedQuestionID, uuid.New(), item.outcome, item.occurredAt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -468,11 +471,16 @@ VALUES('shanghai-date-included',$1,$2,'openai','test-model','ANSWER_ANALYSIS','S
 			Requests  int `json:"requests"`
 			Anomalies int `json:"anomalies"`
 		} `json:"ai_anomaly"`
+		Transfer struct {
+			Correct  int `json:"correct"`
+			Attempts int `json:"attempts"`
+		} `json:"transfer_accuracy"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Share.StudentEvents != 1 || payload.AI.Requests != 1 || payload.AI.Anomalies != 0 {
+	if payload.Share.StudentEvents != 1 || payload.AI.Requests != 1 || payload.AI.Anomalies != 0 ||
+		payload.Transfer.Correct != 1 || payload.Transfer.Attempts != 1 {
 		t.Fatalf("Shanghai date boundary report=%s", response.Body.String())
 	}
 }

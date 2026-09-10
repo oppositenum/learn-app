@@ -568,11 +568,12 @@ func (handler *Handler) OwnerCosts(writer http.ResponseWriter, request *http.Req
 	}
 	subject, model, purpose := request.URL.Query().Get("subject"), request.URL.Query().Get("model"), request.URL.Query().Get("purpose")
 	filter := ` FROM ai_usage_records aur LEFT JOIN learning_sessions ls ON ls.id=aur.session_id LEFT JOIN subjects sub ON sub.id=ls.subject_id
-WHERE ($1::uuid IS NULL OR aur.student_id=$1) AND ($2='' OR sub.code=$2)
-AND ($3::date IS NULL OR aur.created_at::date >= $3) AND ($4::date IS NULL OR aur.created_at::date <= $4)
-AND ($5='' OR aur.model=$5) AND ($6='' OR aur.purpose=$6) AND ($7::uuid IS NULL OR aur.session_id=$7)`
+	WHERE ($1::uuid IS NULL OR aur.student_id=$1) AND ($2='' OR sub.code=$2)
+	AND ($3::date IS NULL OR (aur.created_at AT TIME ZONE 'Asia/Shanghai')::date >= $3)
+	AND ($4::date IS NULL OR (aur.created_at AT TIME ZONE 'Asia/Shanghai')::date <= $4)
+	AND ($5='' OR aur.model=$5) AND ($6='' OR aur.purpose=$6) AND ($7::uuid IS NULL OR aur.session_id=$7)`
 	arguments := []any{studentID, subject, dateFrom, dateTo, model, purpose, sessionID}
-	rows, err := handler.pool.Query(request.Context(), `SELECT aur.created_at::date::text,aur.model,aur.purpose,count(*),sum(aur.input_tokens),sum(aur.cached_input_tokens),sum(aur.output_tokens),sum(aur.audio_input_seconds),sum(aur.audio_output_seconds),sum(aur.estimated_cost_usd)::text`+filter+` GROUP BY aur.created_at::date,aur.model,aur.purpose ORDER BY aur.created_at::date DESC,aur.model,aur.purpose`, arguments...)
+	rows, err := handler.pool.Query(request.Context(), `SELECT (aur.created_at AT TIME ZONE 'Asia/Shanghai')::date::text,aur.model,aur.purpose,count(*),sum(aur.input_tokens),sum(aur.cached_input_tokens),sum(aur.output_tokens),sum(aur.audio_input_seconds),sum(aur.audio_output_seconds),sum(aur.estimated_cost_usd)::text`+filter+` GROUP BY (aur.created_at AT TIME ZONE 'Asia/Shanghai')::date,aur.model,aur.purpose ORDER BY (aur.created_at AT TIME ZONE 'Asia/Shanghai')::date DESC,aur.model,aur.purpose`, arguments...)
 	if err != nil {
 		http.Error(writer, "cost report unavailable", 500)
 		return
@@ -593,7 +594,7 @@ AND ($5='' OR aur.model=$5) AND ($6='' OR aur.purpose=$6) AND ($7::uuid IS NULL 
 	summarySQL := `WITH filtered AS (SELECT aur.*` + filter + `),
 session_minutes AS (SELECT COALESCE(sum(ls.target_minutes),0)::numeric AS value FROM learning_sessions ls WHERE ls.id IN(SELECT DISTINCT session_id FROM filtered WHERE session_id IS NOT NULL)),
 mastered AS (SELECT count(*)::numeric AS value FROM student_skill_states ss WHERE ss.state='MASTERED' AND ss.student_id IN(SELECT DISTINCT student_id FROM filtered WHERE student_id IS NOT NULL)),
-totals AS (SELECT COALESCE(sum(estimated_cost_usd),0)::numeric cost,count(*)::numeric requests,count(DISTINCT (student_id,created_at::date))::numeric student_days,COALESCE(sum(input_tokens),0)::numeric inputs,COALESCE(sum(cached_input_tokens),0)::numeric cached,COALESCE(sum(input_tokens+output_tokens),0)::numeric tokens,COALESCE(sum(estimated_cost_usd) FILTER(WHERE purpose='STT_TRANSCRIPTION'),0)::numeric stt,COALESCE(sum(estimated_cost_usd) FILTER(WHERE purpose='TTS_EXPLANATION'),0)::numeric tts,COALESCE(count(*) FILTER(WHERE price_catalog_id IN(SELECT id FROM ai_price_catalog WHERE cost_tier='STRONG')),0)::numeric strong FROM filtered)
+	totals AS (SELECT COALESCE(sum(estimated_cost_usd),0)::numeric cost,count(*)::numeric requests,count(DISTINCT (student_id,(created_at AT TIME ZONE 'Asia/Shanghai')::date))::numeric student_days,COALESCE(sum(input_tokens),0)::numeric inputs,COALESCE(sum(cached_input_tokens),0)::numeric cached,COALESCE(sum(input_tokens+output_tokens),0)::numeric tokens,COALESCE(sum(estimated_cost_usd) FILTER(WHERE purpose='STT_TRANSCRIPTION'),0)::numeric stt,COALESCE(sum(estimated_cost_usd) FILTER(WHERE purpose='TTS_EXPLANATION'),0)::numeric tts,COALESCE(count(*) FILTER(WHERE price_catalog_id IN(SELECT id FROM ai_price_catalog WHERE cost_tier='STRONG')),0)::numeric strong FROM filtered)
 SELECT cost::text,(CASE WHEN student_days=0 THEN 0 ELSE cost/student_days END)::text,(CASE WHEN (SELECT value FROM session_minutes)=0 THEN 0 ELSE cost*20/(SELECT value FROM session_minutes) END)::text,(CASE WHEN (SELECT value FROM mastered)=0 THEN 0 ELSE cost/(SELECT value FROM mastered) END)::text,(CASE WHEN inputs=0 THEN 0 ELSE cached/inputs END)::text,stt::text,tts::text,(CASE WHEN requests=0 THEN 0 ELSE strong/requests END)::text,(CASE WHEN requests=0 THEN 0 ELSE tokens/requests END)::text FROM totals`
 	if err := handler.pool.QueryRow(request.Context(), summarySQL, arguments...).Scan(&totalCost, &perStudentDay, &per20Minutes, &perMastered, &cachedRatio, &sttCost, &ttsCost, &strongRatio, &averageTokens); err != nil {
 		http.Error(writer, "cost summary unavailable", 500)
