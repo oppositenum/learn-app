@@ -85,7 +85,93 @@ test('keeps paused answer controls in the DOM and waits for an explicit resume',
   expect(wrapper.find('#student-answer').exists()).toBe(true)
   expect(wrapper.get('[data-testid="resume-session"]').attributes('disabled')).toBeUndefined()
   expect(wrapper.get('[data-testid="resume-session"]').text()).toContain('继续探索')
+	const guidance = wrapper.get('[data-testid="paused-support-guidance"]')
+	expect(guidance.text()).toContain('请先继续这次探索')
+	const hint = wrapper.get('[data-testid="hint-support"]')
+	expect(hint.attributes('disabled')).toBe('')
+	await hint.trigger('click')
+	await flushPromises()
+	expect(requests.some((path) => path.endsWith('/support'))).toBe(false)
+	expect(guidance.text()).toContain('继续探索')
   wrapper.unmount()
+})
+
+test('shows a waiting state and does not issue a second support request while loading', async () => {
+	const support = deferred<Response>()
+	let supportRequests = 0
+	const { learning, wrapper } = await mountPage(vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		if (path.endsWith('/support')) {
+			supportRequests++
+			return support.promise
+		}
+		return Promise.resolve(response(session({
+			version: supportRequests ? 2 : 1,
+			timing_version: supportRequests ? 2 : 1,
+			status: 'ACTIVE',
+			state: supportRequests ? 'HINT' : 'ASK',
+			current_active_seconds: supportRequests ? 2 : 0,
+		})))
+	}))
+	const hint = wrapper.get('[data-testid="hint-support"]')
+
+	await hint.trigger('click')
+	await Promise.resolve()
+
+	expect(supportRequests).toBe(1)
+	expect(learning.loading).toBe(true)
+	expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBe('')
+	expect(wrapper.get('[data-testid="hint-support"]').attributes('disabled')).toBe('')
+	expect(wrapper.get('[data-testid="hint-support"]').text()).toContain('正在准备')
+	expect(wrapper.get('[data-testid="support-waiting"]').text()).toBe('老师正在准备回应，请稍等')
+
+	await wrapper.get('[data-testid="explain-support"]').trigger('click')
+	expect(supportRequests).toBe(1)
+	expect(wrapper.find('[data-testid="support-waiting"]').exists()).toBe(true)
+
+	support.resolve(response({
+		session_id: 'session-1',
+		version: 2,
+		timing_version: 2,
+		action: 'HINT',
+		socratic_round: 1,
+		message: '先观察两种数量之间的关系。',
+		status: 'ACTIVE',
+		active_seconds: 22,
+		current_active_seconds: 2,
+		timing_observed_at: '2026-08-26T12:00:22Z',
+	}))
+	await flushPromises()
+
+	expect(learning.loading).toBe(false)
+	expect(wrapper.find('[data-testid="support-waiting"]').exists()).toBe(false)
+	expect(wrapper.get('[data-testid="hint-support"]').attributes('disabled')).toBeUndefined()
+	wrapper.unmount()
+})
+
+test('makes a session mismatch visibly recoverable instead of exposing a dead support action', async () => {
+	const requests: string[] = []
+	const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+		requests.push(String(input))
+		return response(session({ status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+	}))
+	learning.applySession(session({ id: 'session-2', status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+	await flushPromises()
+
+	const guidance = wrapper.get('[data-testid="session-mismatch-guidance"]')
+	expect(guidance.text()).toContain('重新加载后可以继续请求提示')
+	const hint = wrapper.get('[data-testid="hint-support"]')
+	expect(hint.attributes('disabled')).toBe('')
+	await hint.trigger('click')
+	await flushPromises()
+	expect(requests.some((path) => path.endsWith('/support'))).toBe(false)
+
+	await guidance.get('button').trigger('click')
+	await flushPromises()
+	expect(requests.filter((path) => path.endsWith('/sessions/session-1'))).toHaveLength(2)
+	expect(wrapper.find('[data-testid="session-mismatch-guidance"]').exists()).toBe(false)
+	expect(wrapper.get('[data-testid="hint-support"]').attributes('disabled')).toBeUndefined()
+	wrapper.unmount()
 })
 
 test('deduplicates an explicit resume and enables answers only after it succeeds', async () => {

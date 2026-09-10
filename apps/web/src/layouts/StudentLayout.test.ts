@@ -5,6 +5,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import type { StudentSession } from '../api/student'
 import { studentInteractionEvent, studentInteractionFreshnessMS } from '../lib/studentInteraction'
+import StudentSessionPage from '../pages/student/StudentSessionPage.vue'
 import { useAuthSession } from '../stores/auth'
 import { useLearningStore } from '../stores/learning'
 import StudentLayout from './StudentLayout.vue'
@@ -384,6 +385,74 @@ test('applies authoritative paused timing from idle refresh and stops polling', 
 
 	await vi.advanceTimersByTimeAsync(90_000)
 	expect(requests).toEqual(['/api/v1/student/sessions/session-1'])
+	wrapper.unmount()
+})
+
+test('keeps support observable when the 30-second refresh races an auto-pause boundary', async () => {
+	vi.useFakeTimers()
+	vi.setSystemTime(new Date('2026-08-26T12:00:00Z'))
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const refresh = deferred<Response>()
+	let sessionReads = 0
+	let supportRequests = 0
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/support')) {
+			supportRequests++
+			return Promise.resolve({ ok: false, status: 409, json: async () => ({ code: 'SESSION_NOT_ACTIVE' }) } as Response)
+		}
+		if (path.endsWith('/sessions/session-1')) {
+			sessionReads++
+			if (sessionReads === 1) return Promise.resolve(jsonResponse(session()))
+			return refresh.promise
+		}
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const pinia = createPinia()
+	setActivePinia(pinia)
+	const router = createRouter({
+		history: createMemoryHistory(),
+		routes: [
+			{ path: '/student', component: { template: '<div>首页</div>' } },
+			{ path: '/student/session/:id', component: StudentSessionPage, meta: { classroom: true, hideStudentNav: true } },
+		],
+	})
+	await router.push('/student/session/session-1')
+	await router.isReady()
+	useAuthSession().user.value = { user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }
+	const wrapper = mount(StudentLayout, { global: { plugins: [pinia, router] } })
+	await flushPromises()
+	const learning = useLearningStore()
+	expect(learning.status).toBe('ACTIVE')
+	expect(wrapper.get('[data-testid="hint-support"]').attributes('disabled')).toBeUndefined()
+
+	await vi.advanceTimersByTimeAsync(30_000)
+	expect(sessionReads).toBe(2)
+	await wrapper.get('[data-testid="hint-support"]').trigger('click')
+	await flushPromises()
+
+	expect(supportRequests).toBe(1)
+	expect(wrapper.get('[role="alert"]').text()).toContain('学习数据暂时不可用（409）')
+
+	refresh.resolve(jsonResponse(session({
+		version: 2,
+		timing_version: 2,
+		status: 'PAUSED',
+		active_seconds: 40,
+		current_active_seconds: 0,
+		active_since: undefined,
+		timing_observed_at: '2026-08-26T12:00:30Z',
+	})))
+	await flushPromises()
+
+	expect(learning.status).toBe('PAUSED')
+	expect(wrapper.get('[data-testid="paused-support-guidance"]').text()).toContain('继续探索')
+	expect(wrapper.get('[data-testid="hint-support"]').attributes('disabled')).toBe('')
+	await wrapper.get('[data-testid="hint-support"]').trigger('click')
+	expect(supportRequests).toBe(1)
+	expect(requests.filter((path) => path.endsWith('/support'))).toHaveLength(1)
 	wrapper.unmount()
 })
 
