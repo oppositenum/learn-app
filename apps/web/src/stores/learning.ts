@@ -22,6 +22,10 @@ import { useGrowthStore } from './growth'
 
 export type { TutorAction } from '../api/student'
 
+export type SupportRequestResult =
+	| { requestSent: false; reason: 'SESSION_MISMATCH' | 'LOADING' | 'SESSION_INACTIVE' }
+	| { requestSent: true; outcome: 'APPLIED' | 'FAILED' | 'STALE' }
+
 interface TimelineItem {
   id: string
   actor: 'AI' | 'STUDENT' | 'SYSTEM' | 'TUTOR'
@@ -250,29 +254,43 @@ export const useLearningStore = defineStore('learning', {
 				if (operation === this.operationSequence) this.loading = false
       }
     },
-    async requestSupport(sessionID: string, type: 'HINT' | 'EXPLAIN') {
-			if (this.sessionID !== sessionID || this.loading) return false
+	    async requestSupport(sessionID: string, type: 'HINT' | 'EXPLAIN') {
+			if (this.sessionID !== sessionID) {
+				this.error = '课堂内容已经更新，请重新加载课堂后再试'
+				return { requestSent: false, reason: 'SESSION_MISMATCH' } as SupportRequestResult
+			}
+			if (this.loading) {
+				this.error = '老师正在准备回应，请稍等'
+				return { requestSent: false, reason: 'LOADING' } as SupportRequestResult
+			}
+			if (this.status !== 'ACTIVE') {
+				this.error = this.status === 'PAUSED'
+					? '这次探索已暂停，请先点击「继续探索」'
+					: '这次探索暂时不能请求帮助，请重新加载课堂'
+				return { requestSent: false, reason: 'SESSION_INACTIVE' } as SupportRequestResult
+			}
 			const operation = ++this.operationSequence
       this.loading = true
       this.error = ''
       try {
 	        const result = await requestStudentSupport(sessionID, type)
-					if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
-					if (result.version < this.version) return false
+					if (operation !== this.operationSequence || this.sessionID !== sessionID) return { requestSent: true, outcome: 'STALE' } as SupportRequestResult
+					if (result.version < this.version) return { requestSent: true, outcome: 'STALE' } as SupportRequestResult
 					const appendResult = result.version > this.snapshotVersion
 					this.version = result.version
 	        this.tutorAction = result.action
 					if (appendResult) this.timeline.push({ id: `pending-${result.version}-tutor`, actor: 'TUTOR', text: result.message, meta: result.action })
 					if (result.status) this.applyTiming({ session_id: result.session_id, version: result.version, timing_version: result.timing_version, status: result.status, active_seconds: result.active_seconds ?? this.activeSeconds, current_active_seconds: result.current_active_seconds ?? (result.status === 'ACTIVE' ? this.currentActiveSeconds : 0), timing_observed_at: result.timing_observed_at })
 					await this.refreshSession(sessionID)
-        return true
+					this.error = ''
+	        return { requestSent: true, outcome: 'APPLIED' } as SupportRequestResult
       } catch (error) {
-				if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
-				if (error instanceof ApiError && error.status === 404) this.sessionGone = true
+					if (operation !== this.operationSequence || this.sessionID !== sessionID) return { requestSent: true, outcome: 'STALE' } as SupportRequestResult
+					if (error instanceof ApiError && error.status === 404) this.sessionGone = true
         this.error = error instanceof Error ? error.message : '暂时无法生成帮助'
-        return false
+	        return { requestSent: true, outcome: 'FAILED' } as SupportRequestResult
       } finally {
-				if (operation === this.operationSequence) this.loading = false
+					if (operation === this.operationSequence) this.loading = false
       }
     },
     async returnFromVoice(sessionID: string) {
