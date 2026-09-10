@@ -163,6 +163,8 @@ func stageMessage(code string) string {
 		return "当前任务在帮助下完成，现在换一道不重复的新任务独立证明。"
 	case "SOCRATIC_LIMIT_EXPLAINED":
 		return "已经完成三次有效尝试。先看同结构示范，再回到当前任务验证。"
+	case "SOCRATIC_REPROOF_FAILED":
+		return "看过示范后这次还没有独立通过。当前课堂已结束，稍后可以重新开始。"
 	case "NEXT_STAGE":
 		return "这一阶段已独立完成，继续下一阶段。"
 	case "CLASSROOM_COMPLETE":

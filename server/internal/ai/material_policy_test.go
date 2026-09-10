@@ -85,9 +85,27 @@ func TestTutorMaterialPolicyAllowsOrdinaryChineseProse(t *testing.T) {
 		"一步一步检查推理过程。",
 		"这个思路十分清楚。",
 		"第2步再检查结论。",
+		"先换一个角度想想。",
+		"你能举一个例子吗？",
+		"把这一步重复一次。",
+		"万一还没有思路，先看已知条件。",
+		"千万不要着急，先检查这一步。",
 	} {
 		if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateProbe, Message: message}); err != nil {
 			t.Fatalf("ordinary prose %q was rejected: %v", message, err)
+		}
+	}
+}
+
+func TestTutorMaterialPolicyStillRejectsNewChineseQuantitiesAroundOrdinaryProse(t *testing.T) {
+	question := materialPolicyQuestion(t, "请根据题目继续思考。", nil)
+	for _, message := range []string{
+		"再拿一个苹果试试。",
+		"把数量改成千万个。",
+		"先计算三万一千个时的结果。",
+	} {
+		if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateProbe, Message: message}); !errors.Is(err, ErrTutorMaterialPolicyViolation) {
+			t.Fatalf("new quantity %q error=%v", message, err)
 		}
 	}
 }

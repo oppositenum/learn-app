@@ -415,6 +415,100 @@ SELECT
 			attempts, independentEvidence, rewards, activityDays, status, blockStatus, reviewStatus, reviewAttempts)
 	}
 	awaitEventType(t, studentEvents, string(realtime.EventSessionAbandoned))
+
+	reproofPool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, reproofPool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	reproofFixture := seedCompleteStageFixture(t, ctx, reproofPool)
+	reproofQueueID := uuid.New()
+	if _, err := reproofPool.Exec(ctx, `
+INSERT INTO review_queue(id,student_id,knowledge_point_id,source,due_at)
+VALUES($1,$2,$3,'MASTERY',now())`, reproofQueueID, reproofFixture.security.studentID, reproofFixture.knowledgePointID); err != nil {
+		t.Fatal(err)
+	}
+	reproofHub := realtime.NewHub()
+	reproofStudentEvents, stopReproofStudent := reproofHub.Subscribe(reproofFixture.security.studentID.String(), auth.RoleStudent)
+	defer stopReproofStudent()
+	reproofAgent := &provenanceTeachingAgent{}
+	reproofService := classroom.NewService(reproofPool, reproofHub, nil, nil).WithTeachingAgent(reproofAgent)
+	reproofRouter := stageRouter(reproofPool, reproofService)
+	reproofSession := startStageSession(t, reproofRouter, reproofFixture)
+	if _, err := reproofPool.Exec(ctx, `UPDATE learning_sessions SET review_queue_id=$2,evidence_form='REVIEW' WHERE id=$1`,
+		reproofSession.ID, reproofQueueID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reproofPool.Exec(ctx, `UPDATE learning_plan_blocks SET review_queue_id=$2,mode='REVIEW' WHERE id=$1`,
+		reproofFixture.planBlockID, reproofQueueID); err != nil {
+		t.Fatal(err)
+	}
+
+	for wantRound := 1; wantRound <= 3; wantRound++ {
+		current := readStageSession(t, reproofRouter, reproofFixture.security.studentToken, reproofSession.ID)
+		response := performJSON(reproofRouter, http.MethodPost, "/api/v1/student/sessions/"+reproofSession.ID.String()+"/answers", reproofFixture.security.studentToken, map[string]any{
+			"operation_id": uuid.New(), "stage": current.StageFlow.Stage,
+			"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
+			"response": incorrectStageResponse(t, ctx, reproofPool, current.QuestionID),
+		})
+		if response.Code != http.StatusOK {
+			t.Fatalf("reproof setup round %d=%d %s", wantRound, response.Code, response.Body.String())
+		}
+	}
+	postExplain := readStageSession(t, reproofRouter, reproofFixture.security.studentToken, reproofSession.ID)
+	reproofOperationID := uuid.New()
+	reproofBody := map[string]any{
+		"operation_id": reproofOperationID, "stage": postExplain.StageFlow.Stage,
+		"task_id": postExplain.QuestionID, "task_version": postExplain.StageFlow.TaskVersion,
+		"response": incorrectStageResponse(t, ctx, reproofPool, postExplain.QuestionID),
+	}
+	reproofFailure := performJSON(reproofRouter, http.MethodPost, "/api/v1/student/sessions/"+reproofSession.ID.String()+"/answers", reproofFixture.security.studentToken, reproofBody)
+	if reproofFailure.Code != http.StatusOK {
+		t.Fatalf("post-explanation reproof=%d %s", reproofFailure.Code, reproofFailure.Body.String())
+	}
+	var reproofResult classroom.StageSubmitResult
+	if err := json.Unmarshal(reproofFailure.Body.Bytes(), &reproofResult); err != nil {
+		t.Fatal(err)
+	}
+	if reproofResult.Code != "SOCRATIC_REPROOF_FAILED" || reproofResult.Status != "ABANDONED" ||
+		reproofResult.SocraticRound != 3 || reproofResult.EvidenceKind != classroom.StageEvidenceNone || reproofResult.StageCompleted {
+		t.Fatalf("post-explanation reproof result=%+v", reproofResult)
+	}
+	replayedReproofFailure := performJSON(reproofRouter, http.MethodPost, "/api/v1/student/sessions/"+reproofSession.ID.String()+"/answers", reproofFixture.security.studentToken, reproofBody)
+	if replayedReproofFailure.Code != http.StatusOK || replayedReproofFailure.Body.String() != reproofFailure.Body.String() {
+		t.Fatalf("post-explanation idempotency first=%s repeated=%d/%s", reproofFailure.Body.String(), replayedReproofFailure.Code, replayedReproofFailure.Body.String())
+	}
+	if reproofAgent.generateCalls != 3 {
+		t.Fatalf("post-explanation failure generated another model turn: calls=%d", reproofAgent.generateCalls)
+	}
+
+	var reproofAttempts, reproofEvidence, reproofRewards, reproofActivityDays, reproofExplanations int
+	var reproofStatus, reproofBlockStatus, reproofReviewStatus string
+	var reproofReviewAttempts int
+	if err := reproofPool.QueryRow(ctx, `
+SELECT
+  (SELECT count(*)::int FROM classroom_stage_attempts WHERE session_id=$1),
+  (SELECT count(*)::int FROM classroom_stage_evidence WHERE session_id=$1),
+  (SELECT count(*)::int FROM reward_events WHERE session_id=$1),
+  (SELECT count(*)::int FROM student_activity_days WHERE student_id=$2),
+  (SELECT count(*)::int FROM classroom_stage_attempts WHERE session_id=$1 AND response_code='SOCRATIC_LIMIT_EXPLAINED'),
+  (SELECT status FROM learning_sessions WHERE id=$1),
+  (SELECT status FROM learning_plan_blocks WHERE id=$3),
+  (SELECT status FROM review_queue WHERE id=$4),
+  (SELECT attempts FROM review_queue WHERE id=$4)`,
+		reproofSession.ID, reproofFixture.security.studentID, reproofFixture.planBlockID, reproofQueueID).Scan(
+		&reproofAttempts, &reproofEvidence, &reproofRewards, &reproofActivityDays, &reproofExplanations,
+		&reproofStatus, &reproofBlockStatus, &reproofReviewStatus, &reproofReviewAttempts,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if reproofAttempts != 4 || reproofEvidence != 0 || reproofRewards != 0 || reproofActivityDays != 0 ||
+		reproofExplanations != 1 || reproofStatus != "ABANDONED" || reproofBlockStatus != "AVAILABLE" ||
+		reproofReviewStatus != "PENDING" || reproofReviewAttempts != 0 {
+		t.Fatalf("post-explanation state attempts=%d evidence=%d rewards=%d activity=%d explanations=%d session=%s block=%s review=%s/%d",
+			reproofAttempts, reproofEvidence, reproofRewards, reproofActivityDays, reproofExplanations,
+			reproofStatus, reproofBlockStatus, reproofReviewStatus, reproofReviewAttempts)
+	}
+	awaitEventType(t, reproofStudentEvents, string(realtime.EventSessionAbandoned))
 }
 
 func TestFourStageContentPreflightAndRuntimeDriftFailClosed(t *testing.T) {

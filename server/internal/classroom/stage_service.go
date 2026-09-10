@@ -401,6 +401,12 @@ func (service *Service) prepareStageFeedback(ctx context.Context, snapshot stage
 	if score == StageScoreCorrect {
 		return ai.TutorTurn{}, nil
 	}
+	if (score == StageScoreIncorrect || score == StageScoreIndeterminate) && snapshot.socraticFailCount >= 3 {
+		return ai.TutorTurn{
+			Action:  tutor.State(snapshot.stage),
+			Message: stageMessage("SOCRATIC_REPROOF_FAILED"),
+		}, nil
+	}
 	action := tutor.StateProbe
 	fallback := "换一道任务，再按问题要求逐项检查。"
 	explain := request.Support == SupportExplain ||
@@ -585,7 +591,7 @@ func (service *Service) commitStageAttempt(
 		evidenceKind := StageEvidenceNone
 		stageCompleted := false
 		sessionCompleted := false
-		contentExhausted := false
+		abandonCode := ""
 		responseSocratic := snapshot.socraticFailCount
 		var nextTask *stageTask
 
@@ -594,14 +600,17 @@ func (service *Service) commitStageAttempt(
 			// Help keeps the current task active. A later success on this task is assisted.
 		case StageScoreIncorrect, StageScoreIndeterminate:
 			responseSocratic = min(3, snapshot.socraticFailCount+1)
-			if responseSocratic >= 3 {
+			if snapshot.socraticFailCount >= 3 {
+				responseCode = "SOCRATIC_REPROOF_FAILED"
+				abandonCode = responseCode
+			} else if responseSocratic >= 3 {
 				responseCode = "SOCRATIC_LIMIT_EXPLAINED"
 			} else {
 				responseCode = "TRY_NEW_TASK"
 				task, err := selectUnpresentedStageTask(ctx, tx, snapshot.lineageID, snapshot.stage, snapshot.sessionID, snapshot.task.ID)
 				if errors.Is(err, ErrStageContentExhausted) {
-					contentExhausted = true
 					responseCode = "CONTENT_EXHAUSTED"
+					abandonCode = responseCode
 				} else if err != nil {
 					return err
 				} else {
@@ -619,8 +628,8 @@ func (service *Service) commitStageAttempt(
 				evidenceKind = StageEvidenceAssisted
 				task, err := selectUnpresentedStageTask(ctx, tx, snapshot.lineageID, snapshot.stage, snapshot.sessionID, snapshot.task.ID)
 				if errors.Is(err, ErrStageContentExhausted) {
-					contentExhausted = true
 					responseCode = "CONTENT_EXHAUSTED"
+					abandonCode = responseCode
 				} else if err != nil {
 					return err
 				} else {
@@ -641,8 +650,8 @@ func (service *Service) commitStageAttempt(
 				} else {
 					task, err := selectUnpresentedStageTask(ctx, tx, snapshot.lineageID, next, snapshot.sessionID, uuid.Nil)
 					if errors.Is(err, ErrStageContentExhausted) {
-						contentExhausted = true
 						responseCode = "CONTENT_EXHAUSTED"
+						abandonCode = responseCode
 					} else if err != nil {
 						return err
 					} else {
@@ -667,7 +676,7 @@ func (service *Service) commitStageAttempt(
 			responseStatus = "COMPLETED"
 			currentSeconds = 0
 			newTimingVersion++
-		} else if contentExhausted {
+		} else if abandonCode != "" {
 			responseStatus = "ABANDONED"
 			currentSeconds = 0
 			newTimingVersion++
@@ -676,7 +685,7 @@ func (service *Service) commitStageAttempt(
 		turnMessage := stageMessage(responseCode)
 		turnReason := "deterministic scorer selected the stage outcome"
 		turnResponseID := ""
-		if score != StageScoreCorrect && !contentExhausted {
+		if score != StageScoreCorrect && abandonCode == "" {
 			turnAction = feedback.Action
 			turnMessage = feedback.Message
 			turnReason = "feedback only; deterministic scorer selected the stage outcome"
@@ -744,8 +753,8 @@ VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), snapshot.sessionID
 			}
 			completed := now
 			completedAt = &completed
-		} else if contentExhausted {
-			if err := abandonStageSessionForContentExhaustion(ctx, tx, snapshot, responseSocratic, activeSeconds, now); err != nil {
+		} else if abandonCode != "" {
+			if err := abandonStageSession(ctx, tx, snapshot, responseSocratic, activeSeconds, now); err != nil {
 				return err
 			}
 		} else {
@@ -771,12 +780,12 @@ VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), snapshot.sessionID
 		}
 		published = append(published, transition)
 		eventSequence++
-		if contentExhausted {
+		if abandonCode != "" {
 			studentAbandoned, _ := json.Marshal(map[string]any{
-				"status": "ABANDONED", "active_seconds": activeSeconds, "code": "CONTENT_EXHAUSTED",
+				"status": "ABANDONED", "active_seconds": activeSeconds, "code": abandonCode,
 			})
 			parentAbandoned, _ := json.Marshal(map[string]any{
-				"status": "ABANDONED", "active_seconds": activeSeconds, "reason": "CONTENT_EXHAUSTED",
+				"status": "ABANDONED", "active_seconds": activeSeconds, "reason": abandonCode,
 			})
 			abandoned := makeEvent(snapshot.studentID, snapshot.sessionID, eventSequence, realtime.EventSessionAbandoned, studentAbandoned, parentAbandoned, now)
 			if err := insertEvent(ctx, tx, abandoned); err != nil {
@@ -846,7 +855,7 @@ UPDATE learning_sessions
 	return err
 }
 
-func abandonStageSessionForContentExhaustion(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, socraticFailCount, activeSeconds int, now time.Time) error {
+func abandonStageSession(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, socraticFailCount, activeSeconds int, now time.Time) error {
 	if _, err := tx.Exec(ctx, `
 UPDATE learning_sessions
 SET status='ABANDONED',ended_at=$2,accumulated_seconds=$3,actual_seconds=$3,
@@ -1226,7 +1235,7 @@ func storedStageResult(sessionID uuid.UUID, digest string, stored storedStageAtt
 }
 
 func stageResultCode(responseCode string) string {
-	if responseCode == "CONTENT_EXHAUSTED" {
+	if responseCode == "CONTENT_EXHAUSTED" || responseCode == "SOCRATIC_REPROOF_FAILED" {
 		return responseCode
 	}
 	return ""

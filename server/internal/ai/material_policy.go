@@ -186,6 +186,14 @@ func adjacentToNumericOperator(runes []rune, start, end int) bool {
 
 func isProceduralChineseNumeral(runes []rune, start, end int) bool {
 	token := string(runes[start:end])
+	if token == "一" && end < len(runes) && runes[end] == '个' {
+		suffix := string(runes[end+1:])
+		for _, noun := range []string{"角度", "例子", "思路", "方法", "办法", "方式"} {
+			if strings.HasPrefix(suffix, noun) {
+				return true
+			}
+		}
+	}
 	if token == "一" && end < len(runes) && runes[end] == '步' {
 		if start > 0 && strings.ContainsRune("上下这每逐前后步", runes[start-1]) {
 			return true
@@ -194,7 +202,7 @@ func isProceduralChineseNumeral(runes []rune, start, end int) bool {
 			return true
 		}
 	}
-	if token == "一" && end < len(runes) && runes[end] == '次' && start > 0 && strings.ContainsRune("试想看做读说写查来", runes[start-1]) {
+	if token == "一" && end < len(runes) && runes[end] == '次' && start > 0 && strings.ContainsRune("试想看做读说写查来复", runes[start-1]) {
 		return true
 	}
 	if token == "十" && end+1 < len(runes) && runes[end] == '分' && runes[end+1] != '之' && !strings.ContainsRune("米秒钟", runes[end+1]) {
