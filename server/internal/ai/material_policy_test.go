@@ -101,6 +101,7 @@ func TestTutorMaterialPolicyStillRejectsNewChineseQuantitiesAroundOrdinaryProse(
 	question := materialPolicyQuestion(t, "请根据题目继续思考。", nil)
 	for _, message := range []string{
 		"再拿一个苹果试试。",
+		"计算万一+2的结果。",
 		"把数量改成千万个。",
 		"先计算三万一千个时的结果。",
 	} {
