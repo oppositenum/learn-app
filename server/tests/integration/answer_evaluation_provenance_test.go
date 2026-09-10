@@ -16,6 +16,7 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/classroom"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/database"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/mastery"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 	"github.com/oppositenum/ai-learning-tutor/server/migrations"
 )
@@ -173,7 +174,7 @@ func TestProvenanceFreshDatabaseIsEmptyAndContentFree(t *testing.T) {
 	}
 }
 
-func TestModelPositiveIsRecordedButCannotAuthorizeLegacySuccess(t *testing.T) {
+func TestProvenanceRecordsRawModelSeparatelyWithoutChangingAcceptedBehavior(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedPool(t, ctx, testDatabaseURL(t))
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
@@ -201,24 +202,28 @@ WHERE id=$1`, fixture.sessionID, now); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agent.analyzeCalls != 1 || agent.generateCalls != 1 {
+	if agent.analyzeCalls != 1 || agent.generateCalls != 0 {
 		t.Fatalf("AI calls analyze=%d generate=%d", agent.analyzeCalls, agent.generateCalls)
 	}
-	t.Logf("model_positive_rejected_path_ai_calls analyze=%d generate=%d", agent.analyzeCalls, agent.generateCalls)
-	if result.Status != "ACTIVE" || result.Action != tutor.StateProbe || result.MasteryState != "" || result.Energy != 0 || result.TomorrowChanged {
-		t.Fatalf("model positive authorized a legacy success: %+v", result)
+	t.Logf("accepted_path_ai_calls analyze=%d generate=%d", agent.analyzeCalls, agent.generateCalls)
+	if result.Status != "COMPLETED" || result.Action != tutor.StateComplete || result.MasteryState != mastery.Learning || result.Energy != 2 || result.TomorrowChanged {
+		t.Fatalf("legacy accepted result changed: %+v", result)
 	}
 
 	wantWrites := map[string]int{
-		"answer_analyses:INSERT":        1,
-		"learning_sessions:UPDATE":      2,
-		"review_queue:INSERT":           1,
-		"student_answers:INSERT":        1,
-		"student_misconceptions:INSERT": 1,
-		"tutor_events:INSERT":           4,
-		"tutor_turns:INSERT":            2,
+		"answer_analyses:INSERT":       1,
+		"learning_sessions:UPDATE":     2,
+		"reward_events:INSERT":         1,
+		"student_activity_days:INSERT": 1,
+		"student_answers:INSERT":       1,
+		"student_growth:INSERT":        1,
+		"student_growth:UPDATE":        2,
+		"student_skill_states:INSERT":  1,
+		"tutor_events:INSERT":          6,
+		"tutor_turns:INSERT":           2,
 	}
 	assertBusinessWrites(t, ctx, pool, wantWrites)
+	assertAcceptedLegacySnapshot(t, ctx, pool, fixture, now)
 
 	var deterministicResult, deterministicVersion, legacyResolution, behaviorVersion string
 	var modelCorrect, finalCorrect bool
@@ -234,17 +239,17 @@ ORDER BY created_at DESC LIMIT 1`).Scan(
 		t.Fatal(err)
 	}
 	if deterministicResult != "NO_MATCH" || deterministicVersion != "normalized-string-equality-v1" ||
-		!modelCorrect || confidence != 0.95 || legacyResolution != "NOT_ACCEPTED" ||
-		finalCorrect || behaviorVersion != "deterministic-evidence-authorization-v1" {
+		!modelCorrect || confidence != 0.95 || legacyResolution != "MODEL_MEDIATED_ACCEPTED" ||
+		!finalCorrect || behaviorVersion != "legacy-model-override-v1" {
 		t.Fatalf("separated evaluation provenance=%s/%s model=%t/%.2f resolution=%s final=%t behavior=%s",
 			deterministicResult, deterministicVersion, modelCorrect, confidence, legacyResolution, finalCorrect, behaviorVersion)
 	}
-	var evidenceRows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mastery_evidence_provenance`).Scan(&evidenceRows); err != nil {
+	var authorizationSource, risk string
+	if err := pool.QueryRow(ctx, `SELECT authorization_source,provenance_risk FROM mastery_evidence_provenance`).Scan(&authorizationSource, &risk); err != nil {
 		t.Fatal(err)
 	}
-	if evidenceRows != 0 {
-		t.Fatalf("model positive wrote %d mastery evidence rows", evidenceRows)
+	if authorizationSource != "LEGACY_MODEL_MEDIATED" || risk != "UNREVIEWED" {
+		t.Fatalf("mastery evidence provenance=%s/%s", authorizationSource, risk)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE answer_evaluation_provenance SET created_at=created_at`); err == nil {
 		t.Fatal("append-only answer evaluation provenance accepted an update")
@@ -273,46 +278,8 @@ WHERE authorization_source='LEGACY_MODEL_MEDIATED' AND provenance_risk='UNREVIEW
 	}
 	t.Logf("evaluation_rows=%d raw_model_rows=%d final_correct_rows=%d separated_model_mediated_rows=%d evidence_source_rows=%d",
 		evaluations, rawModelResults, finalResults, separatedModelMediated, evidenceSources)
-	if evaluations != 1 || rawModelResults != 1 || finalResults != 0 || separatedModelMediated != 0 || evidenceSources != 0 {
-		t.Fatalf("model-positive provenance counts=%d/%d/%d/%d/%d", evaluations, rawModelResults, finalResults, separatedModelMediated, evidenceSources)
-	}
-}
-
-func TestDeterministicLegacyMatchBypassesTeachingAgent(t *testing.T) {
-	ctx := context.Background()
-	pool := isolatedPool(t, ctx, testDatabaseURL(t))
-	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
-	fixture := seedSecurityFixture(t, ctx, pool)
-	studentUserID := fixtureStudentUserID(t, ctx, pool, fixture.studentID)
-	agent := &provenanceTeachingAgent{analysis: ai.AnalyzeAnswerResult{
-		AnswerCorrect: false, ReasoningQuality: "WEAK", Confidence: 0.99,
-	}}
-	result, err := classroom.NewService(pool, nil, nil, nil).WithTeachingAgent(agent).Submit(
-		ctx, studentUserID, fixture.sessionID, fixture.privateCanary,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != "COMPLETED" || result.Action != tutor.StateComplete {
-		t.Fatalf("deterministic match result=%+v", result)
-	}
-	if agent.analyzeCalls != 0 || agent.generateCalls != 0 {
-		t.Fatalf("deterministic match called AI analyze=%d generate=%d", agent.analyzeCalls, agent.generateCalls)
-	}
-	var deterministic, resolution, behavior string
-	var modelCorrect *bool
-	var finalCorrect bool
-	if err := pool.QueryRow(ctx, `
-SELECT deterministic_result,model_answer_correct,legacy_resolution,final_correct,behavior_policy_version
-FROM answer_evaluation_provenance ORDER BY created_at DESC LIMIT 1`).Scan(
-		&deterministic, &modelCorrect, &resolution, &finalCorrect, &behavior,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if deterministic != "MATCH" || modelCorrect != nil || resolution != "DETERMINISTIC_ACCEPTED" || !finalCorrect || behavior != "deterministic-evidence-authorization-v1" {
-		t.Fatalf("deterministic provenance=%s model=%v resolution=%s final=%t behavior=%s", deterministic, modelCorrect, resolution, finalCorrect, behavior)
+	if evaluations != 1 || rawModelResults != 1 || finalResults != 1 || separatedModelMediated != 1 || evidenceSources != 1 {
+		t.Fatalf("model-mediated provenance counts=%d/%d/%d/%d/%d", evaluations, rawModelResults, finalResults, separatedModelMediated, evidenceSources)
 	}
 }
 

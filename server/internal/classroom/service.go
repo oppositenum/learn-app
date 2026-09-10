@@ -169,16 +169,12 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 		return SubmitResult{}, err
 	}
 	defer service.endSessionOperation(ctx, sessionID, operationToken)
-	deterministicCorrect, err := service.currentTextAnswerMatches(ctx, studentUserID, sessionID, operationToken, answer)
-	if err != nil {
-		return SubmitResult{}, err
-	}
 	classification := safety.Classify(answer)
 	if classification.Matched {
 		return service.handleSafetyClassification(ctx, studentUserID, sessionID, operationToken, classification)
 	}
 	var prepared *preparedAgent
-	if !deterministicCorrect && service.agent != nil {
+	if service.agent != nil {
 		prepared, err = service.prepareAgent(ctx, studentUserID, sessionID, operationToken, answer)
 		if err != nil {
 			return SubmitResult{}, err
@@ -207,13 +203,16 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 		now = latestTime(service.now(), row.lastActivityAt)
 		deterministicCorrect := normalized(answer) == normalized(row.answer)
 		correct := deterministicCorrect
+		if prepared != nil && prepared.analysis.AnswerCorrect && prepared.analysis.Confidence >= 0.9 {
+			correct = true
+		}
 		answerID := uuid.New()
 		evaluationProvenanceID := uuid.New()
 		var rawAnalysis *ai.AnalyzeAnswerResult
 		if prepared != nil {
 			rawAnalysis = &prepared.analysis
 		}
-		provenance := answerEvaluationProvenanceForDecision(deterministicCorrect, rawAnalysis)
+		provenance := legacyAnswerEvaluationProvenance(deterministicCorrect, rawAnalysis, correct)
 		turnSequence, eventSequence, err := nextSequences(ctx, tx, sessionID)
 		if err != nil {
 			return err
@@ -390,35 +389,6 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 	return result, nil
 }
 
-func (service *Service) currentTextAnswerMatches(ctx context.Context, studentUserID, sessionID, operationToken uuid.UUID, answer string) (bool, error) {
-	var reference, status string
-	var processingToken *uuid.UUID
-	var processingUntil *time.Time
-	err := service.pool.QueryRow(ctx, `
-SELECT private_answer.teacher_reference_answer,session.status,
-       session.processing_token,session.processing_until
-FROM learning_sessions session
-JOIN students student ON student.id=session.student_id
-JOIN questions question ON question.id=session.current_question_id AND question.status='RELEASED'
-JOIN question_private_answers private_answer ON private_answer.question_id=question.id
-WHERE session.id=$1 AND student.user_id=$2`, sessionID, studentUserID).Scan(
-		&reference, &status, &processingToken, &processingUntil,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, ErrSessionNotFound
-	}
-	if err != nil {
-		return false, err
-	}
-	if status != "ACTIVE" {
-		return false, ErrSessionNotActive
-	}
-	if !service.operationLeaseValid(processingToken, processingUntil, operationToken) {
-		return false, ErrClassroomChanged
-	}
-	return normalized(answer) == normalized(reference), nil
-}
-
 func (service *Service) handleSafetyClassification(ctx context.Context, studentUserID, sessionID, operationToken uuid.UUID, classification safety.Classification) (SubmitResult, error) {
 	var result SubmitResult
 	var event realtime.Event
@@ -552,6 +522,9 @@ func (service *Service) prepareVoice(ctx context.Context, studentUserID, session
 		return nil, ErrClassroomChanged
 	}
 	correct := normalized(answer) == normalized(row.answer)
+	if prepared != nil && prepared.analysis.AnswerCorrect && prepared.analysis.Confidence >= 0.9 {
+		correct = true
+	}
 	if correct {
 		return nil, nil
 	}
@@ -828,7 +801,7 @@ func (service *Service) prepareAgent(ctx context.Context, userID, sessionID, ope
 	if err != nil {
 		return nil, err
 	}
-	serverAnalysis := tutor.Analysis{ReasoningQuality: parseReasoning(analysis.ReasoningQuality), PrerequisiteGap: analysis.RecommendedAction == tutor.StateBacktrack, Emotion: parseEmotion(analysis.EmotionSignal), VoicePreferred: analysis.RecommendedAction == tutor.StateVoiceExplain}
+	serverAnalysis := tutor.Analysis{AnswerCorrect: analysis.AnswerCorrect, ReasoningQuality: parseReasoning(analysis.ReasoningQuality), PrerequisiteGap: analysis.RecommendedAction == tutor.StateBacktrack, Emotion: parseEmotion(analysis.EmotionSignal), VoicePreferred: analysis.RecommendedAction == tutor.StateVoiceExplain}
 	decision := tutor.NewEngine(3).Decide(tutor.Session{State: state, SocraticFailedRounds: fails, ActiveTaskID: questionID.String()}, serverAnalysis)
 	prepared := &preparedAgent{version: version, analysis: analysis, decision: decision}
 	if decision.NextState == tutor.StateVariant {

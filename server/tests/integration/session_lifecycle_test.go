@@ -340,10 +340,12 @@ func awaitSubmit(t *testing.T, outcome <-chan lifecycleSubmitOutcome) lifecycleS
 func TestTeachingResultCanCommitAfterVisibilityPause(t *testing.T) {
 	for _, test := range []struct {
 		name       string
+		correct    bool
 		wantStatus string
 		wantAction tutor.State
 	}{
 		{name: "wrong answer remains paused", wantStatus: "PAUSED", wantAction: tutor.StateProbe},
+		{name: "correct answer completes from paused state", correct: true, wantStatus: "COMPLETED", wantAction: tutor.StateComplete},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -354,12 +356,11 @@ func TestTeachingResultCanCommitAfterVisibilityPause(t *testing.T) {
 			fixture := seedSecurityFixture(t, ctx, pool)
 			clock := newLifecycleTestClock(time.Date(2030, 1, 10, 1, 0, 0, 0, time.UTC))
 			studentUserID, answersBefore := prepareLifecycleOperationFixture(t, ctx, pool, fixture, clock)
-			agent := newBlockingLifecycleAgent(false)
+			agent := newBlockingLifecycleAgent(test.correct)
 			service := classroom.NewService(pool, nil, nil, nil, planner.NewService(pool)).WithClock(clock.Now).WithTeachingAgent(agent)
 			outcome := make(chan lifecycleSubmitOutcome, 1)
-			answer := "等待分析的回答"
 			go func() {
-				result, err := service.Submit(ctx, studentUserID, fixture.sessionID, answer)
+				result, err := service.Submit(ctx, studentUserID, fixture.sessionID, "等待分析的回答")
 				outcome <- lifecycleSubmitOutcome{result: result, err: err}
 			}()
 			awaitAgentStart(t, agent.started)

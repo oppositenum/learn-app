@@ -13,7 +13,7 @@ import (
 const (
 	deterministicPolicyVersion = "normalized-string-equality-v1"
 	semanticPolicyVersion      = "teaching-agent-answer-analysis-v1"
-	behaviorPolicyVersion      = "deterministic-evidence-authorization-v1"
+	legacyBehaviorVersion      = "legacy-model-override-v1"
 )
 
 type answerEvaluationProvenance struct {
@@ -25,15 +25,17 @@ type answerEvaluationProvenance struct {
 	finalCorrect        bool
 }
 
-func answerEvaluationProvenanceForDecision(deterministicCorrect bool, analysis *ai.AnalyzeAnswerResult) answerEvaluationProvenance {
+func legacyAnswerEvaluationProvenance(deterministicCorrect bool, analysis *ai.AnalyzeAnswerResult, finalCorrect bool) answerEvaluationProvenance {
 	provenance := answerEvaluationProvenance{
 		deterministicResult: "NO_MATCH",
 		legacyResolution:    "NOT_ACCEPTED",
-		finalCorrect:        deterministicCorrect,
+		finalCorrect:        finalCorrect,
 	}
 	if deterministicCorrect {
 		provenance.deterministicResult = "MATCH"
 		provenance.legacyResolution = "DETERMINISTIC_ACCEPTED"
+	} else if finalCorrect {
+		provenance.legacyResolution = "MODEL_MEDIATED_ACCEPTED"
 	}
 	if analysis != nil {
 		answerCorrect := analysis.AnswerCorrect
@@ -56,7 +58,7 @@ INSERT INTO answer_evaluation_provenance (
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		id, studentAnswerID, provenance.deterministicResult, deterministicPolicyVersion,
 		provenance.modelAnswerCorrect, provenance.modelConfidence, provenance.semanticVersion,
-		provenance.legacyResolution, provenance.finalCorrect, behaviorPolicyVersion, now)
+		provenance.legacyResolution, provenance.finalCorrect, legacyBehaviorVersion, now)
 	return err
 }
 
