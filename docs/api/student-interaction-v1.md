@@ -48,4 +48,8 @@ The response body for a stage answer is:
 }
 ```
 
-The client retains the same response and `operation_id` across transient retries. The operation digest binds the canonical structured response to the session, stage, task, task version, attempt kind, and support type. Student responses are not persisted in the stage attempt or evidence tables and are never included in Student realtime payloads.
+The client retains the same response and `operation_id` across transient retries. For ordinary stage operations, the operation digest binds the canonical structured response to the session, stage, task, task version, attempt kind, and support type. Response bodies and model prose are absent from the stage attempt and evidence tables, but the digest is a response-derived fingerprint used to reject reuse of an operation ID with different input.
+
+For a `FILL_BLANKS` response intercepted by the minor-safety gate, the server stores no response body or response-derived fingerprint. It stores only the public task identity, the linked bounded safety incident, and the response metadata needed for replay. Reusing the operation ID with the same session, stage, task, task version, and attempt kind returns the first result without publishing another event; changing any of that public identity returns `409`. Because body equality cannot be checked without retaining a response-derived value, an edited response must use a new operation ID. This is deliberate first-write-wins behavior for safety-classified submissions.
+
+Student responses are never included in Student realtime payloads.

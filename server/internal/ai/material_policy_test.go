@@ -80,9 +80,37 @@ func TestTutorMaterialPolicyAllowsOrdinaryChineseProse(t *testing.T) {
 		"我们一起检查已知条件。",
 		"先看这个知识点和题目的关系。",
 		"想一想哪个条件还没用到。",
+		"下一步先检查已知条件。",
+		"再试一次，看看思路是否完整。",
+		"一步一步检查推理过程。",
+		"这个思路十分清楚。",
+		"第2步再检查结论。",
 	} {
 		if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateProbe, Message: message}); err != nil {
 			t.Fatalf("ordinary prose %q was rejected: %v", message, err)
+		}
+	}
+}
+
+func TestTutorMaterialPolicyTreatsEquivalentChineseAndArabicNumbersAsSameMaterial(t *testing.T) {
+	for _, test := range []struct {
+		prompt, message string
+	}{
+		{"用三个容器装水。", "先找3个容器。"},
+		{"Use 3 containers.", "先找三个容器。"},
+		{"把一半区域涂色。", "先找到0.5的区域。"},
+	} {
+		if err := enforceTutorMaterialPolicy(materialPolicyQuestion(t, test.prompt, nil), TutorTurn{Action: tutor.StateHint, Message: test.message}); err != nil {
+			t.Fatalf("equivalent restatement %q -> %q was rejected: %v", test.prompt, test.message, err)
+		}
+	}
+}
+
+func TestTutorMaterialPolicyStillRejectsChangedChineseTaskQuantities(t *testing.T) {
+	question := materialPolicyQuestion(t, "这段路需要走三步，每步一米。", nil)
+	for _, message := range []string{"改成走五步试试。", "每步两米时怎样？"} {
+		if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateProbe, Message: message}); !errors.Is(err, ErrTutorMaterialPolicyViolation) {
+			t.Fatalf("changed task quantity %q error=%v", message, err)
 		}
 	}
 }
