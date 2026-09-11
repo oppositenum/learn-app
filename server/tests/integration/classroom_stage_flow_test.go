@@ -629,7 +629,9 @@ func TestFourStageFeedbackCommitPreservesVisibilityPause(t *testing.T) {
 	}()
 	awaitAgentStart(t, agent.started)
 	clock.Add(5 * time.Second)
-	pausedAt := clock.Now()
+	// PostgreSQL timestamptz persists microseconds; compare against the value
+	// the database can represent rather than platform-specific clock nanos.
+	pausedAt := clock.Now().Truncate(time.Microsecond)
 	paused, err := service.PauseSession(ctx, fixture.studentUserID, session.ID)
 	if err != nil || paused.Status != "PAUSED" || paused.ActiveSeconds != 25 {
 		t.Fatalf("pause during stage feedback=%+v err=%v", paused, err)

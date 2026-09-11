@@ -88,6 +88,13 @@ type storedStageSafetyOperation struct {
 	observedAt       time.Time
 }
 
+// PostgreSQL timestamptz stores microsecond precision. Normalize timestamps
+// used in persisted stage responses so the first response and an idempotent
+// replay serialize the same value on platforms whose clocks expose nanoseconds.
+func persistedStageTimestamp(value time.Time) time.Time {
+	return value.UTC().Truncate(time.Microsecond)
+}
+
 func loadReadyStageStartTask(ctx context.Context, tx pgx.Tx, knowledgePointID uuid.UUID) (stageTask, bool, error) {
 	rows, err := tx.Query(ctx, `
 SELECT lineage.id,stage_task.question_id,lineage.knowledge_point_id,subject.code,
@@ -502,7 +509,7 @@ func (service *Service) handleStageSafetyClassification(
 		if err := service.validateStageRequest(snapshot, request, operationToken); err != nil {
 			return err
 		}
-		now := latestTime(service.now(), snapshot.lastActivityAt)
+		now := persistedStageTimestamp(latestTime(service.now(), snapshot.lastActivityAt))
 		_, eventSequence, err := nextSequences(ctx, tx, request.SessionID)
 		if err != nil {
 			return err
@@ -580,7 +587,7 @@ func (service *Service) commitStageAttempt(
 		if err := service.validateStageRequest(snapshot, request, operationToken); err != nil {
 			return err
 		}
-		now := latestTime(service.now(), snapshot.lastActivityAt)
+		now := persistedStageTimestamp(latestTime(service.now(), snapshot.lastActivityAt))
 		turnSequence, eventSequence, err := nextSequences(ctx, tx, request.SessionID)
 		if err != nil {
 			return err
@@ -1170,7 +1177,7 @@ func storedStageSafetyResult(request StageSubmitRequest, stored storedStageSafet
 		EvidenceKind: StageEvidenceNone, Message: classification.StudentMessage,
 		SocraticRound: stored.responseSocratic, Status: stored.responseStatus,
 		ActiveSeconds: stored.activeSeconds, CurrentSeconds: stored.currentSeconds,
-		TimingAt: stored.observedAt,
+		TimingAt: stored.observedAt.UTC(),
 		Safety: &SafetyNotice{
 			PolicyVersion: stored.policyVersion, Category: stored.category,
 			Severity: stored.severity, FixedAction: stored.fixedAction,
@@ -1230,7 +1237,7 @@ func storedStageResult(sessionID uuid.UUID, digest string, stored storedStageAtt
 		StageCompleted: stored.stageCompleted, Code: stageResultCode(stored.responseCode),
 		Message: stageMessage(stored.responseCode), SocraticRound: stored.responseSocratic,
 		Status: stored.responseStatus, ActiveSeconds: stored.activeSeconds,
-		CurrentSeconds: stored.currentSeconds, TimingAt: stored.observedAt,
+		CurrentSeconds: stored.currentSeconds, TimingAt: stored.observedAt.UTC(),
 	}, nil
 }
 
