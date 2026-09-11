@@ -39,6 +39,10 @@ const structuredDraft = computed({
 const structuredComplete = computed(() => Boolean(structured.value && learning.interaction && structuredResponseComplete(learning.interaction, structuredDraft.value)))
 const activeStageIndex = computed(() => classroomStages.indexOf(learning.stageFlow?.stage as (typeof classroomStages)[number]))
 const stageMaterialUnavailable = computed(() => Boolean(learning.stageFlow && learning.interaction?.fallback && !complete.value))
+const routeSessionID = computed(() => String(route.params.id || ''))
+const sessionMatchesRoute = computed(() => Boolean(learning.sessionID) && learning.sessionID === routeSessionID.value)
+const sessionMismatch = computed(() => Boolean(learning.sessionID) && !sessionMatchesRoute.value)
+const controlsDisabled = computed(() => learning.status !== 'ACTIVE' || learning.loading || !sessionMatchesRoute.value)
 
 function formatDuration(seconds: number) {
   const safe = Math.max(0, Math.floor(seconds))
@@ -68,11 +72,15 @@ async function submit() {
 }
 
 async function support(type: 'HINT' | 'EXPLAIN') {
-	if (learning.status !== 'ACTIVE') return
-	const accepted = structured.value
-		? await learning.requestStageSupport(String(route.params.id), type)
-		: await learning.requestSupport(String(route.params.id), type)
-  if (accepted && type === 'EXPLAIN') await router.push(`/student/session/${String(route.params.id)}/supply`)
+	if (structured.value) {
+		const accepted = await learning.requestStageSupport(routeSessionID.value, type)
+		if (accepted && type === 'EXPLAIN') await router.push(`/student/session/${routeSessionID.value}/supply`)
+		return
+	}
+	const result = await learning.requestSupport(routeSessionID.value, type)
+	if (result.requestSent && result.outcome === 'APPLIED' && type === 'EXPLAIN') {
+		await router.push(`/student/session/${routeSessionID.value}/supply`)
+	}
 }
 
 async function abandon() {
@@ -302,6 +310,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
         >
           <div
             v-if="learning.status === 'PAUSED'"
+            data-testid="paused-support-guidance"
             class="mb-5 border-b border-zinc-200 pb-5"
             aria-live="polite"
           >
@@ -309,7 +318,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
               这次探索已暂停
             </p>
             <p class="mt-1 text-sm text-zinc-600">
-              继续后可以接着回答
+              要使用「一点提示」或「我不会」，请先继续这次探索。
             </p>
             <button
               type="button"
@@ -322,15 +331,37 @@ onBeforeUnmount(() => window.clearInterval(timer))
             </button>
           </div>
 
+          <div
+            v-if="sessionMismatch"
+            data-testid="session-mismatch-guidance"
+            class="mb-5 border-b border-zinc-200 pb-5"
+            role="alert"
+          >
+            <p class="font-medium">
+              课堂内容已经更新
+            </p>
+            <p class="mt-1 text-sm text-zinc-600">
+              重新加载后可以继续请求提示。
+            </p>
+            <button
+              type="button"
+              class="secondary-button mt-3"
+              :disabled="learning.preparing"
+              @click="openSession(routeSessionID)"
+            >
+              <RefreshCw :size="17" />{{ learning.preparing ? '正在重新加载' : '重新加载课堂' }}
+            </button>
+          </div>
+
           <form
             @submit.prevent="submit"
           >
             <fieldset
               data-testid="answer-controls"
-              class="m-0 border-0 p-0 transition-opacity"
-              :class="learning.status === 'PAUSED' ? 'opacity-55' : ''"
-              :disabled="learning.status !== 'ACTIVE' || learning.loading"
-              :aria-disabled="learning.status !== 'ACTIVE' || learning.loading"
+              class="m-0 border-0 p-0 transition-colors"
+              :class="controlsDisabled ? 'bg-zinc-100 text-zinc-500' : ''"
+              :disabled="controlsDisabled"
+              :aria-disabled="controlsDisabled"
             >
               <label
                 v-if="!structured"
@@ -378,27 +409,38 @@ onBeforeUnmount(() => window.clearInterval(timer))
               <div class="mt-4 grid grid-cols-2 gap-3">
                 <button
                   type="button"
+                  data-testid="hint-support"
                   class="secondary-button"
-                  :disabled="learning.loading"
+                  :disabled="controlsDisabled"
                   @click="support('HINT')"
                 >
                   <Lightbulb
                     :size="18"
                     aria-hidden="true"
-                  />一点提示
+                  />{{ learning.loading ? '正在准备' : '一点提示' }}
                 </button>
                 <button
                   type="button"
+                  data-testid="explain-support"
                   class="secondary-button"
-                  :disabled="learning.loading"
+                  :disabled="controlsDisabled"
                   @click="support('EXPLAIN')"
                 >
                   <Volume2
                     :size="18"
                     aria-hidden="true"
-                  />我不会
+                  />{{ learning.loading ? '正在准备' : '我不会' }}
                 </button>
               </div>
+              <p
+                v-if="learning.loading"
+                data-testid="support-waiting"
+                class="mt-3 text-sm font-medium text-zinc-600"
+                role="status"
+                aria-live="polite"
+              >
+                老师正在准备回应，请稍等
+              </p>
             </fieldset>
           </form>
         </div>

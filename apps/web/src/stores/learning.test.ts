@@ -420,3 +420,44 @@ test('handles a structured safety result without retaining child-authored fill t
 	expect(learning.structuredDraft).toEqual({})
 	expect(JSON.stringify(learning.timeline)).not.toContain(privateInput)
 })
+
+test.each([
+	{
+		name: 'session mismatch',
+		prepare: (learning: ReturnType<typeof useLearningStore>) => learning.applySession(session('session-1')),
+		sessionID: 'session-2',
+		reason: 'SESSION_MISMATCH',
+		message: '课堂内容已经更新，请重新加载课堂后再试',
+	},
+	{
+		name: 'loading',
+		prepare: (learning: ReturnType<typeof useLearningStore>) => {
+			learning.applySession(session('session-1'))
+			learning.loading = true
+		},
+		sessionID: 'session-1',
+		reason: 'LOADING',
+		message: '老师正在准备回应，请稍等',
+	},
+	{
+		name: 'paused session',
+		prepare: (learning: ReturnType<typeof useLearningStore>) => learning.applySession(session('session-1', {
+			status: 'PAUSED',
+			current_active_seconds: 0,
+		})),
+		sessionID: 'session-1',
+		reason: 'SESSION_INACTIVE',
+		message: '这次探索已暂停，请先点击「继续探索」',
+	},
+])('returns a structured no-request result for $name', async ({ prepare, sessionID, reason, message }) => {
+	const fetch = vi.fn()
+	vi.stubGlobal('fetch', fetch)
+	const learning = useLearningStore()
+	prepare(learning)
+
+	const result = await learning.requestSupport(sessionID, 'HINT')
+
+	expect(result).toEqual({ requestSent: false, reason })
+	expect(learning.error).toBe(message)
+	expect(fetch).not.toHaveBeenCalled()
+})

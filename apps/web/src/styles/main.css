@@ -129,6 +129,14 @@ input:focus-visible {
   color: #115e59;
 }
 
+.secondary-button:disabled,
+.choice-button:disabled {
+  cursor: not-allowed;
+  border-color: #d4d4d8;
+  background: #e4e4e7;
+  color: #71717a;
+}
+
 .choice-button {
   border: 1px solid #d4d4d4;
   background: #fff;
