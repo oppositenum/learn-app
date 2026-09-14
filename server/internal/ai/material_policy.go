@@ -78,11 +78,31 @@ func turnText(turn TutorTurn) string {
 func numericMaterial(value string) map[string]struct{} {
 	result := map[string]struct{}{}
 	runes := []rune(value)
+	addCompoundMaterial(runes, result)
 	for index := 0; index < len(runes); {
 		current := normalizeDigit(runes[index])
+		signed := false
+		sign := rune(0)
+		start := index
+		if isNumericSign(current) && index+1 < len(runes) {
+			next := normalizeDigit(runes[index+1])
+			if next >= '0' && next <= '9' && unaryNumericSign(runes, index) {
+				signed = true
+				if runes[index] == '+' {
+					sign = '+'
+				} else {
+					sign = '-'
+				}
+				index++
+				current = normalizeDigit(runes[index])
+			}
+		}
 		if current >= '0' && current <= '9' {
-			start := index
 			var token strings.Builder
+			if signed {
+				token.WriteRune(sign)
+				start--
+			}
 			for index < len(runes) {
 				current = normalizeDigit(runes[index])
 				if current >= '0' && current <= '9' {
@@ -137,11 +157,110 @@ func normalizeDigit(value rune) rune {
 	if value == '％' {
 		return '%'
 	}
+	if isNumericSign(value) {
+		return '-'
+	}
 	return unicode.ToLower(value)
+}
+
+func isNumericSign(value rune) bool {
+	return value == '+' || value == '-' || value == '−' || value == '－' || value == '﹣'
+}
+
+func unaryNumericSign(runes []rune, index int) bool {
+	if index == 0 {
+		return true
+	}
+	previous := normalizeDigit(runes[index-1])
+	if (previous >= '0' && previous <= '9') || isChineseNumeralRune(previous) {
+		return false
+	}
+	return true
 }
 
 func isChineseNumeralRune(value rune) bool {
 	return strings.ContainsRune("零〇一二两三四五六七八九十百千万亿半", value)
+}
+
+func addCompoundMaterial(runes []rune, result map[string]struct{}) {
+	for index := 0; index < len(runes); {
+		canonical, end, ok := chineseMaterialAtom(runes, index)
+		if !ok {
+			index = nextArabicMaterialEnd(runes, index, result)
+			continue
+		}
+		if end < len(runes) && runes[end] == '折' {
+			// Keep the atom alongside the compound so Chinese and Arabic
+			// spellings (for example, 八折 and 8折) remain equivalent.
+			result[canonical] = struct{}{}
+			result[canonical+"折"] = struct{}{}
+			index = end + 1
+			continue
+		}
+		if end+1 < len(runes) && runes[end] == '分' && runes[end+1] == '之' {
+			denominator, denominatorEnd, ok := chineseMaterialAtom(runes, end+2)
+			if ok {
+				result[canonical+"/"+denominator] = struct{}{}
+				index = denominatorEnd
+				continue
+			}
+		}
+		index = end
+	}
+}
+
+func nextArabicMaterialEnd(runes []rune, index int, result map[string]struct{}) int {
+	if index >= len(runes) {
+		return index
+	}
+	start := index
+	if isNumericSign(normalizeDigit(runes[index])) && index+1 < len(runes) && unaryNumericSign(runes, index) {
+		if next := normalizeDigit(runes[index+1]); next >= '0' && next <= '9' {
+			index++
+		}
+	}
+	if index >= len(runes) {
+		return start + 1
+	}
+	if current := normalizeDigit(runes[index]); current < '0' || current > '9' {
+		return start + 1
+	}
+	for index < len(runes) {
+		current := normalizeDigit(runes[index])
+		if current >= '0' && current <= '9' {
+			index++
+			continue
+		}
+		if (current == '.' || current == '/' || current == '%' || current == ':') && index+1 < len(runes) {
+			next := normalizeDigit(runes[index+1])
+			if next >= '0' && next <= '9' {
+				index++
+				continue
+			}
+		}
+		break
+	}
+	if index < len(runes) && runes[index] == '折' {
+		tokenStart := start
+		token := string(runes[tokenStart:index])
+		result[canonicalArabicNumber(token)+"折"] = struct{}{}
+		return index + 1
+	}
+	return start + 1
+}
+
+func chineseMaterialAtom(runes []rune, start int) (string, int, bool) {
+	if start >= len(runes) {
+		return "", start, false
+	}
+	if !isChineseNumeralRune(runes[start]) {
+		return "", start, false
+	}
+	end := start
+	for end < len(runes) && isChineseNumeralRune(runes[end]) {
+		end++
+	}
+	return canonicalChineseNumber(string(runes[start:end])), end, true
 }
 
 func chineseNumeralHasMaterialContext(runes []rune, start, end int) bool {
@@ -212,25 +331,30 @@ func isProceduralChineseNumeral(runes []rune, start, end int) bool {
 }
 
 func canonicalArabicNumber(token string) string {
+	sign := ""
+	if len(token) > 0 && (token[0] == '-' || token[0] == '+') {
+		sign = token[:1]
+		token = token[1:]
+	}
 	if strings.ContainsAny(token, "/%:") {
-		return token
+		return sign + token
 	}
 	integer, decimal, found := strings.Cut(token, ".")
 	if !allASCIIDigits(integer) || found && !allASCIIDigits(decimal) {
-		return token
+		return sign + token
 	}
 	integer = strings.TrimLeft(integer, "0")
 	if integer == "" {
 		integer = "0"
 	}
 	if !found {
-		return integer
+		return sign + integer
 	}
 	decimal = strings.TrimRight(decimal, "0")
 	if decimal == "" {
-		return integer
+		return sign + integer
 	}
-	return integer + "." + decimal
+	return sign + integer + "." + decimal
 }
 
 func canonicalChineseNumber(token string) string {

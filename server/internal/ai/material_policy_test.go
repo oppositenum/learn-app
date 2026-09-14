@@ -148,6 +148,67 @@ func TestTutorMaterialPolicyRecognizesChineseQuantitiesAndDecimals(t *testing.T)
 	}
 }
 
+func TestTutorMaterialPolicyRejectsChangedDiscountsAndFractionsInBoundedActions(t *testing.T) {
+	tests := []struct {
+		name     string
+		question string
+		message  string
+	}{
+		{name: "discount", question: "商品打八折。", message: "如果改成九折呢？"},
+		{name: "fraction without unit", question: "三分之一是多少？", message: "三分之二是多少？"},
+		{name: "fraction with unit", question: "喝三分之一杯橙汁。", message: "喝三分之二杯橙汁。"},
+		{name: "ascii negative", question: "温度是-5度。", message: "温度是5度。"},
+		{name: "unicode negative", question: "温度是−5度。", message: "温度是5度。"},
+	}
+	for _, test := range tests {
+		for _, action := range []tutor.State{tutor.StateProbe, tutor.StateHint, tutor.StateScaffold, tutor.StateAnalogy} {
+			t.Run(test.name+"/"+string(action), func(t *testing.T) {
+				question := materialPolicyQuestion(t, test.question, nil)
+				if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: action, Message: test.message}); !errors.Is(err, ErrTutorMaterialPolicyViolation) {
+					t.Fatalf("changed material was accepted: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestTutorMaterialPolicyAllowsUnchangedCompoundMaterialAndBoundedScope(t *testing.T) {
+	tests := []struct {
+		name     string
+		question string
+		message  string
+	}{
+		{name: "discount", question: "商品打八折。", message: "先想想八折代表什么。"},
+		{name: "fraction without unit", question: "三分之一是多少？", message: "先看三分之一。"},
+		{name: "fraction with unit", question: "喝三分之一杯橙汁。", message: "先看三分之一杯橙汁。"},
+		{name: "negative", question: "温度是−5度。", message: "先看−5度。"},
+	}
+	for _, test := range tests {
+		for _, action := range []tutor.State{tutor.StateProbe, tutor.StateHint, tutor.StateScaffold, tutor.StateAnalogy} {
+			t.Run(test.name+"/"+string(action), func(t *testing.T) {
+				question := materialPolicyQuestion(t, test.question, nil)
+				if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: action, Message: test.message}); err != nil {
+					t.Fatalf("unchanged material was rejected: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestTutorMaterialPolicyPreservesTeachingProseExemptions(t *testing.T) {
+	question := materialPolicyQuestion(t, "请根据题目继续思考。", nil)
+	for _, phrase := range []string{
+		"一个角度", "一个例子", "一个思路", "一个方法", "一个办法", "一个方式",
+		"万一", "千万", "第3步",
+	} {
+		t.Run(phrase, func(t *testing.T) {
+			if err := enforceTutorMaterialPolicy(question, TutorTurn{Action: tutor.StateHint, Message: phrase}); err != nil {
+				t.Fatalf("teaching prose %q was rejected: %v", phrase, err)
+			}
+		})
+	}
+}
+
 func TestExplanationAlwaysReturnsToOriginalTask(t *testing.T) {
 	turn := ensureOriginalTaskVerification(TutorTurn{Action: tutor.StateExplain, Message: "先看一个平行例子。"})
 	if turn.Message != "先看一个平行例子。 现在回到原题，请你再独立试一次。" {
