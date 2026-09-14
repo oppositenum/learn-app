@@ -21,6 +21,16 @@ type DuplicateLookup interface {
 type Validator struct{ Duplicates DuplicateLookup }
 
 func (validator Validator) Validate(asset Asset) Validation {
+	return validator.validate(asset, nil)
+}
+
+// ValidateWithMisconceptionTaxonomy applies the knowledge-point-scoped
+// misconception allowlist in addition to the schema and content checks.
+func (validator Validator) ValidateWithMisconceptionTaxonomy(asset Asset, allowed map[string]bool) Validation {
+	return validator.validate(asset, allowed)
+}
+
+func (validator Validator) validate(asset Asset, allowed map[string]bool) Validation {
 	checks := []Check{
 		check("schema", requiredValid(asset), "required fields, enums, JSON, and DRAFT state"),
 		check("student_interaction", interactionValid(asset), "structured material must satisfy student-interaction-v1"),
@@ -29,6 +39,7 @@ func (validator Validator) Validate(asset Asset) Validation {
 		check("unit", unitConsistent(asset), "unit-bearing numeric content must declare an expected unit"),
 		check("choices", choicesValid(asset), "choice IDs/text must be unique with exactly one correct option"),
 		check("solution", solutionConsistent(asset), "solution must be non-empty and consistent with the answer"),
+		check("misconception_taxonomy", misconceptionsInTaxonomy(asset.TeacherPrivate.Misconceptions, allowed), "misconceptions must belong to the knowledge-point taxonomy"),
 		check("duplicate", !validator.duplicate(asset), "normalized prompt must not duplicate another asset"),
 	}
 	passed := true
@@ -36,6 +47,18 @@ func (validator Validator) Validate(asset Asset) Validation {
 		passed = passed && item.Passed
 	}
 	return Validation{Passed: passed, Checks: checks}
+}
+
+func misconceptionsInTaxonomy(codes []string, allowed map[string]bool) bool {
+	if len(codes) == 0 || allowed == nil {
+		return true
+	}
+	for _, code := range codes {
+		if !allowed[code] {
+			return false
+		}
+	}
+	return true
 }
 
 func requiredValid(asset Asset) bool {

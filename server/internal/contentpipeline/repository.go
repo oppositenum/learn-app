@@ -223,6 +223,89 @@ WHERE q.id=$1`, questionID).Scan(&raw, &generation.Provider, &generation.Model, 
 	return asset, generation, nil
 }
 
+func (repository *Repository) AllowedMisconceptionCodes(ctx context.Context, knowledgePointID uuid.UUID) (map[string]bool, error) {
+	rows, err := repository.pool.Query(ctx, `
+SELECT misconception.code
+FROM knowledge_misconception_links link
+JOIN misconceptions misconception ON misconception.id=link.misconception_id
+WHERE link.knowledge_point_id=$1`, knowledgePointID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	allowed := map[string]bool{}
+	for rows.Next() {
+		var code string
+		if err := rows.Scan(&code); err != nil {
+			return nil, err
+		}
+		allowed[code] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(allowed) == 0 {
+		return nil, nil
+	}
+	return allowed, nil
+}
+
+// ReviseReleasedDraft preserves the release history while reopening one
+// released question through the only legal QUARANTINED -> DRAFT path.
+func (repository *Repository) ReviseReleasedDraft(ctx context.Context, asset Asset, actorID uuid.UUID, reason string, generation GenerationMetadata) error {
+	questionID, err := uuid.Parse(asset.QuestionID)
+	if err != nil {
+		return err
+	}
+	knowledgePointID, err := uuid.Parse(asset.KnowledgePointID)
+	if err != nil {
+		return err
+	}
+	sourceID, err := uuid.Parse(asset.SourceID)
+	if err != nil {
+		return err
+	}
+	assetJSON, err := json.Marshal(asset)
+	if err != nil {
+		return err
+	}
+	answerJSON, err := json.Marshal(map[string]any{
+		"value": asset.TeacherPrivate.Answer, "numeric_value": asset.TeacherPrivate.NumericValue, "unit": asset.TeacherPrivate.Unit,
+	})
+	if err != nil {
+		return err
+	}
+	misconceptionsJSON, err := json.Marshal(asset.TeacherPrivate.Misconceptions)
+	if err != nil {
+		return err
+	}
+	return pgx.BeginFunc(ctx, repository.pool, func(tx pgx.Tx) error {
+		var current Status
+		if err := tx.QueryRow(ctx, `SELECT status FROM questions WHERE id=$1 AND knowledge_point_id=$2 FOR UPDATE`, questionID, knowledgePointID).Scan(&current); err != nil {
+			return err
+		}
+		if current != Released {
+			return ErrReleaseGate
+		}
+		if _, err := tx.Exec(ctx, `UPDATE questions SET status='QUARANTINED',updated_at=now() WHERE id=$1`, questionID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO content_release_records(id,question_id,from_status,to_status,reason,actor_user_id) VALUES($1,$2,'RELEASED','QUARANTINED',$3,$4)`, uuid.New(), questionID, reason, nullableUUID(actorID)); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE questions SET status='DRAFT',difficulty=$2,prompt_public=$3,scene_public_json=$4,input_schema_json=$5,content_version=$6,updated_at=now() WHERE id=$1`, questionID, asset.Difficulty, asset.PromptPublic, asset.Scene, asset.InputSchema, asset.ContentVersion); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE question_private_answers SET correct_answer_json=$2,full_solution_private=$3,teacher_reference_answer=$4,misconceptions_private_json=$5 WHERE question_id=$1`, questionID, answerJSON, asset.TeacherPrivate.Solution, asset.TeacherPrivate.Answer, misconceptionsJSON); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO content_versions(id,question_id,version,schema_version,generator_provider,generator_model,generator_request_id,source_id,asset_json) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9)`, uuid.New(), questionID, asset.ContentVersion, asset.SchemaVersion, generation.Provider, generation.Model, generation.RequestID, sourceID, assetJSON); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 func (repository *Repository) DuplicateExists(ctx context.Context, normalizedHash string, exceptQuestionID uuid.UUID) (bool, error) {
 	rows, err := repository.pool.Query(ctx, `SELECT id,prompt_public FROM questions WHERE id<>$1`, exceptQuestionID)
 	if err != nil {

@@ -66,7 +66,10 @@ func (service *Service) GenerateDrafts(ctx context.Context, request GenerateRequ
 		if err != nil {
 			return nil, err
 		}
-		validation := service.validator.Validate(asset)
+		validation, err := service.validateAsset(ctx, asset)
+		if err != nil {
+			return nil, err
+		}
 		if !validation.Passed {
 			return nil, fmt.Errorf("generated question %d failed local preflight: %v", index+1, validation.Checks)
 		}
@@ -100,11 +103,40 @@ func (service *Service) ImportDraft(ctx context.Context, asset Asset, generation
 	if strings.TrimSpace(generation.Provider) == "" || strings.TrimSpace(generation.Model) == "" {
 		return errors.New("generator provider and model are required")
 	}
-	validation := service.validator.Validate(asset)
+	validation, err := service.validateAsset(ctx, asset)
+	if err != nil {
+		return err
+	}
 	if !checkPassed(validation, "schema") {
 		return errors.New("draft asset does not satisfy the content schema")
 	}
 	return service.repository.CreateDraft(ctx, asset, generation)
+}
+
+func (service *Service) validateAsset(ctx context.Context, asset Asset) (Validation, error) {
+	knowledgePointID, err := uuid.Parse(asset.KnowledgePointID)
+	if err != nil {
+		return Validation{}, fmt.Errorf("invalid knowledge point: %w", err)
+	}
+	allowed, err := service.repository.AllowedMisconceptionCodes(ctx, knowledgePointID)
+	if err != nil {
+		return Validation{}, fmt.Errorf("load misconception taxonomy: %w", err)
+	}
+	return service.validator.ValidateWithMisconceptionTaxonomy(asset, allowed), nil
+}
+
+func (service *Service) ReviseReleasedDraft(ctx context.Context, asset Asset, actorID uuid.UUID, reason string, generation GenerationMetadata) error {
+	if service == nil || service.repository == nil {
+		return errors.New("content repository is required")
+	}
+	validation, err := service.validateAsset(ctx, asset)
+	if err != nil {
+		return err
+	}
+	if !checkPassed(validation, "schema") {
+		return errors.New("revised draft asset does not satisfy the content schema")
+	}
+	return service.repository.ReviseReleasedDraft(ctx, asset, actorID, reason, generation)
 }
 
 func (service *Service) Validate(ctx context.Context, questionID uuid.UUID) (uuid.UUID, Status, Validation, error) {
@@ -112,7 +144,10 @@ func (service *Service) Validate(ctx context.Context, questionID uuid.UUID) (uui
 	if err != nil {
 		return uuid.Nil, "", Validation{}, err
 	}
-	validation := service.validator.Validate(asset)
+	validation, err := service.validateAsset(ctx, asset)
+	if err != nil {
+		return uuid.Nil, "", Validation{}, err
+	}
 	duplicate, err := service.repository.DuplicateExists(ctx, NormalizedPromptHash(asset.PromptPublic), questionID)
 	if err != nil {
 		return uuid.Nil, "", Validation{}, err
