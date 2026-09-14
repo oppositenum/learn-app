@@ -152,6 +152,77 @@ func TestB6ParentLivePreviewAndCompletedReportEnforceVisibilityBoundary(t *testi
 	}
 }
 
+func TestB6ParentLiveAnswerProjectionFollowsCurrentQuestionAndDistinguishesUnanswered(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	router := api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Parents:      parent.NewRepository(pool),
+	})
+
+	// Move the live session to a different question without creating an answer
+	// for it. The previous answer must not leak through the projection.
+	if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET current_question_id=$2 WHERE id=$1`, fixture.sessionID, fixture.draftQuestionID); err != nil {
+		t.Fatal(err)
+	}
+	response := performParentSessionRequest(router, fixture.parentToken, fixture.studentID, fixture.sessionID)
+	if response.Code != http.StatusOK {
+		t.Fatalf("Parent live after question switch=%d %s", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["question_prompt"] != "未发布题目" {
+		t.Fatalf("question prompt=%v", payload["question_prompt"])
+	}
+	if _, present := payload["student_answer_preview"]; present {
+		t.Fatal("previous question answer preview leaked after question switch")
+	}
+	if payload["answer_correct"] != nil {
+		t.Fatalf("unanswered current question was projected as answer_correct=%v", payload["answer_correct"])
+	}
+	if payload["error_type"] != "" {
+		t.Fatalf("previous error type leaked after question switch: %v", payload["error_type"])
+	}
+	if misconceptions, ok := payload["misconceptions"].([]any); !ok || len(misconceptions) != 0 {
+		t.Fatalf("previous misconceptions leaked after question switch: %v", payload["misconceptions"])
+	}
+
+	newAnswerID := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO student_answers(id,session_id,question_id,answer_text) VALUES($1,$2,$3,'CURRENT_QUESTION_ANSWER')`, newAnswerID, fixture.sessionID, fixture.draftQuestionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO answer_analyses(id,student_answer_id,answer_correct,reasoning_quality,confidence,error_type,misconceptions_private_json,emotion_signal,engagement,recommended_action)
+VALUES($1,$2,true,'STRONG',0.99,'NONE','[]','NEUTRAL','NORMAL','PROBE')`, uuid.New(), newAnswerID); err != nil {
+		t.Fatal(err)
+	}
+	response = performParentSessionRequest(router, fixture.parentToken, fixture.studentID, fixture.sessionID)
+	if response.Code != http.StatusOK {
+		t.Fatalf("Parent live after current question answer=%d %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["student_answer_preview"] != "CURRENT_QUESTION_ANSWER" {
+		t.Fatalf("current question preview=%v", payload["student_answer_preview"])
+	}
+	if payload["answer_correct"] != true {
+		t.Fatalf("current question answer_correct=%v", payload["answer_correct"])
+	}
+	if payload["error_type"] != "NONE" {
+		t.Fatalf("current question error_type=%v", payload["error_type"])
+	}
+	if misconceptions, ok := payload["misconceptions"].([]any); !ok || len(misconceptions) != 0 {
+		t.Fatalf("current question misconceptions=%v", payload["misconceptions"])
+	}
+}
+
 func TestB6ParentRealtimePayloadNeverPersistsStudentAnswerBody(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedPool(t, ctx, testDatabaseURL(t))

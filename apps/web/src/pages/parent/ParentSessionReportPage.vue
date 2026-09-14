@@ -15,6 +15,7 @@ const error = ref('')
 
 const correctAnswer = computed(() => formatAnswer(session.value?.correct_answer))
 const misconception = computed(() => {
+  if (session.value?.answer_correct === null) return '当前题目尚未作答'
   if (session.value?.answer_correct || session.value?.error_type === 'NONE') return '本次回答未发现错误'
   return session.value?.error_type || session.value?.misconceptions?.join('、') || '本次未记录易错类型'
 })
@@ -130,19 +131,24 @@ onMounted(async () => {
           </p>
           <p
             class="mt-3 flex items-center gap-2 text-sm font-semibold"
-            :class="session.answer_correct ? 'text-teal-700' : 'text-red-700'"
+            :class="session.answer_correct === null ? 'text-zinc-600' : session.answer_correct ? 'text-teal-700' : 'text-red-700'"
           >
             <CheckCircle2
-              v-if="session.answer_correct"
+              v-if="session.answer_correct === true"
               :size="17"
               aria-hidden="true"
             />
             <XCircle
+              v-else-if="session.answer_correct === false"
+              :size="17"
+              aria-hidden="true"
+            />
+            <Clock3
               v-else
               :size="17"
               aria-hidden="true"
             />
-            {{ session.answer_correct ? '回答正确' : '仍需巩固' }}
+            {{ session.answer_correct === null ? '当前题目尚未作答' : session.answer_correct ? '回答正确' : '仍需巩固' }}
           </p>
         </div>
         <div class="border-t border-zinc-300 py-6 sm:border-t-0 sm:pl-6">

@@ -16,7 +16,7 @@ export interface ParentLiveSession {
   detail_mode: 'LIVE' | 'REPORT'
   student_answer_visibility: 'NONE' | 'SHORT_CURRENT' | 'WITHHELD_LONG' | 'WITHHELD_NOT_ACTIVE'
   student_answer_preview?: string
-  answer_correct: boolean
+  answer_correct: boolean | null
   error_type: string
   misconceptions: string[]
   tutor_action: string

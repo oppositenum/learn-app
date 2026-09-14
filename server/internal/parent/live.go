@@ -2,6 +2,7 @@ package parent
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -27,7 +28,7 @@ type LiveSessionDTO struct {
 	QuestionPrompt       string          `json:"question_prompt"`
 	CorrectAnswer        json.RawMessage `json:"correct_answer"`
 	FullSolution         string          `json:"full_solution"`
-	AnswerCorrect        bool            `json:"answer_correct"`
+	AnswerCorrect        *bool           `json:"answer_correct"`
 	ErrorType            string          `json:"error_type"`
 	Misconceptions       json.RawMessage `json:"misconceptions"`
 	TutorAction          string          `json:"tutor_action"`
@@ -54,11 +55,12 @@ type LiveTurnDTO struct {
 func (repository *Repository) LiveSession(ctx context.Context, studentID, sessionID uuid.UUID) (LiveSessionDTO, error) {
 	var live LiveSessionDTO
 	var studentAnswer string
+	var answerCorrect sql.NullBool
 	err := repository.pool.QueryRow(ctx, `
 SELECT ls.id, ls.student_id, s.name_zh, kp.name, ls.started_at, ls.status,
        ls.current_state, ls.socratic_fail_count, ls.engagement_state,
        q.prompt_public, qa.correct_answer_json, qa.full_solution_private,
-       COALESCE(sa.answer_text, ''), COALESCE(aa.answer_correct, false),
+       COALESCE(sa.answer_text, ''), aa.answer_correct,
        COALESCE(aa.error_type, ''), COALESCE(aa.misconceptions_private_json, '[]'::jsonb),
 		   COALESCE(tt.action, ''), COALESCE(tt.reason_private, ''),ls.target_minutes,
 			   ls.accumulated_seconds + CASE WHEN ls.status='ACTIVE' THEN GREATEST(0,EXTRACT(EPOCH FROM ((CASE WHEN ls.last_activity_at>=CURRENT_TIMESTAMP-interval '90 seconds' THEN CURRENT_TIMESTAMP ELSE ls.last_activity_at END)-COALESCE(ls.last_resumed_at,ls.started_at)))::integer) ELSE 0 END,
@@ -69,7 +71,9 @@ LEFT JOIN questions q ON q.id = ls.current_question_id
 LEFT JOIN knowledge_points kp ON kp.id = q.knowledge_point_id
 LEFT JOIN question_private_answers qa ON qa.question_id = q.id
 LEFT JOIN LATERAL (
-    SELECT * FROM student_answers WHERE session_id = ls.id ORDER BY submitted_at DESC LIMIT 1
+    SELECT * FROM student_answers
+    WHERE session_id = ls.id AND question_id = ls.current_question_id
+    ORDER BY submitted_at DESC LIMIT 1
 ) sa ON true
 LEFT JOIN answer_analyses aa ON aa.student_answer_id = sa.id
 LEFT JOIN LATERAL (
@@ -80,7 +84,7 @@ WHERE ls.id = $1 AND ls.student_id = $2`, sessionID, studentID).Scan(
 		&live.SessionID, &live.StudentID, &live.Subject, &live.KnowledgePoint,
 		&live.StartedAt, &live.Status, &live.CurrentState, &live.SocraticRound,
 		&live.Engagement, &live.QuestionPrompt, &live.CorrectAnswer, &live.FullSolution,
-		&studentAnswer, &live.AnswerCorrect, &live.ErrorType, &live.Misconceptions,
+		&studentAnswer, &answerCorrect, &live.ErrorType, &live.Misconceptions,
 		&live.TutorAction, &live.TutorReason, &live.TargetMinutes, &live.ActiveSeconds, &live.MasteryState, &live.MasteryScore,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -88,6 +92,9 @@ WHERE ls.id = $1 AND ls.student_id = $2`, sessionID, studentID).Scan(
 	}
 	if err != nil {
 		return live, err
+	}
+	if answerCorrect.Valid {
+		live.AnswerCorrect = &answerCorrect.Bool
 	}
 	live.DetailMode = "REPORT"
 	live.AnswerVisibility = "WITHHELD_NOT_ACTIVE"

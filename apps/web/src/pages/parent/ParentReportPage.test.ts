@@ -84,3 +84,20 @@ it('renders report-safe analysis without a verbatim Student answer', async () =>
   expect(wrapper.text()).toContain('120 分钟')
   expect(wrapper.text()).toContain('规则引擎已核验独立证据与跨天复习证据。')
 })
+
+it('distinguishes an unanswered current question from an incorrect answer', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.includes('/parent/children')) return { ok: true, json: async () => ({ children }) } as Response
+    return {
+      ok: true,
+      json: async () => ({ ...liveSession, answer_correct: null, error_type: '', misconceptions: [] }),
+    } as Response
+  }))
+  const router = await testRouter('/parent/report/session/session-1?student=student-1')
+  const wrapper = mount(ParentSessionReportPage, { global: { plugins: [router] } })
+  await flushPromises()
+
+  expect(wrapper.text()).toContain('当前题目尚未作答')
+  expect(wrapper.text()).not.toContain('仍需巩固')
+})
