@@ -106,7 +106,7 @@ func TestPostgresStudentAnswerNonDisclosureGate(t *testing.T) {
 	}
 
 	response = performQuestionRequest(router, fixture.studentToken, fixture.draftQuestionID)
-	if response.Code != http.StatusNotFound {
+	if response.Code != http.StatusNotFound || response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("draft question status = %d, want %d", response.Code, http.StatusNotFound)
 	}
 

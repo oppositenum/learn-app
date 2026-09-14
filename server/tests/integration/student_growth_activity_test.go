@@ -70,6 +70,44 @@ func TestGrowthAndParentReportDeriveTheSameLiveStreak(t *testing.T) {
 	assertStreak(0)
 }
 
+func TestShanghaiLearningDateBoundaryUsesPostgresDerivedActivityDate(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	boundary := time.Date(2030, 1, 10, 16, 1, 0, 0, time.UTC) // 00:01 on Jan 11 in Shanghai.
+	var activityDate string
+	if err := pool.QueryRow(ctx, `SELECT ($1::timestamptz AT TIME ZONE 'Asia/Shanghai')::date::text`, boundary).Scan(&activityDate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO student_activity_days(student_id,activity_date,completed_sessions,active_seconds,first_completed_at,last_completed_at) VALUES($1,$2::date,1,60,$3,$3)`, fixture.studentID, activityDate, boundary); err != nil {
+		t.Fatal(err)
+	}
+	service := classroom.NewService(pool, nil, nil, nil).WithClock(func() time.Time { return boundary })
+	router := api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Classroom:    classroom.NewHandler(service, pool, parent.NewRepository(pool)),
+	})
+	var payload struct {
+		Streak int `json:"streak_days"`
+	}
+	growth := performJSON(router, http.MethodGet, "/api/v1/student/growth", fixture.studentToken, nil)
+	if err := json.Unmarshal(growth.Body.Bytes(), &payload); err != nil || growth.Code != http.StatusOK || payload.Streak != 1 {
+		t.Fatalf("boundary growth=%d streak=%d body=%s err=%v", growth.Code, payload.Streak, growth.Body.String(), err)
+	}
+	service = service.WithClock(func() time.Time { return boundary.Add(-2 * time.Minute) })
+	router = api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Classroom:    classroom.NewHandler(service, pool, parent.NewRepository(pool)),
+	})
+	growth = performJSON(router, http.MethodGet, "/api/v1/student/growth", fixture.studentToken, nil)
+	if err := json.Unmarshal(growth.Body.Bytes(), &payload); err != nil || growth.Code != http.StatusOK || payload.Streak != 0 {
+		t.Fatalf("before-boundary growth=%d streak=%d body=%s err=%v", growth.Code, payload.Streak, growth.Body.String(), err)
+	}
+}
+
 func TestCompletedSessionsMaintainRealConsecutiveDayStreakAndGrowthSnapshot(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedPool(t, ctx, testDatabaseURL(t))

@@ -356,6 +356,131 @@ WHERE task.lineage_id=$1`, activation.LineageID).Scan(&releaseChainOK); err != n
 	}
 }
 
+func TestB7LinearEquationLoaderIsIdempotentAndUpgradesExistingLineage(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := seedcontent.EnsureLinearEquation(ctx, pool, seedcontent.NewPipeline(pool), uuid.Nil)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	var databaseName, schemaName string
+	if err := pool.QueryRow(ctx, `SELECT current_database(), current_schema()`).Scan(&databaseName, &schemaName); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("loader database=%s schema=%s lineage_id=%s", databaseName, schemaName, first.LineageID)
+	if len(first.QuestionIDs) != 12 {
+		t.Fatalf("initial question count=%d want 12", len(first.QuestionIDs))
+	}
+	initial := linearEquationLoaderCounts(t, ctx, pool, first.KnowledgePointID, first.LineageID)
+
+	repeated, err := seedcontent.EnsureLinearEquation(ctx, pool, seedcontent.NewPipeline(pool), uuid.Nil)
+	if err != nil {
+		t.Fatalf("same-version load: %v", err)
+	}
+	if repeated.LineageID != first.LineageID {
+		t.Fatalf("same-version lineage=%s want %s", repeated.LineageID, first.LineageID)
+	}
+	repeatedCounts := linearEquationLoaderCounts(t, ctx, pool, first.KnowledgePointID, first.LineageID)
+	if repeatedCounts != initial {
+		t.Fatalf("same-version load changed audited counts: initial=%+v repeated=%+v", initial, repeatedCounts)
+	}
+
+	// Simulate a persistent v4 database by moving the current version pointer
+	// and its version row back one release. The loader must create v5 through
+	// the normal quarantine/revision/validation/review/release path.
+	for _, questionID := range first.QuestionIDs {
+		if _, err := pool.Exec(ctx, `UPDATE content_versions SET version='math-linear-equation-content-v4' WHERE question_id=$1 AND version='math-linear-equation-content-v5'`, questionID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE questions SET content_version='math-linear-equation-content-v4' WHERE id=$1`, questionID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	upgraded, err := seedcontent.EnsureLinearEquation(ctx, pool, seedcontent.NewPipeline(pool), uuid.Nil)
+	if err != nil {
+		t.Fatalf("cross-version upgrade: %v", err)
+	}
+	if upgraded.LineageID != first.LineageID {
+		t.Fatalf("upgrade lineage=%s want reused %s", upgraded.LineageID, first.LineageID)
+	}
+	var readyLineages, releasedV5, oldV4 int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM classroom_task_lineages WHERE knowledge_point_id=$1 AND status='READY'`, first.KnowledgePointID).Scan(&readyLineages); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM questions WHERE knowledge_point_id=$1 AND content_version='math-linear-equation-content-v5' AND status='RELEASED'`, first.KnowledgePointID).Scan(&releasedV5); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM content_versions WHERE question_id=ANY($1) AND version='math-linear-equation-content-v4'`, first.QuestionIDs).Scan(&oldV4); err != nil {
+		t.Fatal(err)
+	}
+	if readyLineages != 1 || releasedV5 != 12 || oldV4 != 12 {
+		t.Fatalf("upgrade inventory ready=%d released_v5=%d old_v4=%d", readyLineages, releasedV5, oldV4)
+	}
+
+	var releaseChainOK int
+	if err := pool.QueryRow(ctx, `
+SELECT count(DISTINCT question.id)
+FROM classroom_stage_tasks task
+JOIN questions question ON question.id=task.question_id AND question.status='RELEASED' AND question.content_version='math-linear-equation-content-v5'
+WHERE task.lineage_id=$1
+  AND EXISTS (SELECT 1 FROM content_validations validation WHERE validation.question_id=question.id AND validation.content_version=question.content_version AND validation.schema_version='content-question-v1' AND validation.status='PASS')
+  AND EXISTS (SELECT 1 FROM content_reviews review WHERE review.question_id=question.id AND review.content_version=question.content_version AND review.schema_version='content-question-v1' AND review.result='PASS')
+  AND EXISTS (SELECT 1 FROM content_release_records release WHERE release.question_id=question.id AND release.to_status='RELEASED' AND release.validation_id IN (SELECT validation.id FROM content_validations validation WHERE validation.question_id=question.id AND validation.content_version=question.content_version AND validation.status='PASS') AND release.review_id IN (SELECT review.id FROM content_reviews review WHERE review.question_id=question.id AND review.content_version=question.content_version AND review.result='PASS'))`, first.LineageID).Scan(&releaseChainOK); err != nil {
+		t.Fatal(err)
+	}
+	if releaseChainOK != 12 {
+		t.Fatalf("upgrade release chain=%d want 12", releaseChainOK)
+	}
+
+	codes := map[string]int{}
+	rows, err := pool.Query(ctx, `SELECT code FROM misconceptions misconception JOIN knowledge_misconception_links link ON link.misconception_id=misconception.id WHERE link.knowledge_point_id=$1`, first.KnowledgePointID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var code string
+		if err := rows.Scan(&code); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		codes[code]++
+	}
+	rows.Close()
+	if len(codes) != 6 {
+		t.Fatalf("upgrade taxonomy codes=%v want 6 allowed codes", codes)
+	}
+}
+
+type linearEquationLoaderInventory struct {
+	Lineages, Versions, Validations, Reviews, Releases int
+}
+
+func linearEquationLoaderCounts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, knowledgePointID, lineageID uuid.UUID) linearEquationLoaderInventory {
+	t.Helper()
+	var inventory linearEquationLoaderInventory
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM classroom_task_lineages WHERE knowledge_point_id=$1 AND status='READY'`, knowledgePointID).Scan(&inventory.Lineages); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM content_versions WHERE question_id IN (SELECT question_id FROM classroom_stage_tasks WHERE lineage_id=$1)`, lineageID).Scan(&inventory.Versions); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM content_validations WHERE question_id IN (SELECT question_id FROM classroom_stage_tasks WHERE lineage_id=$1)`, lineageID).Scan(&inventory.Validations); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM content_reviews WHERE question_id IN (SELECT question_id FROM classroom_stage_tasks WHERE lineage_id=$1)`, lineageID).Scan(&inventory.Reviews); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM content_release_records WHERE question_id IN (SELECT question_id FROM classroom_stage_tasks WHERE lineage_id=$1)`, lineageID).Scan(&inventory.Releases); err != nil {
+		t.Fatal(err)
+	}
+	return inventory
+}
+
 type linearEquationCounters struct {
 	independent, life, variant, textbook int
 }

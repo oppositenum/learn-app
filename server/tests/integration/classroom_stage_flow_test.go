@@ -568,7 +568,7 @@ ORDER BY selection_order LIMIT 1`, fixture.lineageID, session.QuestionID).Scan(&
 		"task_id": session.QuestionID, "task_version": session.StageFlow.TaskVersion,
 		"response": incorrectStageResponse(t, ctx, pool, session.QuestionID),
 	})
-	if driftedSelection.Code != http.StatusServiceUnavailable || !strings.Contains(driftedSelection.Body.String(), "CLASSROOM_STAGE_UNAVAILABLE") || strings.Contains(driftedSelection.Body.String(), "CONTENT_EXHAUSTED") {
+	if driftedSelection.Code != http.StatusServiceUnavailable || driftedSelection.Header().Get("Cache-Control") != "no-store" || !strings.Contains(driftedSelection.Body.String(), "CLASSROOM_STAGE_UNAVAILABLE") || strings.Contains(driftedSelection.Body.String(), "CONTENT_EXHAUSTED") {
 		t.Fatalf("drifted candidate selection=%d %s", driftedSelection.Code, driftedSelection.Body.String())
 	}
 	if _, err := pool.Exec(ctx, `UPDATE classroom_stage_tasks SET scoring_rule_private_json=$2 WHERE question_id=$1`, driftedCandidateID, originalCandidateRule); err != nil {

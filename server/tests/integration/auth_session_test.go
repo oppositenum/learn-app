@@ -40,11 +40,11 @@ func TestPasswordLoginUsesSecureHttpOnlyCookieAndServerSideRevocation(t *testing
 	router := api.NewRouter(api.Dependencies{Authenticate: authenticator.Middleware, Identity: auth.NewHandlerWithSecureCookies(pool)})
 
 	wrong := performJSON(router, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"email": "student@example.test", "password": "wrong password value"})
-	if wrong.Code != http.StatusUnauthorized || strings.Contains(wrong.Body.String(), "student@example.test") {
+	if wrong.Code != http.StatusUnauthorized || wrong.Header().Get("Cache-Control") != "no-store" || strings.Contains(wrong.Body.String(), "student@example.test") {
 		t.Fatalf("wrong login=%d %s", wrong.Code, wrong.Body.String())
 	}
 	login := performJSON(router, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"email": "STUDENT@example.test ", "password": password})
-	if login.Code != http.StatusOK || strings.Contains(login.Body.String(), "session_token") || !strings.Contains(login.Body.String(), `"role":"STUDENT"`) {
+	if login.Code != http.StatusOK || login.Header().Get("Cache-Control") != "no-store" || strings.Contains(login.Body.String(), "session_token") || !strings.Contains(login.Body.String(), `"role":"STUDENT"`) {
 		t.Fatalf("login=%d %s", login.Code, login.Body.String())
 	}
 	cookies := login.Result().Cookies()
@@ -63,12 +63,12 @@ func TestPasswordLoginUsesSecureHttpOnlyCookieAndServerSideRevocation(t *testing
 	logoutRequest.AddCookie(cookies[0])
 	logout := httptest.NewRecorder()
 	router.ServeHTTP(logout, logoutRequest)
-	if logout.Code != http.StatusNoContent || len(logout.Result().Cookies()) != 1 || logout.Result().Cookies()[0].MaxAge >= 0 || !logout.Result().Cookies()[0].Secure {
+	if logout.Code != http.StatusNoContent || logout.Header().Get("Cache-Control") != "no-store" || len(logout.Result().Cookies()) != 1 || logout.Result().Cookies()[0].MaxAge >= 0 || !logout.Result().Cookies()[0].Secure {
 		t.Fatalf("logout=%d cookie=%+v", logout.Code, logout.Result().Cookies())
 	}
 	me = httptest.NewRecorder()
 	router.ServeHTTP(me, meRequest)
-	if me.Code != http.StatusUnauthorized {
+	if me.Code != http.StatusUnauthorized || me.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("revoked session still authenticated: %d %s", me.Code, me.Body.String())
 	}
 }

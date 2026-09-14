@@ -307,7 +307,7 @@ func TestB1AGradeBandUnavailableParentSubjectsAreExplicit(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode unavailable-subject response: %v body=%s", err, response.Body.String())
 	}
-	if response.Code != http.StatusUnprocessableEntity || !payload.Saved || payload.PlanUpdated || payload.Error != "no_available_content_for_enabled_subjects" || strings.Join(payload.AvailableSubjectCodes, ",") != "MATH" {
+	if response.Code != http.StatusUnprocessableEntity || response.Header().Get("Cache-Control") != "no-store" || !payload.Saved || payload.PlanUpdated || payload.Error != "no_available_content_for_enabled_subjects" || strings.Join(payload.AvailableSubjectCodes, ",") != "MATH" {
 		t.Fatalf("unavailable-subject response=%d %+v body=%s", response.Code, payload, response.Body.String())
 	}
 	var enabled []string
