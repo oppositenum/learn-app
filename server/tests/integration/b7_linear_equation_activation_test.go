@@ -268,6 +268,94 @@ func TestB7LinearEquationMisconceptionTaxonomyRejectsOutOfScopeDraft(t *testing.
 	}
 }
 
+func TestB7LinearEquationTaxonomyIsScopedAndDistributed(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	_, activation := seedLinearEquationActivation(t, ctx, pool)
+
+	type taskMisconception struct {
+		stage string
+		code  string
+	}
+	rows, err := pool.Query(ctx, `
+SELECT task.stage_role, misconception.code
+FROM classroom_stage_tasks task
+JOIN question_private_answers answer ON answer.question_id=task.question_id
+JOIN LATERAL jsonb_array_elements_text(answer.misconceptions_private_json) code(value) ON true
+JOIN misconceptions misconception ON misconception.code=code.value
+JOIN knowledge_misconception_links link ON link.knowledge_point_id=$1 AND link.misconception_id=misconception.id
+WHERE task.lineage_id=$2
+ORDER BY task.stage_role, task.selection_order`, activation.KnowledgePointID, activation.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var assignments []taskMisconception
+	for rows.Next() {
+		var assignment taskMisconception
+		if err := rows.Scan(&assignment.stage, &assignment.code); err != nil {
+			t.Fatal(err)
+		}
+		assignments = append(assignments, assignment)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(assignments) != 12 {
+		t.Fatalf("taxonomy assignments=%d want 12", len(assignments))
+	}
+	uniqueCodes := map[string]bool{}
+	for _, assignment := range assignments {
+		uniqueCodes[assignment.code] = true
+	}
+	if len(uniqueCodes) < 4 {
+		t.Fatalf("taxonomy distribution is still too uniform: %v", uniqueCodes)
+	}
+
+	var readyCount, taskCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM classroom_task_lineages WHERE knowledge_point_id=$1 AND status='READY'`, activation.KnowledgePointID).Scan(&readyCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM classroom_stage_tasks WHERE lineage_id=$1`, activation.LineageID).Scan(&taskCount); err != nil {
+		t.Fatal(err)
+	}
+	if readyCount != 1 || taskCount != 12 {
+		t.Fatalf("lineage inventory ready=%d tasks=%d", readyCount, taskCount)
+	}
+	var original, variant, abstract, verify int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE stage_role='ORIGINAL'), count(*) FILTER (WHERE stage_role='VARIANT'),
+       count(*) FILTER (WHERE stage_role='ABSTRACT'), count(*) FILTER (WHERE stage_role='VERIFY')
+FROM classroom_stage_tasks WHERE lineage_id=$1`, activation.LineageID).Scan(&original, &variant, &abstract, &verify); err != nil {
+		t.Fatal(err)
+	}
+	if original != 3 || variant != 3 || abstract != 3 || verify != 3 {
+		t.Fatalf("stage counts=%d/%d/%d/%d", original, variant, abstract, verify)
+	}
+
+	var releaseChainOK int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*)
+FROM classroom_stage_tasks task
+JOIN questions question ON question.id=task.question_id AND question.status='RELEASED'
+JOIN content_versions version ON version.question_id=question.id AND version.version=question.content_version AND version.schema_version='content-question-v1'
+JOIN content_validations validation ON validation.question_id=question.id AND validation.content_version=question.content_version AND validation.schema_version=version.schema_version AND validation.status='PASS'
+JOIN content_reviews review ON review.question_id=question.id AND review.content_version=question.content_version AND review.schema_version=version.schema_version AND review.result='PASS'
+JOIN content_release_records release ON release.question_id=question.id AND release.to_status='RELEASED' AND release.validation_id=validation.id AND release.review_id=review.id
+WHERE task.lineage_id=$1`, activation.LineageID).Scan(&releaseChainOK); err != nil {
+		t.Fatal(err)
+	}
+	if releaseChainOK != 12 {
+		t.Fatalf("release chain rows=%d want 12", releaseChainOK)
+	}
+}
+
 type linearEquationCounters struct {
 	independent, life, variant, textbook int
 }
