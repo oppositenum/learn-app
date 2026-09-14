@@ -244,9 +244,6 @@ WHERE link.knowledge_point_id=$1`, knowledgePointID)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(allowed) == 0 {
-		return nil, nil
-	}
 	return allowed, nil
 }
 
