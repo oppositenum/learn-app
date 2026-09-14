@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -16,6 +17,7 @@ import (
 const (
 	LinearEquationKnowledgePointCode = "MATH-LINEAR-EQUATION"
 	LinearEquationLineageVersion     = "math-linear-equation-stage-v1"
+	LinearEquationContentVersion     = "math-linear-equation-content-v4"
 	curatedAuthorProvider            = "internal-curated"
 	curatedAuthorModel               = "linear-equation-author-v1"
 	curatedReviewerProvider          = "internal-curated"
@@ -46,7 +48,7 @@ func NewPipeline(pool *pgxpool.Pool) *contentpipeline.Service {
 	reviewer, err := contentpipeline.NewReviewService(
 		curatedAuthorProvider+":"+curatedAuthorModel,
 		curatedReviewerProvider+":"+curatedReviewerModel,
-		curatedReviewer{},
+		curatedReviewer{pool: pool},
 	)
 	if err != nil {
 		panic(err)
@@ -54,33 +56,68 @@ func NewPipeline(pool *pgxpool.Pool) *contentpipeline.Service {
 	return contentpipeline.NewService(contentpipeline.NewRepository(pool), contentpipeline.Validator{}, reviewer)
 }
 
-type curatedReviewer struct{}
+type curatedReviewer struct{ pool *pgxpool.Pool }
 
-func (curatedReviewer) Review(_ context.Context, asset contentpipeline.Asset) (contentpipeline.Review, contentpipeline.ReviewEvidence, error) {
-	validation := (contentpipeline.Validator{}).Validate(asset)
-	if !validation.Passed {
-		return contentpipeline.Review{
-				Result:   contentpipeline.ReviewReject,
-				Findings: []string{"curated seed failed its independent deterministic review"},
-			}, contentpipeline.ReviewEvidence{
-				Provider:  curatedReviewerProvider,
-				Model:     curatedReviewerModel,
-				RequestID: "review-" + asset.QuestionID,
-			}, nil
+func (reviewer curatedReviewer) Review(ctx context.Context, asset contentpipeline.Asset) (contentpipeline.Review, contentpipeline.ReviewEvidence, error) {
+	knowledgePointID, err := uuid.Parse(asset.KnowledgePointID)
+	if err != nil {
+		return contentpipeline.Review{}, contentpipeline.ReviewEvidence{}, err
+	}
+	allowed, err := contentpipeline.NewRepository(reviewer.pool).AllowedMisconceptionCodes(ctx, knowledgePointID)
+	if err != nil {
+		return contentpipeline.Review{}, contentpipeline.ReviewEvidence{}, err
+	}
+	validation := (contentpipeline.Validator{}).ValidateWithMisconceptionTaxonomy(asset, allowed)
+	checks := map[string]bool{}
+	for _, item := range validation.Checks {
+		checks[item.Name] = item.Passed
+	}
+	ageAppropriate := asset.Difficulty == "L0" || asset.Difficulty == "L1" || asset.Difficulty == "L2" || asset.Difficulty == "L3"
+	numericMaterialCompatible := checks["numeric_answer"] && checks["student_interaction"] && !containsUnauthorizedTutorNumberMarker(asset.PromptPublic)
+	factuallySound := checks["student_interaction"] && checks["numeric_answer"] && checks["unit"] && checks["solution"] && numericMaterialCompatible
+	unambiguous := checks["student_interaction"] && checks["choices"] && checks["misconception_taxonomy"]
+	noAnswerLeak := checks["answer_not_public"]
+	safeValues := !containsUnsafeReviewText(asset.PromptPublic, asset.TeacherPrivate.Solution)
+	passed := validation.Passed && ageAppropriate && factuallySound && unambiguous && noAnswerLeak && safeValues
+	findings := []string{fmt.Sprintf("dimensions age_appropriate=%t factually_sound=%t unambiguous=%t no_answer_leak=%t safe_values=%t numeric_material_compatible=%t", ageAppropriate, factuallySound, unambiguous, noAnswerLeak, safeValues, numericMaterialCompatible), "deterministic secondary review checked taxonomy, answer leakage, numeric consistency, interaction schema, safe values, and REQ-TEACH-01 number compatibility"}
+	if !passed {
+		findings = append(findings, "one or more deterministic review dimensions failed")
+	}
+	result := contentpipeline.ReviewReject
+	if passed {
+		result = contentpipeline.ReviewPass
 	}
 	return contentpipeline.Review{
-			Result:         contentpipeline.ReviewPass,
-			AgeAppropriate: true,
-			FactuallySound: true,
-			Unambiguous:    true,
-			NoAnswerLeak:   true,
-			SafeValues:     true,
-			Findings:       []string{"curated internal source reviewed by deterministic independent reviewer"},
+			Result: result, AgeAppropriate: ageAppropriate, FactuallySound: factuallySound,
+			Unambiguous: unambiguous, NoAnswerLeak: noAnswerLeak, SafeValues: safeValues,
+			Findings: findings,
 		}, contentpipeline.ReviewEvidence{
 			Provider:  curatedReviewerProvider,
 			Model:     curatedReviewerModel,
 			RequestID: "review-" + asset.QuestionID,
 		}, nil
+}
+
+func containsUnsafeReviewText(values ...string) bool {
+	for _, value := range values {
+		lower := strings.ToLower(value)
+		for _, marker := range []string{"暴力", "自残", "色情", "毒品", "赌博"} {
+			if strings.Contains(lower, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsUnauthorizedTutorNumberMarker(prompt string) bool {
+	lower := strings.ToLower(prompt)
+	for _, marker := range []string{"probe换数", "hint换数", "scaffold换数", "analogy换数", "示范改数"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type contentSpec struct {
@@ -90,10 +127,15 @@ type contentSpec struct {
 	Scene          studentinteraction.Scene
 	ScoringVersion string
 	Rule           any
+	Answer         string
+	Solution       string
+	NumericValue   *float64
+	SolutionResult *float64
 }
 
 func LinearEquationAssets(knowledgePointID, sourceID uuid.UUID) ([]contentpipeline.Asset, []StageTaskDefinition, error) {
 	specs := linearEquationSpecs()
+	populateLinearEquationPrivateAnswers(specs)
 	assets := make([]contentpipeline.Asset, 0, len(specs))
 	tasks := make([]StageTaskDefinition, 0, len(specs))
 	for index, spec := range specs {
@@ -114,20 +156,16 @@ func LinearEquationAssets(knowledgePointID, sourceID uuid.UUID) ([]contentpipeli
 			QuestionID:       questionID.String(),
 			KnowledgePointID: knowledgePointID.String(),
 			SubjectCode:      "MATH",
-			Difficulty:       "L2",
+			Difficulty:       specDifficulty(spec.Stage),
 			QuestionType:     "STRUCTURED_INTERACTION",
 			PromptPublic:     spec.Prompt,
-			TeacherPrivate: contentpipeline.PrivateAnswer{
-				Answer:         "结构化回应已由规则核验",
-				Solution:       "学生完成结构化回应后，规则核验确认：结构化回应已由规则核验。",
-				Misconceptions: []string{"LINEAR_RELATIONSHIP_NOT_IDENTIFIED"},
-			},
-			Scene:          scene,
-			InputSchema:    inputSchema,
-			SourceID:       sourceID.String(),
-			ContentVersion: LinearEquationLineageVersion,
-			SchemaVersion:  contentpipeline.CurrentSchemaVersion,
-			Status:         contentpipeline.Draft,
+			TeacherPrivate:   contentpipeline.PrivateAnswer{Answer: spec.Answer, Solution: spec.Solution, NumericValue: spec.NumericValue, SolutionResult: spec.SolutionResult, Misconceptions: []string{"FIXED_COST_IGNORED"}},
+			Scene:            scene,
+			InputSchema:      inputSchema,
+			SourceID:         sourceID.String(),
+			ContentVersion:   LinearEquationContentVersion,
+			SchemaVersion:    contentpipeline.CurrentSchemaVersion,
+			Status:           contentpipeline.Draft,
 		})
 		tasks = append(tasks, StageTaskDefinition{
 			Stage:              spec.Stage,
@@ -141,6 +179,37 @@ func LinearEquationAssets(knowledgePointID, sourceID uuid.UUID) ([]contentpipeli
 	return assets, tasks, nil
 }
 
+func populateLinearEquationPrivateAnswers(specs []contentSpec) {
+	answers := []struct {
+		answer, explanation string
+		numeric             *float64
+	}{
+		{"每多1本，总价都增加同样的钱", "观察相邻本数的总价差，固定的增加量说明每本的单价保持不变。", nil},
+		{"比较相邻页数的总价差", "先比较页数相邻的两行，再用总价差识别每页增加的费用；一次性的装订费不会重复增加。", nil},
+		{"第一次计时前有固定开锁费；每多1小时增加相同费用", "固定开锁费是起点，每小时相同的增加量是变化率，两条线索共同说明一次关系。", nil},
+		{"4元", "相邻两行总价相差4元，所以每增加1份水果，总价增加4元。", floatPtr(4)},
+		{"6元", "比较材料包数量相邻的记录，总价每次增加6元，因此变化量是6元。", nil},
+		{"比较相邻路程的费用差 -> 找出不随路程变化的起步价 -> 用字母表示未知费用", "先从记录观察变化量，再分离固定起步价，最后才把未知量写成字母，能保持生活结构。", nil},
+		{"3x+6=36", "三张同价门票是3x，服务费6元，合计36元，所以方程是3x+6=36。", nil},
+		{"常数项7", "在5x+7=42中，7是不随单位数量变化的固定起点；5是每增加1单位的变化量，42是总量。", nil},
+		{"4表示相同单位的数量；9是固定加入的量", "4乘以未知数表示相同单位的数量，9是固定加入的量，25是总量而不是未知数本身。", nil},
+		{"10", "移项得3x=30，再除以3得到x=10。", nil},
+		{"10", "2x+4=24先减去4得到2x=20，再除以2得到x=10。", floatPtr(10)},
+		{"5", "5x-7=18先加上7得到5x=25，再除以5得到x=5。", nil},
+	}
+	for index, item := range answers {
+		if index >= len(specs) {
+			break
+		}
+		specs[index].Answer = item.answer
+		specs[index].Solution = "标准回应：" + item.answer + "。" + item.explanation
+		specs[index].NumericValue = item.numeric
+		specs[index].SolutionResult = item.numeric
+	}
+}
+
+func floatPtr(value float64) *float64 { return &value }
+
 func orderForStage(specs []contentSpec, index int) int {
 	order := 0
 	for current := 0; current <= index; current++ {
@@ -149,6 +218,21 @@ func orderForStage(specs []contentSpec, index int) int {
 		}
 	}
 	return order
+}
+
+func specDifficulty(stage string) string {
+	switch stage {
+	case "ORIGINAL":
+		return "L1"
+	case "VARIANT":
+		return "L2"
+	case "ABSTRACT":
+		return "L3"
+	case "VERIFY":
+		return "L3"
+	default:
+		return "L2"
+	}
 }
 
 func LinearEquationKnowledgePoint(ctx context.Context, pool *pgxpool.Pool) (uuid.UUID, uuid.UUID, error) {
@@ -171,12 +255,48 @@ func EnsureLinearEquation(ctx context.Context, pool *pgxpool.Pool, pipeline *con
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM classroom_task_lineages WHERE knowledge_point_id=$1 AND status='READY'`, knowledgePointID).Scan(&readyCount); err != nil {
 		return Activation{}, err
 	}
-	if readyCount != 0 {
-		return Activation{}, fmt.Errorf("knowledge point already has %d READY lineages", readyCount)
+	if readyCount > 1 {
+		return Activation{}, fmt.Errorf("knowledge point has %d READY lineages", readyCount)
 	}
 	assets, tasks, err := LinearEquationAssets(knowledgePointID, sourceID)
 	if err != nil {
 		return Activation{}, err
+	}
+	if readyCount == 1 {
+		var lineageID uuid.UUID
+		if err := pool.QueryRow(ctx, `SELECT id FROM classroom_task_lineages WHERE knowledge_point_id=$1 AND status='READY'`, knowledgePointID).Scan(&lineageID); err != nil {
+			return Activation{}, err
+		}
+		var currentVersion string
+		if err := pool.QueryRow(ctx, `SELECT content_version FROM questions WHERE id=$1`, assets[0].QuestionID).Scan(&currentVersion); err != nil {
+			return Activation{}, err
+		}
+		if currentVersion == LinearEquationContentVersion {
+			questionIDs := make([]uuid.UUID, 0, len(assets))
+			for _, asset := range assets {
+				questionIDs = append(questionIDs, uuid.MustParse(asset.QuestionID))
+			}
+			return Activation{KnowledgePointID: knowledgePointID, LineageID: lineageID, QuestionIDs: questionIDs, Tasks: tasks}, nil
+		}
+		for _, asset := range assets {
+			if err := pipeline.ReviseReleasedDraft(ctx, asset, actorID, "MATH-LINEAR-EQUATION B7-3 content repair", contentpipeline.GenerationMetadata{Provider: curatedAuthorProvider, Model: curatedAuthorModel, RequestID: "repair-author-" + asset.QuestionID}); err != nil {
+				return Activation{}, fmt.Errorf("revise %s: %w", asset.QuestionID, err)
+			}
+			if _, status, validation, err := pipeline.Validate(ctx, uuid.MustParse(asset.QuestionID)); err != nil || status != contentpipeline.AutomaticValidated || !validation.Passed {
+				return Activation{}, fmt.Errorf("validate revised %s status=%s passed=%t err=%v", asset.QuestionID, status, validation.Passed, err)
+			}
+			if _, status, review, err := pipeline.Review(ctx, uuid.MustParse(asset.QuestionID)); err != nil || status != contentpipeline.AIReviewed || review.Result != contentpipeline.ReviewPass {
+				return Activation{}, fmt.Errorf("review revised %s status=%s result=%s err=%v", asset.QuestionID, status, review.Result, err)
+			}
+			if err := pipeline.Release(ctx, uuid.MustParse(asset.QuestionID), actorID, "MATH-LINEAR-EQUATION B7-3 content repair"); err != nil {
+				return Activation{}, fmt.Errorf("release revised %s: %w", asset.QuestionID, err)
+			}
+		}
+		questionIDs := make([]uuid.UUID, 0, len(assets))
+		for _, asset := range assets {
+			questionIDs = append(questionIDs, uuid.MustParse(asset.QuestionID))
+		}
+		return Activation{KnowledgePointID: knowledgePointID, LineageID: lineageID, QuestionIDs: questionIDs, Tasks: tasks}, nil
 	}
 	for _, asset := range assets {
 		if err := pipeline.ImportDraft(ctx, asset, contentpipeline.GenerationMetadata{
