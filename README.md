@@ -105,4 +105,13 @@ The integration command must target real PostgreSQL. A skipped integration test 
 
 Integration gate baseline: top-level PASS >= 100, FAIL = 0, SKIP = 0, and TestIntegrationDatabaseConfiguredInCI must pass in CI.
 
+The reproducible Chromium viewport suite is separate from the four core gates so `npm test` does not require a browser binary:
+
+```sh
+npx playwright install --with-deps chromium
+npm run test:e2e
+```
+
+It uses Playwright at a 320 px layout viewport, switches the headless browser to a 360 px visible height, and exposes the matching reduced `visualViewport.height` while the keyboard is open. The authenticated Student classroom is exercised with intercepted API fixtures. Headless Chromium cannot summon an operating-system IME, so this is a deterministic keyboard-obscuration approximation for CI; a real-device run is still required before claiming coverage of OS-specific keyboard animation and IME behavior.
+
 HTTP and WebSocket contracts are documented under [`docs/api/`](docs/api/).
