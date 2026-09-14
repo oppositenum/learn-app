@@ -17,7 +17,7 @@ import (
 const (
 	LinearEquationKnowledgePointCode = "MATH-LINEAR-EQUATION"
 	LinearEquationLineageVersion     = "math-linear-equation-stage-v1"
-	LinearEquationContentVersion     = "math-linear-equation-content-v4"
+	LinearEquationContentVersion     = "math-linear-equation-content-v5"
 	curatedAuthorProvider            = "internal-curated"
 	curatedAuthorModel               = "linear-equation-author-v1"
 	curatedReviewerProvider          = "internal-curated"
@@ -131,6 +131,7 @@ type contentSpec struct {
 	Solution       string
 	NumericValue   *float64
 	SolutionResult *float64
+	Misconceptions []string
 }
 
 func LinearEquationAssets(knowledgePointID, sourceID uuid.UUID) ([]contentpipeline.Asset, []StageTaskDefinition, error) {
@@ -159,7 +160,7 @@ func LinearEquationAssets(knowledgePointID, sourceID uuid.UUID) ([]contentpipeli
 			Difficulty:       specDifficulty(spec.Stage),
 			QuestionType:     "STRUCTURED_INTERACTION",
 			PromptPublic:     spec.Prompt,
-			TeacherPrivate:   contentpipeline.PrivateAnswer{Answer: spec.Answer, Solution: spec.Solution, NumericValue: spec.NumericValue, SolutionResult: spec.SolutionResult, Misconceptions: []string{"FIXED_COST_IGNORED"}},
+			TeacherPrivate:   contentpipeline.PrivateAnswer{Answer: spec.Answer, Solution: spec.Solution, NumericValue: spec.NumericValue, SolutionResult: spec.SolutionResult, Misconceptions: append([]string(nil), spec.Misconceptions...)},
 			Scene:            scene,
 			InputSchema:      inputSchema,
 			SourceID:         sourceID.String(),
@@ -343,18 +344,18 @@ VALUES($1,$2,$3,$4,$5,$6,$7)`, task.QuestionID, lineageID, task.Stage, task.Sele
 
 func linearEquationSpecs() []contentSpec {
 	return []contentSpec{
-		{Stage: "ORIGINAL", EvidenceForm: "LIFE", Prompt: "文具店把同款练习册按本数装袋。观察三次总价后，哪句话最能说明每增加1本时总价的变化？", Scene: singleChoice("请选择最符合表格观察的说法。", []studentinteraction.Item{{ID: "a", Label: "每多1本，总价都增加同样的钱"}, {ID: "b", Label: "总价只由袋子的颜色决定"}, {ID: "c", Label: "本数越多，固定费用也会重复增加"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a"}, []string{"a", "b", "c"})},
-		{Stage: "ORIGINAL", EvidenceForm: "LIFE", Prompt: "校园打印点先收一次装订费，再按页数收费。根据价目表，选择可以帮助你找出每页增加金额的观察。", Scene: singleChoice("选出一个真正依赖表格变化的观察。", []studentinteraction.Item{{ID: "a", Label: "比较相邻页数的总价差"}, {ID: "b", Label: "只看最高的一次总价"}, {ID: "c", Label: "忽略页数，只记住封面颜色"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a"}, []string{"a", "b", "c"})},
-		{Stage: "ORIGINAL", EvidenceForm: "LIFE", Prompt: "社区自行车租借有固定开锁费，之后每小时增加相同费用。选择所有能从生活记录中识别这种关系的线索。", Scene: multiChoice("可多选。", []studentinteraction.Item{{ID: "a", Label: "第一次计时前就有一笔固定费用"}, {ID: "b", Label: "每多1小时，增加的钱保持一致"}, {ID: "c", Label: "每小时增加的钱完全不同"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a", "b"}, []string{"a", "b", "c"})},
-		{Stage: "VARIANT", EvidenceForm: "VARIANT", Prompt: "果汁摊的基础杯费不变，每加一份水果就增加同样金额。表格显示相邻两行总价差为4元，这个4元说明什么？", Scene: numberLine("在数轴上选择每增加1份水果的价格变化。", 0, 10, 1), ScoringVersion: "exact-number-v1", Rule: numberRule(4, 0, 10, 1)},
-		{Stage: "VARIANT", EvidenceForm: "VARIANT", Prompt: "手作店记录了材料包数量和总价。请在空格中填入‘每增加一个材料包，总价增加多少’这一变化量。", Scene: fillBlanks("填写表格中相邻两行的固定增加量。", "increase"), ScoringVersion: "exact-fill-v1", Rule: fillRule("increase", []string{"6元", "6"})},
-		{Stage: "VARIANT", EvidenceForm: "VARIANT", Prompt: "从打车记录走向代数表达时，下面哪一组顺序最能保留‘固定起步价+每公里相同增加’的思考路径？", Scene: ordering("按理解顺序排列。", []studentinteraction.Item{{ID: "observe", Label: "比较相邻路程的费用差"}, {ID: "fixed", Label: "找出不随路程变化的起步价"}, {ID: "symbol", Label: "用字母表示未知费用"}}), ScoringVersion: "exact-order-v1", Rule: orderRule([]string{"observe", "fixed", "symbol"}, []string{"observe", "fixed", "symbol"})},
-		{Stage: "ABSTRACT", EvidenceForm: "TEXTBOOK", Prompt: "把‘三张同价门票加6元服务费共36元’抽象成方程。选择最符合文字结构的表达式。", Scene: singleChoice("选择方程。", []studentinteraction.Item{{ID: "a", Label: "3x+6=36"}, {ID: "b", Label: "3+x+6=36"}, {ID: "c", Label: "3(x+6)=36"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a"}, []string{"a", "b", "c"})},
-		{Stage: "ABSTRACT", EvidenceForm: "TEXTBOOK", Prompt: "请把‘固定起点、每增加1单位的变化、总量’分别对应到方程 5x+7=42 的结构中。", Scene: fillBlanks("填写对应的结构名称。", "fixed"), ScoringVersion: "exact-fill-v1", Rule: fillRule("fixed", []string{"固定起点", "起点"})},
-		{Stage: "ABSTRACT", EvidenceForm: "TEXTBOOK", Prompt: "关于一次关系式 4x+9=25，选择所有正确的结构解释。", Scene: multiChoice("可多选。", []studentinteraction.Item{{ID: "a", Label: "4表示相同单位的数量"}, {ID: "b", Label: "9是固定加入的量"}, {ID: "c", Label: "25是未知数本身"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a", "b"}, []string{"a", "b", "c"})},
-		{Stage: "VERIFY", EvidenceForm: "TEXTBOOK", Prompt: "解方程 3x+6=36，选择 x 的值。", Scene: singleChoice("选择解。", []studentinteraction.Item{{ID: "a", Label: "8"}, {ID: "b", Label: "10"}, {ID: "c", Label: "12"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"b"}, []string{"a", "b", "c"})},
-		{Stage: "VERIFY", EvidenceForm: "TEXTBOOK", Prompt: "在数轴上标出方程 2x+4=24 的解。", Scene: numberLine("选择 x 的位置。", 0, 20, 1), ScoringVersion: "exact-number-v1", Rule: numberRule(10, 0, 20, 1)},
-		{Stage: "VERIFY", EvidenceForm: "TEXTBOOK", Prompt: "解方程 5x-7=18，并在空格中填写 x。", Scene: fillBlanks("填写方程的解。", "x"), ScoringVersion: "exact-fill-v1", Rule: fillRule("x", []string{"5", "5.0"})},
+		{Stage: "ORIGINAL", EvidenceForm: "LIFE", Misconceptions: []string{"LINEAR_CHANGE_NOT_IDENTIFIED"}, Prompt: "文具店把同款练习册按本数装袋。观察三次总价后，哪句话最能说明每增加1本时总价的变化？", Scene: singleChoice("请选择最符合表格观察的说法。", []studentinteraction.Item{{ID: "a", Label: "每多1本，总价都增加同样的钱"}, {ID: "b", Label: "总价只由袋子的颜色决定"}, {ID: "c", Label: "本数越多，固定费用也会重复增加"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a"}, []string{"a", "b", "c"})},
+		{Stage: "ORIGINAL", EvidenceForm: "LIFE", Misconceptions: []string{"LINEAR_CHANGE_NOT_IDENTIFIED"}, Prompt: "校园打印点先收一次装订费，再按页数收费。根据价目表，选择可以帮助你找出每页增加金额的观察。", Scene: singleChoice("选出一个真正依赖表格变化的观察。", []studentinteraction.Item{{ID: "a", Label: "比较相邻页数的总价差"}, {ID: "b", Label: "只看最高的一次总价"}, {ID: "c", Label: "忽略页数，只记住封面颜色"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a"}, []string{"a", "b", "c"})},
+		{Stage: "ORIGINAL", EvidenceForm: "LIFE", Misconceptions: []string{"FIXED_START_NOT_IDENTIFIED"}, Prompt: "社区自行车租借有固定开锁费，之后每小时增加相同费用。选择所有能从生活记录中识别这种关系的线索。", Scene: multiChoice("可多选。", []studentinteraction.Item{{ID: "a", Label: "第一次计时前就有一笔固定费用"}, {ID: "b", Label: "每多1小时，增加的钱保持一致"}, {ID: "c", Label: "每小时增加的钱完全不同"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a", "b"}, []string{"a", "b", "c"})},
+		{Stage: "VARIANT", EvidenceForm: "VARIANT", Misconceptions: []string{"LINEAR_CHANGE_NOT_IDENTIFIED"}, Prompt: "果汁摊的基础杯费不变，每加一份水果就增加同样金额。表格显示相邻两行总价差为4元，这个4元说明什么？", Scene: numberLine("在数轴上选择每增加1份水果的价格变化。", 0, 10, 1), ScoringVersion: "exact-number-v1", Rule: numberRule(4, 0, 10, 1)},
+		{Stage: "VARIANT", EvidenceForm: "VARIANT", Misconceptions: []string{"LINEAR_CHANGE_NOT_IDENTIFIED"}, Prompt: "手作店记录了材料包数量和总价。请在空格中填入‘每增加一个材料包，总价增加多少’这一变化量。", Scene: fillBlanks("填写表格中相邻两行的固定增加量。", "increase"), ScoringVersion: "exact-fill-v1", Rule: fillRule("increase", []string{"6元", "6"})},
+		{Stage: "VARIANT", EvidenceForm: "VARIANT", Misconceptions: []string{"FIXED_START_NOT_IDENTIFIED"}, Prompt: "从打车记录走向代数表达时，下面哪一组顺序最能保留‘固定起步价+每公里相同增加’的思考路径？", Scene: ordering("按理解顺序排列。", []studentinteraction.Item{{ID: "observe", Label: "比较相邻路程的费用差"}, {ID: "fixed", Label: "找出不随路程变化的起步价"}, {ID: "symbol", Label: "用字母表示未知费用"}}), ScoringVersion: "exact-order-v1", Rule: orderRule([]string{"observe", "fixed", "symbol"}, []string{"observe", "fixed", "symbol"})},
+		{Stage: "ABSTRACT", EvidenceForm: "TEXTBOOK", Misconceptions: []string{"LINEAR_TERMS_CONFUSED"}, Prompt: "把‘三张同价门票加6元服务费共36元’抽象成方程。选择最符合文字结构的表达式。", Scene: singleChoice("选择方程。", []studentinteraction.Item{{ID: "a", Label: "3x+6=36"}, {ID: "b", Label: "3+x+6=36"}, {ID: "c", Label: "3(x+6)=36"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a"}, []string{"a", "b", "c"})},
+		{Stage: "ABSTRACT", EvidenceForm: "TEXTBOOK", Misconceptions: []string{"LINEAR_TERMS_CONFUSED"}, Prompt: "请把‘固定起点、每增加1单位的变化、总量’分别对应到方程 5x+7=42 的结构中。", Scene: fillBlanks("填写对应的结构名称。", "fixed"), ScoringVersion: "exact-fill-v1", Rule: fillRule("fixed", []string{"固定起点", "起点"})},
+		{Stage: "ABSTRACT", EvidenceForm: "TEXTBOOK", Misconceptions: []string{"LINEAR_TERMS_CONFUSED"}, Prompt: "关于一次关系式 4x+9=25，选择所有正确的结构解释。", Scene: multiChoice("可多选。", []studentinteraction.Item{{ID: "a", Label: "4表示相同单位的数量"}, {ID: "b", Label: "9是固定加入的量"}, {ID: "c", Label: "25是未知数本身"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"a", "b"}, []string{"a", "b", "c"})},
+		{Stage: "VERIFY", EvidenceForm: "TEXTBOOK", Misconceptions: []string{"LINEAR_ISOLATION_ERROR"}, Prompt: "解方程 3x+6=36，选择 x 的值。", Scene: singleChoice("选择解。", []studentinteraction.Item{{ID: "a", Label: "8"}, {ID: "b", Label: "10"}, {ID: "c", Label: "12"}}), ScoringVersion: "exact-option-set-v1", Rule: optionRule([]string{"b"}, []string{"a", "b", "c"})},
+		{Stage: "VERIFY", EvidenceForm: "TEXTBOOK", Misconceptions: []string{"MULTIPLIES_INSTEAD_OF_DIVIDES"}, Prompt: "在数轴上标出方程 2x+4=24 的解。", Scene: numberLine("选择 x 的位置。", 0, 20, 1), ScoringVersion: "exact-number-v1", Rule: numberRule(10, 0, 20, 1)},
+		{Stage: "VERIFY", EvidenceForm: "TEXTBOOK", Misconceptions: []string{"LINEAR_ISOLATION_ERROR"}, Prompt: "解方程 5x-7=18，并在空格中填写 x。", Scene: fillBlanks("填写方程的解。", "x"), ScoringVersion: "exact-fill-v1", Rule: fillRule("x", []string{"5", "5.0"})},
 	}
 }
 

@@ -137,7 +137,7 @@ func pipelineAsset(id uuid.UUID) contentpipeline.Asset {
 		PromptPublic: "小航用4个相同盒子装完一批卡片。请写出求每盒数量的运算思路。",
 		TeacherPrivate: contentpipeline.PrivateAnswer{
 			Answer: "总数除以4", Solution: "运算是总数除以4，也就是用卡片总数除以盒子数。",
-			Misconceptions: []string{"FIXED_COST_IGNORED"},
+			Misconceptions: []string{"MULTIPLIES_INSTEAD_OF_DIVIDES"},
 		},
 		InputSchema:    json.RawMessage(`{"type":"string"}`),
 		SourceID:       "50000000-0000-4000-8000-000000000001",
