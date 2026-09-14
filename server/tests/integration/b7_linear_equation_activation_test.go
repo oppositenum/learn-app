@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/oppositenum/ai-learning-tutor/server/internal/classroom"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/contentpipeline"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/database"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/seedcontent"
@@ -106,6 +108,15 @@ func TestB7LinearEquationActivationCompletesFourStagesWithPipelineEvidence(t *te
 	if releasedCount != 13 || readyCount != 1 || taskCount != 12 {
 		t.Fatalf("activation inventory released=%d ready=%d tasks=%d", releasedCount, readyCount, taskCount)
 	}
+	var reviewFindings string
+	if err := pool.QueryRow(ctx, `SELECT findings_json::text FROM content_reviews WHERE question_id=$1 AND content_version=(SELECT content_version FROM questions WHERE id=$1) ORDER BY created_at DESC LIMIT 1`, activation.QuestionIDs[0]).Scan(&reviewFindings); err != nil {
+		t.Fatal(err)
+	}
+	for _, dimension := range []string{"age_appropriate=true", "factually_sound=true", "unambiguous=true", "no_answer_leak=true", "safe_values=true", "numeric_material_compatible=true"} {
+		if !strings.Contains(reviewFindings, dimension) {
+			t.Fatalf("secondary review did not record %s: %s", dimension, reviewFindings)
+		}
+	}
 }
 
 func TestB7LinearEquationAssistanceRequiresFreshIndependentTaskAndFailsClosedOnDrift(t *testing.T) {
@@ -179,6 +190,81 @@ func TestB7LinearEquationAssistanceRequiresFreshIndependentTaskAndFailsClosedOnD
 	}
 	if !drifted.Interaction.Fallback || drifted.Interaction.Renderer != studentinteraction.RendererTextFallback || drifted.Interaction.Scene != nil {
 		t.Fatalf("material drift did not fail closed: %+v", drifted.Interaction)
+	}
+}
+
+func TestB7LinearEquationParentReceivesReadableAnswerButStudentDoesNot(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture, activation := seedLinearEquationActivation(t, ctx, pool)
+	router := stageRouter(pool, classroom.NewService(pool, nil, nil, nil))
+	session := startStageSession(t, router, fixture)
+	parentResponse := performParentSessionRequest(router, fixture.security.parentToken, fixture.security.studentID, session.ID)
+	if parentResponse.Code != http.StatusOK {
+		t.Fatalf("parent live=%d %s", parentResponse.Code, parentResponse.Body.String())
+	}
+	if strings.Contains(parentResponse.Body.String(), "结构化回应已由规则核验") || strings.Contains(parentResponse.Body.String(), "scoring_rule_private_json") {
+		t.Fatalf("parent response still contains placeholder/private scoring rule: %s", parentResponse.Body.String())
+	}
+	var parentPayload struct {
+		CorrectAnswer json.RawMessage `json:"correct_answer"`
+		FullSolution  string          `json:"full_solution"`
+	}
+	if err := json.Unmarshal(parentResponse.Body.Bytes(), &parentPayload); err != nil {
+		t.Fatal(err)
+	}
+	if string(parentPayload.CorrectAnswer) == "null" || parentPayload.FullSolution == "" || !strings.Contains(parentPayload.FullSolution, "标准回应") {
+		t.Fatalf("parent answer/solution not readable: %+v", parentPayload)
+	}
+	studentResponse := performJSON(router, http.MethodGet, "/api/v1/student/sessions/"+session.ID.String(), fixture.security.studentToken, nil)
+	if studentResponse.Code != http.StatusOK {
+		t.Fatalf("student session=%d %s", studentResponse.Code, studentResponse.Body.String())
+	}
+	assertStudentPayloadHasNoPrivateFields(t, studentResponse.Body.Bytes())
+	if strings.Contains(studentResponse.Body.String(), parentPayload.FullSolution) || strings.Contains(studentResponse.Body.String(), activation.Tasks[0].ScoringRuleVersion) {
+		t.Fatalf("student response exposed parent/private material: %s", studentResponse.Body.String())
+	}
+}
+
+func TestB7LinearEquationMisconceptionTaxonomyRejectsOutOfScopeDraft(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	knowledgePointID, sourceID, err := seedcontent.LinearEquationKnowledgePoint(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets, _, err := seedcontent.LinearEquationAssets(knowledgePointID, sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets[0].TeacherPrivate.Misconceptions = []string{"LINEAR_RELATIONSHIP_NOT_IDENTIFIED"}
+	pipeline := seedcontent.NewPipeline(pool)
+	if err := pipeline.ImportDraft(ctx, assets[0], contentpipeline.GenerationMetadata{Provider: "test", Model: "taxonomy-test", RequestID: "taxonomy-test"}); err != nil {
+		t.Fatal(err)
+	}
+	questionID, err := uuid.Parse(assets[0].QuestionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, status, validation, err := pipeline.Validate(ctx, questionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != contentpipeline.RejectedAutomatic || validation.Passed {
+		t.Fatalf("out-of-scope misconception was not rejected: status=%s validation=%+v", status, validation)
+	}
+	var released bool
+	if err := pool.QueryRow(ctx, `SELECT status='RELEASED' FROM questions WHERE id=$1`, questionID).Scan(&released); err != nil {
+		t.Fatal(err)
+	}
+	if released {
+		t.Fatal("out-of-scope misconception draft reached RELEASED")
 	}
 }
 

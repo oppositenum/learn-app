@@ -23,13 +23,11 @@ type generatedContentStub struct {
 func (stub *generatedContentStub) Generate(_ context.Context, input contentpipeline.GenerationContext) (contentpipeline.GenerationResult, contentpipeline.GenerationMetadata, error) {
 	stub.input = input
 	return contentpipeline.GenerationResult{Questions: []contentpipeline.GeneratedQuestion{{
-		PromptPublic: "三份相同的学习资料和6元装订费共36元。请写出表示每份资料价格的等量关系。",
-		Answer:       "3x+6=36",
-		Solution:     "设每份资料价格为x元，三份资料与装订费构成3x+6=36。",
-		Misconceptions: []string{
-			"忽略固定装订费",
-		},
-		Choices: []contentpipeline.GeneratedChoice{},
+		PromptPublic:   "三份相同的学习资料和6元装订费共36元。请写出表示每份资料价格的等量关系。",
+		Answer:         "3x+6=36",
+		Solution:       "设每份资料价格为x元，三份资料与装订费构成3x+6=36。",
+		Misconceptions: []string{"FIXED_COST_IGNORED"},
+		Choices:        []contentpipeline.GeneratedChoice{},
 	}}}, contentpipeline.GenerationMetadata{Provider: "openai", Model: "generator-v1", RequestID: "generation-response-1"}, nil
 }
 

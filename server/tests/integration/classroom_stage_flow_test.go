@@ -834,6 +834,7 @@ func stageRouter(pool *pgxpool.Pool, service *classroom.Service) http.Handler {
 	parents := parent.NewRepository(pool)
 	return api.NewRouter(api.Dependencies{
 		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Parents:      parents,
 		Classroom:    classroom.NewHandler(service, pool, parents, planner.NewService(pool)),
 	})
 }
