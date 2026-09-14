@@ -436,7 +436,8 @@ func assertStudentPayloadHasNoPrivateFields(t *testing.T, body []byte) {
 		"full_solution": true, "full_solution_private": true,
 		"teacher_reference_answer": true, "teacher_solution": true,
 		"scoring_key": true, "scoring_key_json": true,
-		"misconceptions": true, "misconceptions_private_json": true,
+		"scoring_rule_private_json": true,
+		"misconceptions":            true, "misconceptions_private_json": true,
 		"hint_policy": true, "hint_policy_private_json": true,
 		"reason_private": true,
 	}
