@@ -10,12 +10,14 @@
     "apps/web"
   ],
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "jsdom": "^29.1.1"
   },
   "scripts": {
     "build": "npm run build --workspace @ai-learning-tutor/web",
     "dev": "npm run dev --workspace @ai-learning-tutor/web",
     "lint": "npm run lint --workspace @ai-learning-tutor/web",
-    "test": "npm run test --workspace @ai-learning-tutor/web"
+    "test": "npm run test --workspace @ai-learning-tutor/web",
+    "test:e2e": "playwright test"
   }
 }
