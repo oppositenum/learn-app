@@ -72,6 +72,7 @@ async function syncStudentIdentity() {
 async function reconcileHidden() {
 	if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
 	backgroundPausePending = true
+	if (learning.submissionInFlight) return
 	const paused = await pauseForBackground()
 	backgroundPausePending = !paused
 }
@@ -115,7 +116,8 @@ function handleVisibility() {
 
 function handlePageHide() {
 	if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
-	void pauseForBackground().catch(() => undefined)
+	backgroundPausePending = true
+	void queueBackgroundReconciliation()
 }
 
 function handlePageShow(event: PageTransitionEvent) {
@@ -124,7 +126,7 @@ function handlePageShow(event: PageTransitionEvent) {
 }
 
 const stopLearningWatch = watch(
-	() => [learning.sessionID, learning.status, learning.loading, learning.preparing],
+	() => [learning.sessionID, learning.status, learning.loading, learning.preparing, learning.submissionInFlight],
 	() => {
 		if (!isDocumentVisible()) {
 			void queueBackgroundReconciliation()
@@ -145,6 +147,10 @@ onMounted(() => {
   heartbeatTimer = window.setInterval(() => {
 		if (!route.meta.classroom || learning.status !== 'ACTIVE' || !learning.sessionID) return
 		if (isDocumentVisible() && hasFreshStudentInteraction()) {
+			void learning.heartbeat()
+			return
+		}
+		if (isDocumentVisible() && learning.submissionInFlight) {
 			void learning.heartbeat()
 			return
 		}

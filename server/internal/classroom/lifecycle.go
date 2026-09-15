@@ -55,6 +55,7 @@ type lifecycleRow struct {
 	lastActivityAt        time.Time
 	version               int64
 	timingVersion         int64
+	processingUntil       *time.Time
 }
 
 func (service *Service) PauseSession(ctx context.Context, userID, sessionID uuid.UUID) (SessionTiming, error) {
@@ -125,7 +126,10 @@ func (service *Service) transitionSession(ctx context.Context, userID, sessionID
 			if row.status != "PAUSED" {
 				return ErrSessionNotActive
 			}
-			if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET status='ACTIVE',last_resumed_at=$2,last_activity_at=$2,timing_version=timing_version+1 WHERE id=$1`, sessionID, now); err != nil {
+			// A visibility pause can leave an older operation lease behind. The
+			// lifecycle transition owns the paused session, so clear that lease
+			// before accepting new work; submit cleanup remains token-conditional.
+			if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET status='ACTIVE',last_resumed_at=$2,last_activity_at=$2,processing_token=NULL,processing_until=NULL,timing_version=timing_version+1 WHERE id=$1`, sessionID, now); err != nil {
 				return err
 			}
 			row.timingVersion++
@@ -178,6 +182,14 @@ func (service *Service) transitionSession(ctx context.Context, userID, sessionID
 			}
 			if row.status != "ACTIVE" {
 				return ErrSessionNotActive
+			}
+			if row.processingUntil != nil && row.processingUntil.After(now) {
+				// The lease is the in-flight survival signal. Do not advance
+				// last_activity_at while a provider call is running, otherwise
+				// provider wait would be counted as learning time.
+				now = row.lastActivityAt
+				result = timingFromRow(row, now)
+				return nil
 			}
 			if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET last_activity_at=$2,timing_version=timing_version+1 WHERE id=$1`, sessionID, now); err != nil {
 				return err
@@ -302,14 +314,14 @@ func loadLifecycleRow(ctx context.Context, tx pgx.Tx, userID, sessionID uuid.UUI
 	err := tx.QueryRow(ctx, `
 	SELECT ls.id,ls.student_id,ls.plan_block_id,ls.review_queue_id,ls.review_attempt_failed_at,
 	       ls.status,ls.started_at,ls.accumulated_seconds,
-	       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version
+	       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version,ls.processing_until
 FROM learning_sessions ls
 JOIN students student ON student.id=ls.student_id
 WHERE ls.id=$1 AND student.user_id=$2
 FOR UPDATE OF ls`, sessionID, userID).Scan(
 		&row.sessionID, &row.studentID, &row.planBlockID, &row.reviewQueueID,
 		&row.reviewAttemptFailedAt, &row.status, &row.startedAt,
-		&row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.version, &row.timingVersion,
+		&row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.version, &row.timingVersion, &row.processingUntil,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return row, ErrSessionNotFound

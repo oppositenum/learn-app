@@ -77,6 +77,7 @@ export const useLearningStore = defineStore('learning', {
     socraticRound: 0,
     preparing: false,
     loading: false,
+    submissionInFlight: false,
     error: '',
     sessionGone: false,
     voiceAudio: '',
@@ -103,6 +104,7 @@ export const useLearningStore = defineStore('learning', {
 			this.requestedSessionID = ''
 			this.preparing = false
 			this.loading = false
+			this.submissionInFlight = false
 			this.answerDraftSessionID = ''
 			this.answerDraft = ''
 			this.structuredDraftKey = ''
@@ -137,6 +139,7 @@ export const useLearningStore = defineStore('learning', {
       this.sessionGone = false
       this.voiceAudio = ''
       this.voiceSegments = []
+			this.submissionInFlight = false
 	      this.reflectionStatus = ''
 	      this.safetyNotice = null
       this.timeline = []
@@ -265,6 +268,7 @@ export const useLearningStore = defineStore('learning', {
 			if (!value || this.sessionID !== sessionID || this.loading) return false
 			const operation = ++this.operationSequence
 	      this.loading = true
+			this.submissionInFlight = true
 	      this.error = ''
 	      this.safetyNotice = null
 	      try {
@@ -310,7 +314,10 @@ export const useLearningStore = defineStore('learning', {
         this.error = error instanceof Error ? error.message : '课堂暂时无法提交'
         return false
       } finally {
-				if (operation === this.operationSequence) this.loading = false
+				if (operation === this.operationSequence) {
+					this.loading = false
+					this.submissionInFlight = false
+				}
 	      }
 	    },
 		async submitStageResponse(sessionID: string, response: Record<string, unknown>) {
@@ -325,6 +332,7 @@ export const useLearningStore = defineStore('learning', {
 			}
 			const operation = ++this.operationSequence
 			this.loading = true
+			this.submissionInFlight = true
 			this.error = ''
 			this.safetyNotice = null
 			try {
@@ -364,7 +372,10 @@ export const useLearningStore = defineStore('learning', {
 				this.error = error instanceof Error ? error.message : '课堂暂时无法提交'
 				return false
 			} finally {
-				if (operation === this.operationSequence) this.loading = false
+				if (operation === this.operationSequence) {
+					this.loading = false
+					this.submissionInFlight = false
+				}
 			}
 		},
 	    async requestSupport(sessionID: string, type: 'HINT' | 'EXPLAIN') {
@@ -527,7 +538,7 @@ export const useLearningStore = defineStore('learning', {
       return this.changeLifecycle(abandonStudentSession)
     },
     async heartbeat() {
-			if (!this.sessionID || this.status !== 'ACTIVE' || this.loading || document.visibilityState !== 'visible') return
+			if (!this.sessionID || this.status !== 'ACTIVE' || (this.loading && !this.submissionInFlight) || document.visibilityState !== 'visible') return
 			const sessionID = this.sessionID
 				const sequence = ++this.timingSequence
       try {

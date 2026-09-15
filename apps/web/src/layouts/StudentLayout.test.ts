@@ -4,7 +4,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import type { StudentSession } from '../api/student'
-import { studentInteractionEvent, studentInteractionFreshnessMS } from '../lib/studentInteraction'
+import { studentInteractionEvent, studentInteractionFreshnessMS, submissionFreshnessOrderingValid, studentSubmitBudgetMS } from '../lib/studentInteraction'
 import StudentSessionPage from '../pages/student/StudentSessionPage.vue'
 import { useAuthSession } from '../stores/auth'
 import { useLearningStore } from '../stores/learning'
@@ -92,6 +92,122 @@ test('pauses immediately when hidden while answer analysis is loading', async ()
   expect(learning.status).toBe('PAUSED')
   expect(learning.loading).toBe(true)
   wrapper.unmount()
+})
+
+test('keeps an in-flight submission alive after the interaction freshness window', async () => {
+	vi.useFakeTimers()
+	vi.setSystemTime(new Date('2026-08-26T12:00:00Z'))
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const answer = deferred<Response>()
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/answers')) return answer.promise
+		if (path.endsWith('/heartbeat')) return Promise.resolve(jsonResponse({
+			session_id: 'session-1', version: 1, timing_version: 1, status: 'ACTIVE',
+			active_seconds: 10, current_active_seconds: 10, timing_observed_at: '2026-08-26T12:00:10Z',
+		}))
+		if (path.endsWith('/sessions/session-1')) return Promise.resolve(jsonResponse(session({
+			version: 2, timing_version: 2, timing_observed_at: '2026-08-26T12:01:00Z',
+		})))
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const { learning, wrapper } = await classroomHarness()
+	const submission = learning.submitAnswer('session-1', '正在思考')
+	await Promise.resolve()
+	expect(learning.submissionInFlight).toBe(true)
+	expect(submissionFreshnessOrderingValid()).toBe(true)
+	expect(studentInteractionFreshnessMS).toBeLessThan(studentSubmitBudgetMS)
+
+	await vi.advanceTimersByTimeAsync(studentInteractionFreshnessMS + 15_000)
+	expect(learning.status).toBe('ACTIVE')
+	expect(learning.submissionInFlight).toBe(true)
+	expect(requests.some((path) => path.endsWith('/pause'))).toBe(false)
+	expect(requests.filter((path) => path.endsWith('/heartbeat')).length).toBeGreaterThan(0)
+
+	answer.resolve(jsonResponse({
+		session_id: 'session-1', version: 2, timing_version: 2, status: 'ACTIVE', action: 'PROBE',
+		message: '继续检查。', socratic_round: 1, active_seconds: 10, current_active_seconds: 10,
+		timing_observed_at: '2026-08-26T12:01:00Z',
+	}))
+	await submission
+	expect(learning.submissionInFlight).toBe(false)
+	wrapper.unmount()
+})
+
+test('defers pagehide pause until an in-flight submission closes', async () => {
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const answer = deferred<Response>()
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/answers')) return answer.promise
+		if (path.endsWith('/pause')) return Promise.resolve(jsonResponse({
+			session_id: 'session-1', version: 3, timing_version: 3, status: 'PAUSED',
+			active_seconds: 10, current_active_seconds: 0, timing_observed_at: '2026-08-26T12:01:00Z',
+		}))
+		if (path.endsWith('/sessions/session-1')) return Promise.resolve(jsonResponse(session({
+			version: 2, timing_version: 2, status: 'ACTIVE', current_active_seconds: 10,
+			timing_observed_at: '2026-08-26T12:01:00Z',
+		})))
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const { learning, wrapper } = await classroomHarness()
+	const submission = learning.submitAnswer('session-1', '正在思考')
+	await Promise.resolve()
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	window.dispatchEvent(new Event('pagehide'))
+	await flushPromises()
+	expect(requests.some((path) => path.endsWith('/pause'))).toBe(false)
+	expect(learning.status).toBe('ACTIVE')
+
+	answer.resolve(jsonResponse({
+		session_id: 'session-1', version: 2, timing_version: 2, status: 'ACTIVE', action: 'PROBE',
+		message: '继续检查。', socratic_round: 1, active_seconds: 10, current_active_seconds: 10,
+		timing_observed_at: '2026-08-26T12:01:00Z',
+	}))
+	await submission
+	await flushPromises()
+	expect(requests.some((path) => path.endsWith('/pause'))).toBe(true)
+	expect(learning.status).toBe('PAUSED')
+	wrapper.unmount()
+})
+
+test('explicit resume after a legal pause restores controls without losing the draft', async () => {
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const requests: string[] = []
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/pause')) return jsonResponse({
+			session_id: 'session-1', version: 2, timing_version: 2, status: 'PAUSED',
+			active_seconds: 10, current_active_seconds: 0, timing_observed_at: '2026-08-26T12:01:00Z',
+		})
+		if (path.endsWith('/resume')) return jsonResponse({
+			session_id: 'session-1', version: 3, timing_version: 3, status: 'ACTIVE',
+			active_seconds: 10, current_active_seconds: 0, active_since: '2026-08-26T12:01:01Z',
+			timing_observed_at: '2026-08-26T12:01:01Z',
+		})
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const { learning, wrapper } = await classroomHarness()
+	learning.setAnswerDraft('session-1', '尚未提交的想法')
+	expect(await learning.pauseSession()).toBe(true)
+	expect(learning.status).toBe('PAUSED')
+	expect(learning.answerDraftFor('session-1')).toBe('尚未提交的想法')
+	expect(await learning.resumeSession()).toBe(true)
+	expect(learning.status).toBe('ACTIVE')
+	expect(learning.answerDraftFor('session-1')).toBe('尚未提交的想法')
+	expect(requests).toEqual([
+		'/api/v1/student/sessions/session-1/pause',
+		'/api/v1/student/sessions/session-1',
+		'/api/v1/student/sessions/session-1/resume',
+		'/api/v1/student/sessions/session-1',
+	])
+	wrapper.unmount()
 })
 
 test('pageshow reconciles a terminal session from the server without resuming', async () => {

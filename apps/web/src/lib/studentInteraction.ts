@@ -2,6 +2,13 @@ import type { StageIdentity, StudentInteraction, StudentInteractionRenderer, Stu
 
 export const studentInteractionEvent = 'student-learning-interaction'
 export const studentInteractionFreshnessMS = 45_000
+// Mirrored from classroom.SubmitOverallTimeout. In-flight submissions bypass
+// freshness expiry without pretending the request is a user gesture.
+export const studentSubmitBudgetMS = 75_000
+
+export function submissionFreshnessOrderingValid(): boolean {
+  return studentInteractionFreshnessMS < studentSubmitBudgetMS
+}
 
 export const classroomStages = ['ORIGINAL', 'VARIANT', 'ABSTRACT', 'VERIFY'] as const
 export const classroomStageLabels: Record<(typeof classroomStages)[number], string> = {

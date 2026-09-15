@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +33,28 @@ func TestClassroomTimeoutOrderingKeepsRequestsAheadOfProxyAndStaleRecovery(t *te
 	wantProxy := "proxy_read_timeout " + proxySeconds + ";"
 	if !strings.Contains(string(nginx), wantProxy) || !strings.Contains(string(nginx), "proxy_send_timeout "+proxySeconds+";") {
 		t.Fatalf("deploy proxy timeout does not match ordering source %s", proxyReadTimeout)
+	}
+}
+
+func TestClassroomSubmitBudgetMatchesFrontendInFlightContract(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("could not locate lifecycle test source")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(sourceFile), "../../..", "apps", "web", "src", "lib", "studentInteraction.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`studentSubmitBudgetMS\s*=\s*([0-9_]+)`).FindSubmatch(source)
+	if len(match) != 2 {
+		t.Fatal("frontend submit budget mirror is missing")
+	}
+	frontendMS, err := strconv.ParseInt(strings.ReplaceAll(string(match[1]), "_", ""), 10, 64)
+	if err != nil {
+		t.Fatalf("invalid frontend submit budget: %v", err)
+	}
+	if frontendMS != SubmitOverallTimeout.Milliseconds() {
+		t.Fatalf("submit budget drift: frontend=%dms server=%dms", frontendMS, SubmitOverallTimeout.Milliseconds())
 	}
 }
 
