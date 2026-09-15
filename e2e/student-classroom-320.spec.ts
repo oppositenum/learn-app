@@ -33,6 +33,13 @@ const session = {
   timing_observed_at: '2030-01-01T00:00:45Z',
   state: 'ASK',
   socratic_round: 0,
+  // Private fields a real Student response must never carry. They exist only in
+  // this intercepted fixture, so the non-disclosure scan below fails if the
+  // classroom ever renders an unknown private field it was handed.
+  correct_answer: privateAnswer,
+  full_solution: privateSolution,
+  parent_score: parentOnly,
+  peer_comparison: peerOnly,
   timeline: [{
     sequence: 1,
     actor: 'TUTOR',
@@ -71,6 +78,21 @@ async function installKeyboardViewportShim(page: Page) {
   })
 }
 
+const forbiddenStudentText = [
+  privateAnswer, privateSolution, parentOnly, peerOnly,
+  '标准答案', '完整解析', '家长评分', '同龄人比较',
+]
+
+// Each classroom state renders a different intercepted response, and a leak in
+// one state is replaced by the next, so scan on every state instead of only the
+// final snapshot.
+async function assertNoPrivateStudentText(page: Page, state: string) {
+  const bodyText = await page.locator('body').innerText()
+  for (const forbidden of forbiddenStudentText) {
+    expect(bodyText, `${state} rendered forbidden Student text ${forbidden}`).not.toContain(forbidden)
+  }
+}
+
 async function assertReachableAboveKeyboard(page: Page, locator: Locator) {
   await locator.scrollIntoViewIfNeeded()
   await expect.poll(async () => locator.evaluate((element) => {
@@ -105,6 +127,10 @@ test.describe('student classroom at 320px with a soft-keyboard viewport', () => 
         active_seconds: 50,
         current_active_seconds: 17,
         timing_observed_at: '2030-01-01T00:00:50Z',
+        correct_answer: privateAnswer,
+        full_solution: privateSolution,
+        parent_score: parentOnly,
+        peer_comparison: peerOnly,
       }))
     })
     await page.route(`**/api/v1/student/sessions/${sessionID}/support`, async (route) => {
@@ -118,6 +144,10 @@ test.describe('student classroom at 320px with a soft-keyboard viewport', () => 
         active_seconds: 52,
         current_active_seconds: 19,
         timing_observed_at: '2030-01-01T00:00:52Z',
+        correct_answer: privateAnswer,
+        full_solution: privateSolution,
+        parent_score: parentOnly,
+        peer_comparison: peerOnly,
       }))
     })
   })
@@ -152,11 +182,15 @@ test.describe('student classroom at 320px with a soft-keyboard viewport', () => 
       return document.documentElement.scrollWidth <= viewport.width + 1
     })).toBe(true)
 
+    await assertNoPrivateStudentText(page, 'initial ASK state')
+
     await submit.click()
     await expect(page.getByText('继续说说你先找到的固定起点。')).toBeVisible()
+    await assertNoPrivateStudentText(page, 'answer-response state')
 
     await hint.click()
     await expect(page.getByText('看看没有买练习册时要先付多少。')).toBeVisible()
+    await assertNoPrivateStudentText(page, 'hint-support state')
 
     await page.setViewportSize({ width: 320, height: 720 })
     await page.evaluate(() => window.__setSoftKeyboardOpen?.(false))
@@ -178,9 +212,14 @@ test.describe('student classroom at 320px with a soft-keyboard viewport', () => 
     await page.setViewportSize({ width: 320, height: 720 })
     await page.evaluate(() => window.__setSoftKeyboardOpen?.(false))
 
-    const bodyText = await page.locator('body').innerText()
-    for (const forbidden of [privateAnswer, privateSolution, parentOnly, peerOnly, '标准答案', '完整解析', '家长评分', '同龄人比较']) {
-      expect(bodyText).not.toContain(forbidden)
+    // The scan below only proves anything if the intercepted responses really
+    // handed the classroom these private fields, so fail loudly if a later edit
+    // drops the injection and silently turns the assertion into a no-op.
+    const servedSession = JSON.stringify(session)
+    for (const canary of [privateAnswer, privateSolution, parentOnly, peerOnly]) {
+      expect(servedSession).toContain(canary)
     }
+
+    await assertNoPrivateStudentText(page, 'post-EXPLAIN state')
   })
 })
