@@ -200,6 +200,20 @@ SELECT EXISTS (
 }
 
 func (service *Service) SubmitStage(ctx context.Context, studentUserID uuid.UUID, request StageSubmitRequest) (StageSubmitResult, error) {
+	timeout := service.submitTimeout
+	if timeout <= 0 {
+		timeout = SubmitOverallTimeout
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := service.submitStageWithinBudget(requestCtx, studentUserID, request)
+	if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(requestCtx.Err(), context.DeadlineExceeded)) {
+		return StageSubmitResult{}, ErrSubmitTimedOut
+	}
+	return result, err
+}
+
+func (service *Service) submitStageWithinBudget(ctx context.Context, studentUserID uuid.UUID, request StageSubmitRequest) (StageSubmitResult, error) {
 	if err := validateStageSubmitRequest(request); err != nil {
 		return StageSubmitResult{}, err
 	}
@@ -220,7 +234,8 @@ func (service *Service) SubmitStage(ctx context.Context, studentUserID uuid.UUID
 	if err := service.RecoverStaleSessions(ctx, studentUserID); err != nil {
 		return StageSubmitResult{}, err
 	}
-	operationToken, err := service.beginSessionOperation(ctx, studentUserID, request.SessionID)
+	operationStartedAt := service.now()
+	operationToken, err := service.beginSessionOperationAt(ctx, studentUserID, request.SessionID, operationStartedAt)
 	if err != nil {
 		if stored, found, loadErr := service.loadStoredStageSafetyOperation(ctx, studentUserID, request.SessionID, request.OperationID); loadErr == nil && found {
 			return storedStageSafetyResult(request, stored)
@@ -240,7 +255,7 @@ func (service *Service) SubmitStage(ctx context.Context, studentUserID uuid.UUID
 		return StageSubmitResult{}, err
 	}
 	if classification := classifyStageResponse(snapshot.task, request.Response); classification.Matched {
-		return service.handleStageSafetyClassification(ctx, studentUserID, operationToken, snapshot, request, classification)
+		return service.handleStageSafetyClassification(ctx, studentUserID, operationToken, operationStartedAt, snapshot, request, classification)
 	}
 	score := StageScoreHelpRequested
 	if request.Kind == StageAttemptAnswer {
@@ -251,7 +266,7 @@ func (service *Service) SubmitStage(ctx context.Context, studentUserID uuid.UUID
 		return StageSubmitResult{}, err
 	}
 	result, published, completedAt, err := service.commitStageAttempt(
-		ctx, studentUserID, operationToken, snapshot, request, digest, score, feedback,
+		ctx, studentUserID, operationToken, operationStartedAt, snapshot, request, digest, score, feedback,
 	)
 	if err != nil {
 		return StageSubmitResult{}, err
@@ -481,7 +496,7 @@ func classifyStageResponse(task stageTask, response json.RawMessage) safety.Clas
 
 func (service *Service) handleStageSafetyClassification(
 	ctx context.Context,
-	studentUserID, operationToken uuid.UUID,
+	studentUserID, operationToken uuid.UUID, operationStartedAt time.Time,
 	prepared stageSnapshot,
 	request StageSubmitRequest,
 	classification safety.Classification,
@@ -509,7 +524,7 @@ func (service *Service) handleStageSafetyClassification(
 		if err := service.validateStageRequest(snapshot, request, operationToken); err != nil {
 			return err
 		}
-		now := persistedStageTimestamp(latestTime(service.now(), snapshot.lastActivityAt))
+		now := persistedStageTimestamp(latestTime(operationStartedAt, snapshot.lastActivityAt))
 		_, eventSequence, err := nextSequences(ctx, tx, request.SessionID)
 		if err != nil {
 			return err
@@ -557,7 +572,7 @@ func (service *Service) handleStageSafetyClassification(
 
 func (service *Service) commitStageAttempt(
 	ctx context.Context,
-	studentUserID, operationToken uuid.UUID,
+	studentUserID, operationToken uuid.UUID, operationStartedAt time.Time,
 	prepared stageSnapshot,
 	request StageSubmitRequest,
 	digest string,
@@ -587,7 +602,7 @@ func (service *Service) commitStageAttempt(
 		if err := service.validateStageRequest(snapshot, request, operationToken); err != nil {
 			return err
 		}
-		now := persistedStageTimestamp(latestTime(service.now(), snapshot.lastActivityAt))
+		now := persistedStageTimestamp(latestTime(operationStartedAt, snapshot.lastActivityAt))
 		turnSequence, eventSequence, err := nextSequences(ctx, tx, request.SessionID)
 		if err != nil {
 			return err

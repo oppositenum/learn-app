@@ -76,6 +76,8 @@ type OpenAIResponsesClient struct {
 	chainingUnsupported atomic.Bool
 }
 
+const accountingWriteTimeout = 5 * time.Second
+
 func (client *OpenAIResponsesClient) WithUsageRecorder(recorder UsageRecorder) *OpenAIResponsesClient {
 	client.usage = recorder
 	return client
@@ -189,7 +191,9 @@ func (client *OpenAIResponsesClient) GenerateStructured(ctx context.Context, req
 		if requestID == "" {
 			requestID = decoded.ID
 		}
-		if err := client.usage.RecordAIUsage(ctx, UsageRecord{
+		accountingCtx, cancelAccounting := context.WithTimeout(context.WithoutCancel(ctx), accountingWriteTimeout)
+		defer cancelAccounting()
+		if err := client.usage.RecordAIUsage(accountingCtx, UsageRecord{
 			RequestID: requestID, StudentID: request.StudentID, SessionID: request.SessionID,
 			Purpose: request.Purpose, Usage: result.Usage, Latency: time.Since(startedAt), CreatedAt: startedAt,
 		}); err != nil {
@@ -212,7 +216,9 @@ func (client *OpenAIResponsesClient) recordRequestOutcome(ctx context.Context, r
 	if !ok || request.RequestID == "" {
 		return
 	}
-	_ = recorder.RecordAIRequestOutcome(ctx, RequestOutcomeRecord{
+	accountingCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), accountingWriteTimeout)
+	defer cancel()
+	_ = recorder.RecordAIRequestOutcome(accountingCtx, RequestOutcomeRecord{
 		RequestID: request.RequestID, StudentID: request.StudentID, SessionID: request.SessionID,
 		Provider: "openai", Model: client.model, Purpose: request.Purpose, Outcome: outcome,
 		HTTPStatus: status, Latency: time.Since(startedAt), CreatedAt: startedAt,

@@ -98,6 +98,11 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 		return
 	}
 	result, err := handler.service.Submit(request.Context(), userID, sessionID, *body.Answer)
+	if errors.Is(err, ErrSubmitTimedOut) {
+		log.Printf("classroom submit timed out: session_id=%s", sessionID)
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorGenerationBusyCode})
+		return
+	}
 	if errors.Is(err, ErrVoiceReturnRequired) {
 		http.Error(writer, "return to the original question before answering", http.StatusConflict)
 		return
@@ -143,6 +148,9 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 
 func (handler *Handler) writeStageSubmitResult(writer http.ResponseWriter, result StageSubmitResult, err error) {
 	switch {
+	case errors.Is(err, ErrSubmitTimedOut):
+		log.Printf("four-stage classroom submit timed out")
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"code": ai.TutorGenerationBusyCode})
 	case errors.Is(err, ErrStageResponseRequired), errors.Is(err, ErrStageTaskMismatch):
 		http.Error(writer, "invalid structured stage answer", http.StatusBadRequest)
 	case errors.Is(err, ErrSessionNotFound):

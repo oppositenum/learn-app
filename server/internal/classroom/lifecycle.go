@@ -15,10 +15,21 @@ import (
 )
 
 const (
-	stalePauseAfter   = 90 * time.Second
-	staleAbandonAfter = 24 * time.Hour
-	sessionLeaseTime  = 5 * time.Minute
+	// The ordering is part of the session contract: a classroom request must
+	// settle before the proxy can cut it off, and an in-flight request must not
+	// be collected by stale-session recovery while it is still leased.
+	SubmitOverallTimeout = 75 * time.Second
+	proxyReadTimeout     = 85 * time.Second
+	stalePauseAfter      = 90 * time.Second
+	staleAbandonAfter    = 24 * time.Hour
+	// Keep the lease longer than the stale pause threshold so a provider call
+	// that is still in flight cannot be collected between request checkpoints.
+	sessionLeaseTime = 5 * time.Minute
 )
+
+func timeoutOrderingValid() bool {
+	return SubmitOverallTimeout < proxyReadTimeout && proxyReadTimeout < stalePauseAfter
+}
 
 type SessionTiming struct {
 	SessionID            uuid.UUID  `json:"session_id"`
@@ -507,7 +518,10 @@ func latestTime(value, floor time.Time) time.Time {
 }
 
 func (service *Service) beginSessionOperation(ctx context.Context, userID, sessionID uuid.UUID) (uuid.UUID, error) {
-	now := service.now()
+	return service.beginSessionOperationAt(ctx, userID, sessionID, service.now())
+}
+
+func (service *Service) beginSessionOperationAt(ctx context.Context, userID, sessionID uuid.UUID, now time.Time) (uuid.UUID, error) {
 	token := uuid.New()
 	var changed bool
 	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {

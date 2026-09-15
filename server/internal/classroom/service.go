@@ -34,6 +34,7 @@ var (
 	ErrVoiceNotActive      = errors.New("voice explanation is not active")
 	ErrSessionNotActive    = errors.New("classroom session is not active")
 	ErrAnotherSessionOpen  = errors.New("another classroom session is already open")
+	ErrSubmitTimedOut      = errors.New("classroom submission timed out")
 )
 
 type VoiceResult struct {
@@ -51,13 +52,14 @@ type VoiceProvider interface {
 }
 
 type Service struct {
-	pool    *pgxpool.Pool
-	hub     *realtime.Hub
-	voice   VoiceProvider
-	usage   ai.UsageRecorder
-	planner *planner.Service
-	agent   ai.TeachingAgent
-	now     func() time.Time
+	pool          *pgxpool.Pool
+	hub           *realtime.Hub
+	voice         VoiceProvider
+	usage         ai.UsageRecorder
+	planner       *planner.Service
+	agent         ai.TeachingAgent
+	now           func() time.Time
+	submitTimeout time.Duration
 }
 
 func (service *Service) WithTeachingAgent(agent ai.TeachingAgent) *Service {
@@ -73,9 +75,19 @@ func (service *Service) WithClock(now func() time.Time) *Service {
 }
 
 func NewService(pool *pgxpool.Pool, hub *realtime.Hub, voice VoiceProvider, usage ai.UsageRecorder, planners ...*planner.Service) *Service {
-	service := &Service{pool: pool, hub: hub, voice: voice, usage: usage, now: time.Now}
+	service := &Service{pool: pool, hub: hub, voice: voice, usage: usage, now: time.Now, submitTimeout: SubmitOverallTimeout}
 	if len(planners) > 0 {
 		service.planner = planners[0]
+	}
+	return service
+}
+
+// WithSubmitTimeout is intentionally narrow: production uses the single
+// SubmitOverallTimeout value, while integration tests can inject a short
+// deadline to exercise the real cancellation and cleanup path.
+func (service *Service) WithSubmitTimeout(timeout time.Duration) *Service {
+	if timeout > 0 {
+		service.submitTimeout = timeout
 	}
 	return service
 }
@@ -150,6 +162,20 @@ type preparedVoice struct {
 }
 
 func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uuid.UUID, answer string) (SubmitResult, error) {
+	timeout := service.submitTimeout
+	if timeout <= 0 {
+		timeout = SubmitOverallTimeout
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := service.submitWithinBudget(requestCtx, studentUserID, sessionID, answer)
+	if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(requestCtx.Err(), context.DeadlineExceeded)) {
+		return SubmitResult{}, ErrSubmitTimedOut
+	}
+	return result, err
+}
+
+func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, sessionID uuid.UUID, answer string) (SubmitResult, error) {
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
 		return SubmitResult{}, errors.New("answer is required")
@@ -164,7 +190,8 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 	if state == tutor.StateVoiceExplain {
 		return SubmitResult{}, ErrVoiceReturnRequired
 	}
-	operationToken, err := service.beginSessionOperation(ctx, studentUserID, sessionID)
+	operationStartedAt := service.now()
+	operationToken, err := service.beginSessionOperationAt(ctx, studentUserID, sessionID, operationStartedAt)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -200,7 +227,9 @@ func (service *Service) Submit(ctx context.Context, studentUserID, sessionID uui
 		if voice != nil && voice.version != row.version {
 			return ErrClassroomChanged
 		}
-		now = latestTime(service.now(), row.lastActivityAt)
+		// AI/provider wait is not learning time. The operation start is the
+		// authoritative activity checkpoint for this submission.
+		now = latestTime(operationStartedAt, row.lastActivityAt)
 		deterministicCorrect := normalized(answer) == normalized(row.answer)
 		correct := deterministicCorrect
 		if prepared != nil && prepared.analysis.AnswerCorrect && prepared.analysis.Confidence >= 0.9 {

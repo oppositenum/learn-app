@@ -615,7 +615,25 @@ test('keeps answer controls and typed text after answer-generation throttling', 
   expect(textarea.element.value).toBe('尚未提交的课堂草稿')
   expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
   expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
-  wrapper.unmount()
+	wrapper.unmount()
+})
+
+test('keeps the classroom usable after a server-side submission timeout', async () => {
+	const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+		if (String(input).endsWith('/answers')) return response({ code: 'TUTOR_GENERATION_BUSY' }, 503)
+		return response(session({ status: 'ACTIVE', state: 'ASK', current_active_seconds: 0 }))
+	}))
+	const textarea = wrapper.get<HTMLTextAreaElement>('#student-answer')
+	await textarea.setValue('提交超时后仍要保留的思路')
+	await wrapper.get('form').trigger('submit')
+	await flushPromises()
+
+	expect(learning.error).toBe('现在有点挤，老师马上就来。请稍等一下再试一次')
+	expect(textarea.element.value).toBe('提交超时后仍要保留的思路')
+	expect(learning.status).toBe('ACTIVE')
+	expect(wrapper.get('[data-testid="answer-controls"]').attributes('disabled')).toBeUndefined()
+	expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+	wrapper.unmount()
 })
 
 test('preserves an answer draft across an EXPLAIN supply round trip', async () => {

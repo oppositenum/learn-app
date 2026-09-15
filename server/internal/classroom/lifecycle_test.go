@@ -1,11 +1,38 @@
 package classroom
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+func TestClassroomTimeoutOrderingKeepsRequestsAheadOfProxyAndStaleRecovery(t *testing.T) {
+	if !timeoutOrderingValid() {
+		t.Fatalf("invalid timeout ordering: submit=%s proxy=%s stale=%s", SubmitOverallTimeout, proxyReadTimeout, stalePauseAfter)
+	}
+	if sessionLeaseTime <= SubmitOverallTimeout || sessionLeaseTime <= stalePauseAfter {
+		t.Fatalf("operation lease must cover the request and stale recovery window: lease=%s submit=%s stale=%s", sessionLeaseTime, SubmitOverallTimeout, stalePauseAfter)
+	}
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("could not locate lifecycle test source")
+	}
+	nginx, err := os.ReadFile(filepath.Join(filepath.Dir(sourceFile), "../../..", "deploy", "nginx.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxySeconds := fmt.Sprintf("%ds", int(proxyReadTimeout/time.Second))
+	wantProxy := "proxy_read_timeout " + proxySeconds + ";"
+	if !strings.Contains(string(nginx), wantProxy) || !strings.Contains(string(nginx), "proxy_send_timeout "+proxySeconds+";") {
+		t.Fatalf("deploy proxy timeout does not match ordering source %s", proxyReadTimeout)
+	}
+}
 
 func TestSessionTimingSeparatesCurrentRunFromAccumulatedTime(t *testing.T) {
 	started := time.Date(2030, 1, 1, 8, 0, 0, 0, time.UTC)
