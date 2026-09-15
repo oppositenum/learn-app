@@ -83,6 +83,23 @@ const forbiddenStudentText = [
   '标准答案', '完整解析', '家长评分', '同龄人比较',
 ]
 
+type FixtureGuardState = {
+  answerBodies: unknown[]
+  supportBodies: unknown[]
+}
+
+const fixtureGuardStates = new WeakMap<Page, FixtureGuardState>()
+
+function assertFixtureCanaries(fixture: string, bodies: unknown[]) {
+  expect(bodies.length, `${fixture} fixture route was never hit`).toBeGreaterThan(0)
+  for (const body of bodies) {
+    const serialized = JSON.stringify(body)
+    for (const canary of [privateAnswer, privateSolution, parentOnly, peerOnly]) {
+      expect(serialized, `${fixture} fixture response missing canary ${canary}`).toContain(canary)
+    }
+  }
+}
+
 // Each classroom state renders a different intercepted response, and a leak in
 // one state is replaced by the next, so scan on every state instead of only the
 // final snapshot.
@@ -108,6 +125,8 @@ async function assertReachableAboveKeyboard(page: Page, locator: Locator) {
 
 test.describe('student classroom at 320px with a soft-keyboard viewport', () => {
   test.beforeEach(async ({ page }) => {
+    const fixtureGuards: FixtureGuardState = { answerBodies: [], supportBodies: [] }
+    fixtureGuardStates.set(page, fixtureGuards)
     await page.setViewportSize({ width: 320, height: 720 })
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await installKeyboardViewportShim(page)
@@ -117,7 +136,7 @@ test.describe('student classroom at 320px with a soft-keyboard viewport', () => 
     })))
     await page.route(`**/api/v1/student/sessions/${sessionID}`, (route) => route.fulfill(jsonResponse(session)))
     await page.route(`**/api/v1/student/sessions/${sessionID}/answers`, async (route) => {
-      await route.fulfill(jsonResponse({
+      const body = {
         session_id: sessionID,
         version: 2,
         timing_version: 1,
@@ -131,10 +150,12 @@ test.describe('student classroom at 320px with a soft-keyboard viewport', () => 
         full_solution: privateSolution,
         parent_score: parentOnly,
         peer_comparison: peerOnly,
-      }))
+      }
+      fixtureGuards.answerBodies.push(body)
+      await route.fulfill(jsonResponse(body))
     })
     await page.route(`**/api/v1/student/sessions/${sessionID}/support`, async (route) => {
-      await route.fulfill(jsonResponse({
+      const body = {
         session_id: sessionID,
         version: 3,
         timing_version: 1,
@@ -148,7 +169,9 @@ test.describe('student classroom at 320px with a soft-keyboard viewport', () => 
         full_solution: privateSolution,
         parent_score: parentOnly,
         peer_comparison: peerOnly,
-      }))
+      }
+      fixtureGuards.supportBodies.push(body)
+      await route.fulfill(jsonResponse(body))
     })
   })
 
@@ -212,9 +235,13 @@ test.describe('student classroom at 320px with a soft-keyboard viewport', () => 
     await page.setViewportSize({ width: 320, height: 720 })
     await page.evaluate(() => window.__setSoftKeyboardOpen?.(false))
 
-    // The scan below only proves anything if the intercepted responses really
-    // handed the classroom these private fields, so fail loudly if a later edit
-    // drops the injection and silently turns the assertion into a no-op.
+    // These guards inspect the exact bodies served by the intercepted routes.
+    // A missing route hit and a missing canary are reported separately.
+    const fixtureGuards = fixtureGuardStates.get(page)
+    expect(fixtureGuards).toBeDefined()
+    assertFixtureCanaries('answers', fixtureGuards!.answerBodies)
+    assertFixtureCanaries('support', fixtureGuards!.supportBodies)
+
     const servedSession = JSON.stringify(session)
     for (const canary of [privateAnswer, privateSolution, parentOnly, peerOnly]) {
       expect(servedSession).toContain(canary)
