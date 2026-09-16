@@ -115,7 +115,7 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 			PurposeAnswerAnalysis,
 			"analyze_answer.schema.json",
 			request,
-			analyzeAnswerInstructions,
+			analyzeAnswerInstructions+" "+outputShapeInstructions,
 			"",
 			"",
 			target,
@@ -176,7 +176,7 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	}
 	ctx, cancel := context.WithTimeout(ctx, tutorOutputOperationTimeout)
 	defer cancel()
-	instructions = instructions + " " + turnStyleInstructions
+	instructions = instructions + " " + turnStyleInstructions + " " + outputShapeInstructions
 	requiredAction := string(request.TutorDecision.NextState)
 	if request.TutorDecision.NextState == tutor.StateHint {
 		instructions = instructions + " " + hintInstructions

@@ -8,7 +8,7 @@ import (
 
 // GenerationPromptVersion covers every embedded generation asset: the
 // instruction files, the failure contract, and the structured-output examples.
-const GenerationPromptVersion = "tutor-generation-sha256:6677ced9e68158ae9f6a4fe5de6e1ff2d373e956315093b1cec289369b43296b"
+const GenerationPromptVersion = "tutor-generation-sha256:de81622e2ff0c1cbdae3375414f8faaf6f6909644857ea42cee7904359a77a6c"
 
 //go:embed prompts/generation/*.instructions.txt prompts/generation/*.md prompts/generation/examples/*.json
 var generationPromptFiles embed.FS
@@ -30,4 +30,5 @@ var (
 	turnStyleInstructions               = generationPrompt("turn_style.instructions.txt")
 	hintInstructions                    = generationPrompt("hint.instructions.txt")
 	materialDisciplineInstructions      = generationPrompt("material_discipline.instructions.txt")
+	outputShapeInstructions             = generationPrompt("output_shape.instructions.txt")
 )

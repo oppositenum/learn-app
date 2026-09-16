@@ -1,0 +1,1 @@
+Return every required field with its declared JSON type. Use an empty array for a list that has no entries and an empty string for text that is not needed; never return null, and never omit a required field.

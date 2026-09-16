@@ -83,13 +83,13 @@ VALUES ($1,$2,$3,now()-interval '1 hour',1,0.5,2)`, uuid.New(), channel.provider
 	request := ai.GenerateTurnRequest{
 		StudentID: fixture.studentID.String(),
 		SessionID: fixture.sessionID.String(),
-		Question:  content.QuestionPublic{Prompt: "三杯同样的饮料一共 36 元，每杯多少元？"},
+		Question:  content.QuestionPublic{Prompt: liveQuestionPrompt()},
 		AuditPrivateAnswer: content.QuestionPrivateAnswer{
-			CorrectAnswer:          json.RawMessage(`{"value":"12元"}`),
-			FullSolution:           "36 除以 3 等于 12。",
-			TeacherReferenceAnswer: "每杯 12 元",
+			CorrectAnswer:          json.RawMessage(`{"value":"小林把伞递给没带雨具的同学"}`),
+			FullSolution:           "递伞这个动作直接体现了主动帮助他人。",
+			TeacherReferenceAnswer: "小林把伞递给没带雨具的同学",
 		},
-		StudentAnswer: "我不知道怎么开始",
+		StudentAnswer: "我不知道该看哪里",
 		TutorDecision: tutor.Decision{NextState: tutor.StateHint},
 	}
 
@@ -127,7 +127,7 @@ VALUES ($1,$2,$3,now()-interval '1 hour',1,0.5,2)`, uuid.New(), channel.provider
 		t.Fatalf("live GenerateTurn failed after %s: %v", elapsed, err)
 	}
 
-	for _, leak := range []string{"12元", "12 元"} {
+	for _, leak := range []string{"把伞递给"} {
 		if strings.Contains(turn.Message, leak) {
 			t.Fatalf("live turn leaked the answer: %q", turn.Message)
 		}
@@ -194,4 +194,14 @@ func liveClient(t *testing.T, channel liveProviderChannel) *ai.StructuredProvide
 		t.Fatalf("%s client: %v", channel.identity(), err)
 	}
 	return client
+}
+
+// liveQuestionPrompt mirrors the Chinese reading task that produced a null
+// segments array in the deployed test server, so the regression is exercised
+// on the subject that hit it rather than on the arithmetic task.
+func liveQuestionPrompt() string {
+	if custom := strings.TrimSpace(os.Getenv("TUTOR_LIVE_QUESTION")); custom != "" {
+		return custom
+	}
+	return "短文说\"小林把伞递给没带雨具的同学\"。哪处文字能支持小林乐于助人的判断？"
 }
