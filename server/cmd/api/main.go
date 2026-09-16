@@ -84,20 +84,30 @@ func newDatabaseHandler(pool *pgxpool.Pool) http.Handler {
 	}
 	classrooms := classroom.NewService(pool, hub, voice, usageRecorder, plannerService)
 	go classrooms.RunStaleSessionRecovery(context.Background(), time.Minute)
-	if apiKey, tutorModel := os.Getenv("OPENAI_API_KEY"), strings.TrimSpace(os.Getenv("OPENAI_TUTOR_MODEL")); apiKey != "" && tutorModel != "" {
-		reviewerModel := strings.TrimSpace(os.Getenv("OPENAI_TUTOR_OUTPUT_REVIEW_MODEL"))
-		if reviewerModel == "" {
-			log.Fatal("OPENAI_TUTOR_OUTPUT_REVIEW_MODEL is required when OPENAI_TUTOR_MODEL is configured")
-		}
-		client, err := ai.NewOpenAIResponsesClient(&http.Client{Timeout: 90 * time.Second}, os.Getenv("OPENAI_BASE_URL"), apiKey, tutorModel)
+	tutorConfig, err := loadTutorProviderConfig(os.Getenv)
+	if err != nil {
+		log.Fatalf("configure Tutor providers: %v", err)
+	}
+	if tutorConfig.Enabled {
+		client, err := ai.NewProviderResponsesClient(
+			&http.Client{Timeout: 90 * time.Second}, tutorConfig.Generator.BaseURL,
+			tutorConfig.Generator.APIKey, tutorConfig.Generator.Provider, tutorConfig.Generator.Model,
+		)
 		if err != nil {
 			log.Fatalf("configure teaching client: %v", err)
 		}
-		reviewClient, err := ai.NewOpenAIResponsesClient(&http.Client{Timeout: 90 * time.Second}, os.Getenv("OPENAI_BASE_URL"), apiKey, reviewerModel)
+		reviewClient, err := ai.NewProviderResponsesClient(
+			&http.Client{Timeout: 90 * time.Second}, tutorConfig.Reviewer.BaseURL,
+			tutorConfig.Reviewer.APIKey, tutorConfig.Reviewer.Provider, tutorConfig.Reviewer.Model,
+		)
 		if err != nil {
 			log.Fatalf("configure Tutor output review client: %v", err)
 		}
-		reviewer, err := tutoraudit.NewOpenAIReviewer(reviewClient.WithUsageRecorder(usageRecorder), "openai", reviewerModel)
+		reviewer, err := tutoraudit.NewOpenAIReviewer(
+			reviewClient.WithUsageRecorder(usageRecorder),
+			tutorConfig.Reviewer.Provider,
+			tutorConfig.Reviewer.Model,
+		)
 		if err != nil {
 			log.Fatalf("configure Tutor output reviewer: %v", err)
 		}
@@ -106,8 +116,8 @@ func newDatabaseHandler(pool *pgxpool.Pool) http.Handler {
 			log.Fatalf("configure Tutor output reviewer retry policy: %v", err)
 		}
 		auditor, err := tutoraudit.NewService(
-			"openai:"+tutorModel,
-			"openai:"+reviewerModel,
+			tutorConfig.Generator.identity(),
+			tutorConfig.Reviewer.identity(),
 			retryingReviewer,
 			tutoraudit.NewPostgresRecorder(pool),
 		)
