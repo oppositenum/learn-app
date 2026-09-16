@@ -201,12 +201,15 @@ func (client *OpenAIResponsesClient) GenerateStructured(ctx context.Context, req
 		return StructuredResult{}, err
 	}
 	result := StructuredResult{
-		ResponseID: decoded.ID,
+		RequestID: request.RequestID, ResponseID: decoded.ID,
 		Usage: ModelUsage{
 			Provider: client.provider, Model: client.model, InputTokens: decoded.Usage.InputTokens,
 			CachedInputTokens: decoded.Usage.InputTokenDetails.CachedTokens,
 			OutputTokens:      decoded.Usage.OutputTokens,
 		},
+	}
+	if result.RequestID == "" {
+		result.RequestID = decoded.ID
 	}
 	if client.usage != nil {
 		requestID := request.RequestID

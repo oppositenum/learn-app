@@ -73,7 +73,10 @@ type candidateReviewContent struct {
 
 func (reviewer *OpenAIReviewer) ReviewTutorOutput(ctx context.Context, request ai.TutorOutputAuditRequest) (Review, ReviewEvidence, error) {
 	requestID := uuid.NewString()
-	evidence := ReviewEvidence{Provider: reviewer.provider, Model: reviewer.model, RequestID: requestID}
+	evidence := ReviewEvidence{
+		Provider: reviewer.provider, Model: reviewer.model,
+		RequestID: requestID, ExpectedRequestID: requestID,
+	}
 	segments := make([]string, 0, len(request.Candidate.Segments))
 	for _, segment := range request.Candidate.Segments {
 		segments = append(segments, segment.Text)
@@ -100,6 +103,7 @@ func (reviewer *OpenAIReviewer) ReviewTutorOutput(ctx context.Context, request a
 	}
 	evidence.Provider = result.Usage.Provider
 	evidence.Model = result.Usage.Model
+	evidence.RequestID = result.RequestID
 	var untyped any
 	if err := json.Unmarshal(result.OutputJSON, &untyped); err != nil {
 		return Review{}, evidence, fmt.Errorf("%w: decode output: %v", ErrInvalidReviewOutput, err)

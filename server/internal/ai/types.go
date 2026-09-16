@@ -105,6 +105,7 @@ type StructuredRequest struct {
 }
 
 type StructuredResult struct {
+	RequestID  string
 	ResponseID string
 	OutputJSON json.RawMessage
 	Usage      ModelUsage

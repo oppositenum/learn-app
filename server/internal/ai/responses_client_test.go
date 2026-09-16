@@ -286,6 +286,56 @@ func TestOpenAIResponsesClientRecordsTransportErrorWithoutHTTPStatus(t *testing.
 	}
 }
 
+func TestProviderResponsesClientPropagatesInFlightCancellation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		select {
+		case <-request.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	recorder := &collectingUsageRecorder{}
+	client, err := NewProviderResponsesClient(server.Client(), server.URL, "test-key", "provider-a", "model-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.WithUsageRecorder(recorder)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, callErr := client.GenerateStructured(ctx, StructuredRequest{
+			RequestID: "cancel-in-flight", Purpose: PurposeSocraticTurn,
+			SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+		})
+		result <- callErr
+	}()
+	select {
+	case <-started:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("provider request did not start")
+	}
+	select {
+	case callErr := <-result:
+		close(release)
+		if !errors.Is(callErr, context.Canceled) {
+			t.Fatalf("canceled request error=%v", callErr)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("provider request did not return promptly after cancellation")
+	}
+	if len(recorder.records) != 0 {
+		t.Fatalf("canceled request recorded successful usage: %+v", recorder.records)
+	}
+	if len(recorder.outcomes) != 1 || recorder.outcomes[0].Outcome != RequestTransportError {
+		t.Fatalf("canceled request outcomes=%+v", recorder.outcomes)
+	}
+}
+
 func intPointer(value int) *int { return &value }
 
 func TestOpenAIResponsesClientRejectsIncompatibleSchemaBeforeNetwork(t *testing.T) {

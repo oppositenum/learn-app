@@ -56,8 +56,11 @@ func validAuditRequest(message string) ai.TutorOutputAuditRequest {
 
 func passingReviewer() *reviewerStub {
 	return &reviewerStub{
-		review:   Review{Result: ReviewPass, NoAnswerLeak: true, ReasonCodes: []string{"NONE"}, Violations: []Violation{}},
-		evidence: ReviewEvidence{Provider: "openai", Model: "reviewer-v1", RequestID: "review-request-1"},
+		review: Review{Result: ReviewPass, NoAnswerLeak: true, ReasonCodes: []string{"NONE"}, Violations: []Violation{}},
+		evidence: ReviewEvidence{
+			Provider: "openai", Model: "reviewer-v1",
+			RequestID: "review-request-1", ExpectedRequestID: "review-request-1",
+		},
 	}
 }
 
@@ -243,18 +246,30 @@ func TestServicePreservesBoundedReviewerTransportDiagnostics(t *testing.T) {
 }
 
 func TestServiceRejectsInvalidReviewerProvenance(t *testing.T) {
-	reviewer := passingReviewer()
-	reviewer.evidence.Model = "generator-v1"
-	recorder := &recorderStub{}
-	service, err := NewService("openai:generator-v1", "openai:reviewer-v1", reviewer, recorder)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := service.AuditTutorOutput(context.Background(), validAuditRequest("先找出固定费用。")); !errors.Is(err, ErrInvalidProvenance) {
-		t.Fatalf("invalid provenance did not fail closed: %v", err)
-	}
-	if len(recorder.records) != 1 || recorder.records[0].ReviewerResult != "INVALID_PROVENANCE" {
-		t.Fatalf("invalid-provenance audit record=%+v", recorder.records)
+	for _, test := range []struct {
+		name   string
+		mutate func(*ReviewEvidence)
+	}{
+		{name: "provider mismatch", mutate: func(evidence *ReviewEvidence) { evidence.Provider = "generator-provider" }},
+		{name: "model mismatch", mutate: func(evidence *ReviewEvidence) { evidence.Model = "generator-v1" }},
+		{name: "request ID mismatch", mutate: func(evidence *ReviewEvidence) { evidence.RequestID = "different-review-request" }},
+		{name: "missing request ID", mutate: func(evidence *ReviewEvidence) { evidence.RequestID = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reviewer := passingReviewer()
+			test.mutate(&reviewer.evidence)
+			recorder := &recorderStub{}
+			service, err := NewService("openai:generator-v1", "openai:reviewer-v1", reviewer, recorder)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := service.AuditTutorOutput(context.Background(), validAuditRequest("先找出固定费用。")); !errors.Is(err, ErrInvalidProvenance) {
+				t.Fatalf("invalid provenance did not fail closed: %v", err)
+			}
+			if len(recorder.records) != 1 || recorder.records[0].ReviewerResult != "INVALID_PROVENANCE" || recorder.records[0].Violations != nil {
+				t.Fatalf("invalid-provenance audit record=%+v", recorder.records)
+			}
+		})
 	}
 }
 

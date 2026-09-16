@@ -107,7 +107,7 @@ VALUES ($1,'provider-a','configured-endpoint',$3::timestamptz-interval '30 days'
 		_, _ = writer.Write([]byte(`{
           "id":"provider-call-price-version",
           "model":"vendor-reported-alias",
-          "output":[{"content":[{"text":"{}"}]}],
+          "output":[{"type":"message","content":[{"type":"output_text","text":"{}"}]}],
           "usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":40}}
         }`))
 	}))

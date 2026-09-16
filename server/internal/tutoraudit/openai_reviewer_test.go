@@ -18,7 +18,11 @@ type structuredClientStub struct {
 
 func (stub *structuredClientStub) GenerateStructured(_ context.Context, request ai.StructuredRequest) (ai.StructuredResult, error) {
 	stub.request = request
-	return stub.result, stub.err
+	result := stub.result
+	if result.RequestID == "" {
+		result.RequestID = request.RequestID
+	}
+	return result, stub.err
 }
 
 func TestOpenAIReviewerUsesDedicatedPurposeAndSeparatedPrivateInput(t *testing.T) {

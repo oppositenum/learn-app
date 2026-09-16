@@ -44,9 +44,10 @@ type Violation struct {
 }
 
 type ReviewEvidence struct {
-	Provider  string
-	Model     string
-	RequestID string
+	Provider          string
+	Model             string
+	RequestID         string
+	ExpectedRequestID string
 }
 
 type Reviewer interface {
@@ -126,7 +127,7 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 			reviewFailureCategory(reviewErr), httpStatus, providerCode, evidence.RequestID,
 			fmt.Errorf("%w: %w", ErrReviewerUnavailable, reviewErr),
 		)
-	} else if evidence.Provider+":"+evidence.Model != service.reviewerIdentity || strings.TrimSpace(evidence.RequestID) == "" {
+	} else if !service.validReviewEvidence(evidence) {
 		reviewerResult = "INVALID_PROVENANCE"
 		reasonCode = reviewerResult
 		finalErr = ErrInvalidProvenance
@@ -143,7 +144,7 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 	}
 
 	var violations []Violation
-	if reviewErr == nil && evidence.Provider+":"+evidence.Model == service.reviewerIdentity && strings.TrimSpace(evidence.RequestID) != "" {
+	if reviewErr == nil && service.validReviewEvidence(evidence) {
 		violations = make([]Violation, len(review.Violations))
 		copy(violations, review.Violations)
 	}
@@ -161,6 +162,13 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 		return fmt.Errorf("%w: %v", ErrAuditRecord, err)
 	}
 	return finalErr
+}
+
+func (service *Service) validReviewEvidence(evidence ReviewEvidence) bool {
+	return evidence.Provider+":"+evidence.Model == service.reviewerIdentity &&
+		strings.TrimSpace(evidence.RequestID) != "" &&
+		strings.TrimSpace(evidence.ExpectedRequestID) != "" &&
+		evidence.RequestID == evidence.ExpectedRequestID
 }
 
 func reviewApproves(review Review) bool {

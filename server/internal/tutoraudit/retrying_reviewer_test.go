@@ -203,7 +203,11 @@ func (client *reviewStructuredClient) GenerateStructured(_ context.Context, requ
 	if index < len(client.errors) && client.errors[index] != nil {
 		return ai.StructuredResult{}, client.errors[index]
 	}
-	return client.results[index], nil
+	result := client.results[index]
+	if result.RequestID == "" {
+		result.RequestID = request.RequestID
+	}
+	return result, nil
 }
 
 func TestRetryingOpenAIReviewerUsesANewRequestIDPerAttempt(t *testing.T) {
