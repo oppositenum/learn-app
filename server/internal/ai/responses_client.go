@@ -68,6 +68,7 @@ type OpenAIResponsesClient struct {
 	httpClient *http.Client
 	baseURL    string
 	apiKey     string
+	provider   string
 	model      string
 	usage      UsageRecorder
 	// Some OpenAI-compatible relays reject previous_response_id chaining.
@@ -93,13 +94,34 @@ func NewOpenAIResponsesClient(httpClient *http.Client, baseURL, apiKey, model st
 	if strings.TrimSpace(model) == "" {
 		return nil, errors.New("OpenAI Tutor model is required")
 	}
+	return NewProviderResponsesClient(httpClient, baseURL, apiKey, "openai", model)
+}
+
+func NewProviderResponsesClient(httpClient *http.Client, baseURL, apiKey, provider, model string) (*OpenAIResponsesClient, error) {
+	if httpClient == nil {
+		return nil, errors.New("http client is required")
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return nil, errors.New("structured output provider is required")
+	}
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, errors.New("structured output API key is required")
+	}
+	if strings.TrimSpace(model) == "" {
+		return nil, errors.New("structured output model is required")
+	}
 	if strings.TrimSpace(baseURL) == "" {
+		if provider != "openai" {
+			return nil, errors.New("structured output base URL is required for non-OpenAI providers")
+		}
 		baseURL = defaultOpenAIBaseURL
 	}
 	return &OpenAIResponsesClient{
 		httpClient: httpClient,
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		apiKey:     apiKey,
+		provider:   provider,
 		model:      model,
 	}, nil
 }
@@ -152,7 +174,7 @@ func (client *OpenAIResponsesClient) GenerateStructured(ctx context.Context, req
 		return StructuredResult{}, fmt.Errorf("decode response schema: %w", err)
 	}
 	if guard, ok := client.usage.(PriceGuard); ok {
-		if err := guard.EnsurePrice(ctx, "openai", client.model, startedAt); err != nil {
+		if err := guard.EnsurePrice(ctx, client.provider, client.model, startedAt); err != nil {
 			return StructuredResult{}, fmt.Errorf("check Responses API price: %w", err)
 		}
 	}
@@ -181,7 +203,7 @@ func (client *OpenAIResponsesClient) GenerateStructured(ctx context.Context, req
 	result := StructuredResult{
 		ResponseID: decoded.ID,
 		Usage: ModelUsage{
-			Provider: "openai", Model: decoded.Model, InputTokens: decoded.Usage.InputTokens,
+			Provider: client.provider, Model: client.model, InputTokens: decoded.Usage.InputTokens,
 			CachedInputTokens: decoded.Usage.InputTokenDetails.CachedTokens,
 			OutputTokens:      decoded.Usage.OutputTokens,
 		},
@@ -220,7 +242,7 @@ func (client *OpenAIResponsesClient) recordRequestOutcome(ctx context.Context, r
 	defer cancel()
 	_ = recorder.RecordAIRequestOutcome(accountingCtx, RequestOutcomeRecord{
 		RequestID: request.RequestID, StudentID: request.StudentID, SessionID: request.SessionID,
-		Provider: "openai", Model: client.model, Purpose: request.Purpose, Outcome: outcome,
+		Provider: client.provider, Model: client.model, Purpose: request.Purpose, Outcome: outcome,
 		HTTPStatus: status, Latency: time.Since(startedAt), CreatedAt: startedAt,
 	})
 }

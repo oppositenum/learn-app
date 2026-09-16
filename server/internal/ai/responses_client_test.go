@@ -12,9 +12,11 @@ import (
 )
 
 type collectingUsageRecorder struct {
-	records  []UsageRecord
-	outcomes []RequestOutcomeRecord
-	err      error
+	records     []UsageRecord
+	outcomes    []RequestOutcomeRecord
+	priceChecks []ModelUsage
+	err         error
+	priceErr    error
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -31,6 +33,11 @@ func (recorder *collectingUsageRecorder) RecordAIUsage(_ context.Context, record
 func (recorder *collectingUsageRecorder) RecordAIRequestOutcome(_ context.Context, record RequestOutcomeRecord) error {
 	recorder.outcomes = append(recorder.outcomes, record)
 	return nil
+}
+
+func (recorder *collectingUsageRecorder) EnsurePrice(_ context.Context, provider, model string, _ time.Time) error {
+	recorder.priceChecks = append(recorder.priceChecks, ModelUsage{Provider: provider, Model: model})
+	return recorder.priceErr
 }
 
 func TestOpenAIResponsesClientUsesStrictSchemaAndContext(t *testing.T) {
@@ -110,6 +117,90 @@ func TestOpenAIResponsesClientRecordsUsageBeforeOutputExtraction(t *testing.T) {
 	}
 	if len(recorder.outcomes) != 1 || recorder.outcomes[0].Outcome != RequestInvalidResponse || recorder.outcomes[0].HTTPStatus != nil {
 		t.Fatalf("invalid response outcome=%+v", recorder.outcomes)
+	}
+}
+
+func TestProviderResponsesClientUsesConfiguredIdentityForPriceUsageAndOutcome(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{
+            "id":"provider-response-id",
+            "model":"vendor-reported-model-name",
+            "output":[{"type":"message","content":[{"type":"output_text","text":"{}"}]}],
+            "usage":{"input_tokens":9,"output_tokens":4,"input_tokens_details":{"cached_tokens":3}}
+        }`))
+	}))
+	defer server.Close()
+
+	recorder := &collectingUsageRecorder{}
+	client, err := NewProviderResponsesClient(server.Client(), server.URL, "test-key", "configured-provider", "configured-endpoint-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.WithUsageRecorder(recorder)
+	result, err := client.GenerateStructured(context.Background(), StructuredRequest{
+		RequestID: "canonical-identity", Purpose: PurposeSocraticTurn,
+		Input: json.RawMessage(`{}`), SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage.Provider != "configured-provider" || result.Usage.Model != "configured-endpoint-id" {
+		t.Fatalf("result usage identity=%s:%s", result.Usage.Provider, result.Usage.Model)
+	}
+	if len(recorder.priceChecks) != 1 || recorder.priceChecks[0].Provider != result.Usage.Provider || recorder.priceChecks[0].Model != result.Usage.Model {
+		t.Fatalf("price checks=%+v usage=%+v", recorder.priceChecks, result.Usage)
+	}
+	if len(recorder.records) != 1 || recorder.records[0].Usage.Provider != result.Usage.Provider || recorder.records[0].Usage.Model != result.Usage.Model {
+		t.Fatalf("usage records=%+v usage=%+v", recorder.records, result.Usage)
+	}
+	if len(recorder.outcomes) != 1 || recorder.outcomes[0].Provider != result.Usage.Provider || recorder.outcomes[0].Model != result.Usage.Model {
+		t.Fatalf("outcomes=%+v usage=%+v", recorder.outcomes, result.Usage)
+	}
+}
+
+func TestOpenAIResponsesClientPreservesOpenAIIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"id":"response-id","model":"response-alias","output":[{"type":"message","content":[{"type":"output_text","text":"{}"}]}],"usage":{}}`))
+	}))
+	defer server.Close()
+	recorder := &collectingUsageRecorder{}
+	client, err := NewOpenAIResponsesClient(server.Client(), server.URL, "test-key", "configured-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.WithUsageRecorder(recorder)
+	result, err := client.GenerateStructured(context.Background(), StructuredRequest{
+		RequestID: "openai-identity", Purpose: PurposeSocraticTurn,
+		SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage.Provider != "openai" || result.Usage.Model != "configured-model" {
+		t.Fatalf("OpenAI compatibility identity=%s:%s", result.Usage.Provider, result.Usage.Model)
+	}
+}
+
+func TestProviderResponsesClientMissingPriceMakesNoNetworkRequest(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls++
+	}))
+	defer server.Close()
+	recorder := &collectingUsageRecorder{priceErr: errors.New("price missing")}
+	client, err := NewProviderResponsesClient(server.Client(), server.URL, "test-key", "configured-provider", "configured-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.WithUsageRecorder(recorder)
+	_, err = client.GenerateStructured(context.Background(), StructuredRequest{
+		SchemaName: "test", Schema: json.RawMessage(`{"type":"object"}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "price missing") {
+		t.Fatalf("price preflight error=%v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("provider received %d request(s) without a price", calls)
 	}
 }
 
