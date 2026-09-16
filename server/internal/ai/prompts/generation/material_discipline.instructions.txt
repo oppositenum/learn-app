@@ -1,0 +1,1 @@
+Use only numbers that already appear in the question itself. Never introduce any number the question does not contain, including intermediate results, partial calculations, unit conversions, or an example computation. Do not carry out the arithmetic for the student in any form.

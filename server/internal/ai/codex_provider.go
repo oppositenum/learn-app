@@ -181,6 +181,13 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	if request.TutorDecision.NextState == tutor.StateHint {
 		instructions = instructions + " " + hintInstructions
 	}
+	// enforceTutorMaterialPolicy rejects new numeric material for exactly these
+	// actions. Stating the rule to the generator does not relax that gate; it
+	// stops the gate from being the first place the model learns about it.
+	switch request.TutorDecision.NextState {
+	case tutor.StateProbe, tutor.StateHint, tutor.StateScaffold, tutor.StateAnalogy:
+		instructions = instructions + " " + materialDisciplineInstructions
+	}
 	if requiredAction != "" {
 		instructions = fmt.Sprintf(`%s Set the "action" output field to exactly %q.`, instructions, requiredAction)
 	}
