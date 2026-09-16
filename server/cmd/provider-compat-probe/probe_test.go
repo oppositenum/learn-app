@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,7 +48,7 @@ func TestRequestForShapeBuildsResponsesAndChatContracts(t *testing.T) {
 		{shape: "chat_completions", endpoint: "/chat/completions", marker: `"response_format"`},
 	} {
 		t.Run(test.shape, func(t *testing.T) {
-			payload, endpoint, err := requestForShape(test.shape, "endpoint-model", schema, "probe", "")
+			payload, endpoint, err := requestForShape(test.shape, "endpoint-model", schema, "probe", "", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,6 +56,80 @@ func TestRequestForShapeBuildsResponsesAndChatContracts(t *testing.T) {
 				t.Fatalf("endpoint=%q payload=%s", endpoint, payload)
 			}
 		})
+	}
+}
+
+func TestRequestForShapeMergesReasoningControlWithoutTouchingContract(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{}}`)
+	for _, test := range []struct {
+		shape     string
+		reasoning map[string]any
+		marker    string
+	}{
+		{shape: "responses", reasoning: map[string]any{"thinking": map[string]any{"type": "disabled"}}, marker: `"thinking":{"type":"disabled"}`},
+		{shape: "chat_completions", reasoning: map[string]any{"enable_thinking": false}, marker: `"enable_thinking":false`},
+	} {
+		t.Run(test.shape, func(t *testing.T) {
+			payload, _, err := requestForShape(test.shape, "endpoint-model", schema, "probe", "", test.reasoning)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(payload), test.marker) {
+				t.Fatalf("reasoning control missing: %s", payload)
+			}
+			if !strings.Contains(string(payload), `"strict":true`) || !strings.Contains(string(payload), `"endpoint-model"`) {
+				t.Fatalf("reasoning control damaged the structured-output contract: %s", payload)
+			}
+		})
+	}
+}
+
+func TestReasoningOverlayRejectsNonObjectAndContractOverrides(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		control string
+		wantErr bool
+	}{
+		{name: "empty means no control", control: "", wantErr: false},
+		{name: "valid object", control: `{"enable_thinking":false}`, wantErr: false},
+		{name: "not an object", control: `"disabled"`, wantErr: true},
+		{name: "malformed", control: `{`, wantErr: true},
+		{name: "overrides model", control: `{"model":"other"}`, wantErr: true},
+		{name: "overrides response_format", control: `{"response_format":{}}`, wantErr: true},
+		{name: "overrides text", control: `{"text":{}}`, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := providerProbeConfig{Name: "probe", ReasoningControl: test.control}
+			_, err := config.reasoningOverlay()
+			if (err != nil) != test.wantErr {
+				t.Fatalf("control=%q err=%v wantErr=%v", test.control, err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestProbeRecordsAppliedReasoningControlAsEvidence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		if !strings.Contains(string(body), `"enable_thinking":false`) {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, _ = writer.Write([]byte(`{"id":"r","model":"m","choices":[{"message":{"content":"{}"}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`))
+	}))
+	defer server.Close()
+	runner := newProbeRunner(server.Client(), &probeAccountingStub{}, 1)
+	config := providerProbeConfig{
+		Name: "probe", Provider: "p", Model: "m", BaseURL: server.URL,
+		APIKey: "k", AuthHeader: "Authorization", AuthPrefix: "Bearer ",
+		ReasoningControl: `{"enable_thinking":false}`,
+	}
+	observation, _ := runner.call(context.Background(), config, "chat_completions", json.RawMessage(`{"type":"object"}`), "probe", ai.PurposeSocraticTurn, "")
+	if observation.ReasoningControl != `{"enable_thinking":false}` {
+		t.Fatalf("applied reasoning control was not recorded: %+v", observation)
+	}
+	if observation.Classification != "ACCEPTED_ACCOUNTED" {
+		t.Fatalf("reasoning control was not sent to the provider: %+v", observation)
 	}
 }
 

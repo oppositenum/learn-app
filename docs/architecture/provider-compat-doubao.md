@@ -9,7 +9,9 @@
 - Region: not configured
 - Direction samples: Doubao generation / Qwen review `0`; Qwen generation / Doubao review `0`
 
-No Doubao credential, endpoint, model, region, real PostgreSQL test connection, or effective price row was available in the execution environment. No network request was sent. Public documentation and OpenAI-gateway evidence are not treated as Doubao evidence.
+No effective `ai_price_catalog` row exists for a Doubao model, so **the harness has not run and every check below is still `UNVERIFIED`**. Public documentation and OpenAI-gateway evidence are not treated as Doubao evidence.
+
+A separate manual smoke observation on 2026-09-16 did reach the provider. It is recorded under "Manual Smoke Observation" below and is a weaker evidence class than a harness run: it carried no price preflight, wrote no usage record, and sampled each cell once. It cannot close any check in the table.
 
 ## Required Checks
 
@@ -25,6 +27,22 @@ No Doubao credential, endpoint, model, region, real PostgreSQL test connection, 
 | h | Error HTTP status, error-code paths, and `Retry-After` | `UNVERIFIED` | The harness sends a deliberately invalid schema and records only bounded metadata paths, never the provider body. |
 | i | Context cancellation propagation and prompt connection return | `UNVERIFIED` | The harness cancels an in-flight request and records whether the client returns within five seconds. No real connection was opened. |
 | j | Generation/review P50, P95, P99 and both end-to-end directions against the 75-second budget | `UNVERIFIED` | The harness supports configurable sample counts, bounded 429/5xx retries, price preflight, usage recording, and both provider directions. No timing sample ran. |
+| k | Reasoning/thinking control: which request parameter disables it, and what it is worth against the 75-second budget | `UNVERIFIED` | The harness applies a configurable `PROVIDER_PROBE_DOUBAO_REASONING_CONTROL` overlay, records the applied value in every observation and in the report, and samples a small reasoning-on comparison series so latency is never reported without stating which control produced it. |
+
+## Manual Smoke Observation
+
+Not harness evidence. Manual `curl`, 2026-09-16, one sample per cell, no price preflight, no usage record, model `doubao-seed-2-1-pro-260628`, region `cn-beijing`.
+
+| Observed | Result of that run |
+| --- | --- |
+| Responses `text.format.json_schema` | Connection closed at ~60s on both HTTP/2 and HTTP/1.1 attempts; no response body |
+| Chat Completions `response_format.json_schema` | HTTP 200; output satisfied `tutor_turn.schema.json` under `santhosh-tekuri/jsonschema` v6.0.3 |
+| Provider default reasoning | 58.8s; 3023 of 3167 completion tokens were reasoning tokens |
+| `{"thinking":{"type":"disabled"}}` | 4.4s; 0 reasoning tokens; output still schema-valid |
+| All three runtime schemas via Chat Completions | Accepted in that run |
+| Response `model` | Returned the configured pinned snapshot string unchanged |
+
+These are statements about that run only. They are not a claim that Doubao supports or does not support any of the above, and they do not license skipping check `a`-`k`.
 
 ## Mock Evidence
 
@@ -58,7 +76,7 @@ PROVIDER_PROBE_QWEN_REGION
 TEST_DATABASE_URL
 ```
 
-Optional non-secret controls are `PROVIDER_PROBE_SAMPLES`, `PROVIDER_PROBE_OUTPUT_DIR`, and per-provider auth header/prefix settings. Before execution, both configured provider/model pairs must have effective `ai_price_catalog` rows. Run from the repository root:
+Optional non-secret controls are `PROVIDER_PROBE_SAMPLES`, `PROVIDER_PROBE_TIMEOUT_SECONDS`, `PROVIDER_PROBE_OUTPUT_DIR`, per-provider auth header/prefix settings, and `PROVIDER_PROBE_<NAME>_REASONING_CONTROL`. The reasoning control is a JSON object merged into the top level of every request; it may not override `model`, `messages`, `input`, `instructions`, `response_format`, `text`, or `previous_response_id`. Set it to `none` to sample the provider's own default instead. Its default value is a convenience based on the 2026-09-16 manual observation, not a claim about the provider. Before execution, both configured provider/model pairs must have effective `ai_price_catalog` rows. Run from the repository root:
 
 ```sh
 PROVIDER_PROBE_CONFIRM_LIVE=1 go run ./server/cmd/provider-compat-probe

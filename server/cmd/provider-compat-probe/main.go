@@ -52,8 +52,15 @@ func main() {
 		log.Fatalf("load runtime schemas: %v", err)
 	}
 
+	// A full run is roughly 31 fixed calls plus four latency series per provider
+	// plus two end-to-end directions. The previous samples*20+30 ceiling could
+	// not cover that even before the reasoning-on comparison series was added.
+	timeoutSeconds, err := positiveIntEnv("PROVIDER_PROBE_TIMEOUT_SECONDS", 1800+samples*120)
+	if err != nil {
+		log.Fatal(err)
+	}
 	runner := newProbeRunner(&http.Client{Timeout: 75 * time.Second}, usage.NewRecorder(pool), samples)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(samples*20+30)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 	reports := make(map[string]providerCompatibilityReport, len(configs))
 	for _, config := range configs {
@@ -84,16 +91,35 @@ func main() {
 	fmt.Println(outputPath)
 }
 
+// defaultReasoningControls are the request parameters observed to turn a
+// provider's reasoning mode off on 2026-09-16. They are defaults for
+// convenience, not a claim about the provider: set
+// PROVIDER_PROBE_<NAME>_REASONING_CONTROL to override, or to "none" to sample
+// the provider's own default.
+var defaultReasoningControls = map[string]string{
+	"doubao": `{"thinking":{"type":"disabled"}}`,
+	"qwen":   `{"enable_thinking":false}`,
+}
+
 func providerConfigFromEnv(prefix string) providerProbeConfig {
+	name := strings.ToLower(prefix)
+	reasoning := strings.TrimSpace(os.Getenv("PROVIDER_PROBE_" + prefix + "_REASONING_CONTROL"))
+	switch {
+	case reasoning == "":
+		reasoning = defaultReasoningControls[name]
+	case strings.EqualFold(reasoning, "none"):
+		reasoning = ""
+	}
 	return providerProbeConfig{
-		Name:       strings.ToLower(prefix),
-		Provider:   strings.TrimSpace(os.Getenv("PROVIDER_PROBE_" + prefix + "_PROVIDER")),
-		BaseURL:    strings.TrimRight(strings.TrimSpace(os.Getenv("PROVIDER_PROBE_"+prefix+"_BASE_URL")), "/"),
-		APIKey:     strings.TrimSpace(os.Getenv("PROVIDER_PROBE_" + prefix + "_API_KEY")),
-		Model:      strings.TrimSpace(os.Getenv("PROVIDER_PROBE_" + prefix + "_MODEL")),
-		Region:     strings.TrimSpace(os.Getenv("PROVIDER_PROBE_" + prefix + "_REGION")),
-		AuthHeader: valueOr(strings.TrimSpace(os.Getenv("PROVIDER_PROBE_"+prefix+"_AUTH_HEADER")), "Authorization"),
-		AuthPrefix: valueOr(os.Getenv("PROVIDER_PROBE_"+prefix+"_AUTH_PREFIX"), "Bearer "),
+		Name:             name,
+		Provider:         strings.TrimSpace(os.Getenv("PROVIDER_PROBE_" + prefix + "_PROVIDER")),
+		BaseURL:          strings.TrimRight(strings.TrimSpace(os.Getenv("PROVIDER_PROBE_"+prefix+"_BASE_URL")), "/"),
+		APIKey:           strings.TrimSpace(os.Getenv("PROVIDER_PROBE_" + prefix + "_API_KEY")),
+		Model:            strings.TrimSpace(os.Getenv("PROVIDER_PROBE_" + prefix + "_MODEL")),
+		Region:           strings.TrimSpace(os.Getenv("PROVIDER_PROBE_" + prefix + "_REGION")),
+		ReasoningControl: reasoning,
+		AuthHeader:       valueOr(strings.TrimSpace(os.Getenv("PROVIDER_PROBE_"+prefix+"_AUTH_HEADER")), "Authorization"),
+		AuthPrefix:       valueOr(os.Getenv("PROVIDER_PROBE_"+prefix+"_AUTH_PREFIX"), "Bearer "),
 	}
 }
 
@@ -108,6 +134,9 @@ func (config providerProbeConfig) validate() error {
 	}
 	if !strings.HasPrefix(config.BaseURL, "https://") {
 		return fmt.Errorf("%s probe base URL must use https", config.Name)
+	}
+	if _, err := config.reasoningOverlay(); err != nil {
+		return err
 	}
 	return nil
 }

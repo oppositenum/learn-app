@@ -21,6 +21,11 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
 )
 
+// uncontrolledLatencySamples bounds the reasoning-on comparison series. Each
+// such call can take most of a minute, so a full series would dominate the run
+// without improving the conclusion it supports.
+const uncontrolledLatencySamples = 3
+
 type probeAccounting interface {
 	EnsurePrice(context.Context, string, string, time.Time) error
 	RecordAIUsage(context.Context, ai.UsageRecord) error
@@ -28,14 +33,44 @@ type probeAccounting interface {
 }
 
 type providerProbeConfig struct {
-	Name       string
-	Provider   string
-	BaseURL    string
-	APIKey     string
-	Model      string
-	Region     string
-	AuthHeader string
-	AuthPrefix string
+	Name     string
+	Provider string
+	BaseURL  string
+	APIKey   string
+	Model    string
+	Region   string
+	// ReasoningControl is a raw JSON object merged into the top level of every
+	// probe request. Reasoning-by-default burns most of the 75s submit budget
+	// on a single generation, so the probe must state which control it applied
+	// rather than silently sampling a configuration production would not use.
+	// An empty value means no control was applied.
+	ReasoningControl string
+	AuthHeader       string
+	AuthPrefix       string
+}
+
+func (config providerProbeConfig) reasoningOverlay() (map[string]any, error) {
+	trimmed := strings.TrimSpace(config.ReasoningControl)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var overlay map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &overlay); err != nil {
+		return nil, fmt.Errorf("%s reasoning control must be a JSON object: %w", config.Name, err)
+	}
+	for _, reserved := range []string{"model", "messages", "input", "instructions", "response_format", "text", "previous_response_id"} {
+		if _, present := overlay[reserved]; present {
+			return nil, fmt.Errorf("%s reasoning control must not override %q", config.Name, reserved)
+		}
+	}
+	return overlay, nil
+}
+
+func (config providerProbeConfig) reasoningControlLabel() string {
+	if strings.TrimSpace(config.ReasoningControl) == "" {
+		return "NONE"
+	}
+	return config.ReasoningControl
 }
 
 type probeRunner struct {
@@ -49,30 +84,38 @@ func newProbeRunner(client *http.Client, accounting probeAccounting, samples int
 }
 
 type providerCompatibilityReport struct {
-	EvidenceKind        string                       `json:"evidence_kind"`
-	Provider            string                       `json:"provider"`
-	Model               string                       `json:"model"`
-	Region              string                       `json:"region"`
-	StartedAt           time.Time                    `json:"started_at"`
-	CompletedAt         time.Time                    `json:"completed_at"`
-	SampleCount         int                          `json:"sample_count"`
-	EndpointShapes      map[string]probeObservation  `json:"endpoint_shapes,omitempty"`
-	SchemaAcceptance    map[string]probeObservation  `json:"schema_acceptance,omitempty"`
-	KeywordEvidence     map[string]probeObservation  `json:"keyword_evidence,omitempty"`
-	ConstraintEvidence  map[string]constraintFinding `json:"constraint_evidence,omitempty"`
-	UsageAndModel       probeObservation             `json:"usage_and_model,omitempty"`
-	ConversationLink    map[string]probeObservation  `json:"conversation_link,omitempty"`
-	ErrorShape          probeObservation             `json:"error_shape,omitempty"`
-	Cancellation        probeObservation             `json:"cancellation,omitempty"`
-	GenerationLatencyMS latencyDistribution          `json:"generation_latency_ms,omitempty"`
-	ReviewLatencyMS     latencyDistribution          `json:"review_latency_ms,omitempty"`
-	EndToEndLatencyMS   latencyDistribution          `json:"end_to_end_latency_ms,omitempty"`
-	BudgetConclusion    string                       `json:"budget_conclusion,omitempty"`
+	EvidenceKind       string                       `json:"evidence_kind"`
+	Provider           string                       `json:"provider"`
+	Model              string                       `json:"model"`
+	Region             string                       `json:"region"`
+	StartedAt          time.Time                    `json:"started_at"`
+	CompletedAt        time.Time                    `json:"completed_at"`
+	SampleCount        int                          `json:"sample_count"`
+	EndpointShapes     map[string]probeObservation  `json:"endpoint_shapes,omitempty"`
+	SchemaAcceptance   map[string]probeObservation  `json:"schema_acceptance,omitempty"`
+	KeywordEvidence    map[string]probeObservation  `json:"keyword_evidence,omitempty"`
+	ConstraintEvidence map[string]constraintFinding `json:"constraint_evidence,omitempty"`
+	UsageAndModel      probeObservation             `json:"usage_and_model,omitempty"`
+	ConversationLink   map[string]probeObservation  `json:"conversation_link,omitempty"`
+	ErrorShape         probeObservation             `json:"error_shape,omitempty"`
+	Cancellation       probeObservation             `json:"cancellation,omitempty"`
+	// ReasoningControl states the request parameter the probe applied to every
+	// call. Latency below is only interpretable together with it.
+	ReasoningControl    string              `json:"reasoning_control"`
+	GenerationLatencyMS latencyDistribution `json:"generation_latency_ms,omitempty"`
+	ReviewLatencyMS     latencyDistribution `json:"review_latency_ms,omitempty"`
+	// UncontrolledLatencyMS samples generation with the reasoning control
+	// removed, so the report can show what the control is worth instead of
+	// asserting the provider is fast.
+	UncontrolledLatencyMS latencyDistribution `json:"uncontrolled_generation_latency_ms,omitempty"`
+	EndToEndLatencyMS     latencyDistribution `json:"end_to_end_latency_ms,omitempty"`
+	BudgetConclusion      string              `json:"budget_conclusion,omitempty"`
 }
 
 type probeObservation struct {
 	Classification    string   `json:"classification"`
 	RequestShape      string   `json:"request_shape,omitempty"`
+	ReasoningControl  string   `json:"reasoning_control,omitempty"`
 	HTTPStatus        int      `json:"http_status,omitempty"`
 	LatencyMS         int64    `json:"latency_ms,omitempty"`
 	ResponseIDPresent bool     `json:"response_id_present,omitempty"`
@@ -124,7 +167,8 @@ func (runner *probeRunner) runProvider(ctx context.Context, config providerProbe
 	report := providerCompatibilityReport{
 		EvidenceKind: "REAL_PROVIDER", Provider: config.Provider, Model: config.Model, Region: config.Region,
 		StartedAt: time.Now().UTC(), SampleCount: runner.samples,
-		EndpointShapes: make(map[string]probeObservation), SchemaAcceptance: make(map[string]probeObservation),
+		ReasoningControl: config.reasoningControlLabel(),
+		EndpointShapes:   make(map[string]probeObservation), SchemaAcceptance: make(map[string]probeObservation),
 		KeywordEvidence: make(map[string]probeObservation), ConstraintEvidence: make(map[string]constraintFinding),
 		ConversationLink: make(map[string]probeObservation),
 	}
@@ -158,6 +202,17 @@ func (runner *probeRunner) runProvider(ctx context.Context, config providerProbe
 	report.Cancellation = runner.probeCancellation(ctx, config, shape, schemas["tutor_turn.schema.json"])
 	report.GenerationLatencyMS = runner.sampleLatency(ctx, config, shape, schemas["tutor_turn.schema.json"], ai.PurposeSocraticTurn)
 	report.ReviewLatencyMS = runner.sampleLatency(ctx, config, shape, schemas["tutor_output_review.schema.json"], ai.PurposeTutorOutputReview)
+	if strings.TrimSpace(config.ReasoningControl) != "" {
+		// A provider's own default may reason for most of a minute per call, so
+		// the comparison series stays small on purpose. It exists to show the
+		// control's effect, not to produce a publishable percentile.
+		uncontrolled := config
+		uncontrolled.ReasoningControl = ""
+		report.UncontrolledLatencyMS = runner.sampleLatencyCount(
+			ctx, uncontrolled, shape, schemas["tutor_turn.schema.json"],
+			ai.PurposeSocraticTurn, min(runner.samples, uncontrolledLatencySamples),
+		)
+	}
 	report.CompletedAt = time.Now().UTC()
 	return report, nil
 }
@@ -217,7 +272,14 @@ func (runner *probeRunner) call(ctx context.Context, config providerProbeConfig,
 		observation.Note = "No provider request was sent."
 		return observation, nil
 	}
-	payload, endpoint, err := requestForShape(shape, config.Model, schema, prompt, previousID)
+	reasoning, err := config.reasoningOverlay()
+	if err != nil {
+		observation.Classification = "REQUEST_BUILD_FAILED"
+		observation.Note = "Invalid reasoning control; no provider request was sent."
+		return observation, nil
+	}
+	observation.ReasoningControl = config.reasoningControlLabel()
+	payload, endpoint, err := requestForShape(shape, config.Model, schema, prompt, previousID, reasoning)
 	if err != nil {
 		observation.Classification = "REQUEST_BUILD_FAILED"
 		return observation, nil
@@ -319,7 +381,7 @@ func (runner *probeRunner) recordOutcome(config providerProbeConfig, requestID s
 	})
 }
 
-func requestForShape(shape, model string, schema json.RawMessage, prompt, previousID string) ([]byte, string, error) {
+func requestForShape(shape, model string, schema json.RawMessage, prompt, previousID string, reasoning map[string]any) ([]byte, string, error) {
 	var schemaValue any
 	if err := json.Unmarshal(schema, &schemaValue); err != nil {
 		return nil, "", err
@@ -333,6 +395,7 @@ func requestForShape(shape, model string, schema json.RawMessage, prompt, previo
 		if previousID != "" {
 			payload["previous_response_id"] = previousID
 		}
+		applyReasoningControl(payload, reasoning)
 		encoded, err := json.Marshal(payload)
 		return encoded, "/responses", err
 	case "chat_completions":
@@ -344,13 +407,21 @@ func requestForShape(shape, model string, schema json.RawMessage, prompt, previo
 			)
 		}
 		messages = append(messages, map[string]string{"role": "user", "content": prompt})
-		encoded, err := json.Marshal(map[string]any{
+		payload := map[string]any{
 			"model": model, "messages": messages,
 			"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "provider_compat_probe", "strict": true, "schema": schemaValue}},
-		})
+		}
+		applyReasoningControl(payload, reasoning)
+		encoded, err := json.Marshal(payload)
 		return encoded, "/chat/completions", err
 	default:
 		return nil, "", fmt.Errorf("unsupported request shape %q", shape)
+	}
+}
+
+func applyReasoningControl(payload map[string]any, reasoning map[string]any) {
+	for key, value := range reasoning {
+		payload[key] = value
 	}
 }
 
@@ -501,8 +572,12 @@ func (runner *probeRunner) probeCancellation(parent context.Context, config prov
 }
 
 func (runner *probeRunner) sampleLatency(ctx context.Context, config providerProbeConfig, shape string, schema json.RawMessage, purpose ai.Purpose) latencyDistribution {
+	return runner.sampleLatencyCount(ctx, config, shape, schema, purpose, runner.samples)
+}
+
+func (runner *probeRunner) sampleLatencyCount(ctx context.Context, config providerProbeConfig, shape string, schema json.RawMessage, purpose ai.Purpose, count int) latencyDistribution {
 	var values []int64
-	for range runner.samples {
+	for range count {
 		observation, _ := runner.callWithFiniteRetry(ctx, config, shape, schema, promptForSchema(schemaNameForPurpose(purpose)), purpose, "")
 		if observation.Classification == "ACCEPTED_ACCOUNTED" {
 			values = append(values, observation.LatencyMS)
