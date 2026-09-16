@@ -191,6 +191,71 @@ func TestProbeAccountingFailureNeverClassifiesRequestAsAccepted(t *testing.T) {
 	}
 }
 
+func TestPreferredShapePicksEnforcementNotAcceptedStatus(t *testing.T) {
+	accounted := map[string]probeObservation{
+		"responses":        {Classification: "ACCEPTED_ACCOUNTED"},
+		"chat_completions": {Classification: "ACCEPTED_ACCOUNTED"},
+	}
+	constraints := func(responsesResult, chatResult string) map[string]constraintFinding {
+		found := make(map[string]constraintFinding)
+		for _, keyword := range constraintKeywords {
+			found["responses:"+keyword] = constraintFinding{Classification: responsesResult}
+			found["chat_completions:"+keyword] = constraintFinding{Classification: chatResult}
+		}
+		return found
+	}
+	for _, test := range []struct {
+		name        string
+		observed    map[string]probeObservation
+		constraints map[string]constraintFinding
+		want        string
+	}{
+		{
+			name:     "both accounted but only chat enforces",
+			observed: accounted, constraints: constraints("IGNORED", "ENFORCED"),
+			want: "chat_completions",
+		},
+		{
+			name:     "both accounted and both enforce keeps declaration order",
+			observed: accounted, constraints: constraints("ENFORCED", "ENFORCED"),
+			want: "responses",
+		},
+		{
+			name:     "rejection loses to a merely ignored shape",
+			observed: accounted, constraints: constraints("REJECTED", "IGNORED"),
+			want: "chat_completions",
+		},
+		{
+			name: "only one shape accounted",
+			observed: map[string]probeObservation{
+				"responses":        {Classification: "PROVIDER_REJECTED"},
+				"chat_completions": {Classification: "ACCEPTED_ACCOUNTED"},
+			},
+			constraints: constraints("ENFORCED", "IGNORED"),
+			want:        "chat_completions",
+		},
+		{
+			name: "nothing accounted",
+			observed: map[string]probeObservation{
+				"responses":        {Classification: "PROVIDER_REJECTED"},
+				"chat_completions": {Classification: "TRANSPORT_ERROR"},
+			},
+			constraints: constraints("ENFORCED", "ENFORCED"),
+			want:        "",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			shape, reason := preferredShape(test.observed, test.constraints)
+			if shape != test.want {
+				t.Fatalf("preferred shape=%q want %q (reason %q)", shape, test.want, reason)
+			}
+			if reason == "" {
+				t.Fatal("preferred shape was chosen without a recorded reason")
+			}
+		})
+	}
+}
+
 func TestConstraintClassificationDistinguishesEnforcedAndIgnored(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object","required":["value"],"properties":{"value":{"enum":["ALLOWED"]}}}`)
 	accepted := probeObservation{Classification: "ACCEPTED_ACCOUNTED"}
@@ -206,5 +271,43 @@ func testProbeConfig(baseURL string) providerProbeConfig {
 	return providerProbeConfig{
 		Name: "test", Provider: "probe-provider", BaseURL: baseURL, APIKey: "test-key",
 		Model: "configured-model", Region: "test-region", AuthHeader: "Authorization", AuthPrefix: "Bearer ",
+	}
+}
+
+func TestConstraintProbeNeedsEveryAttemptToClaimEnforced(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		violateOn    int // attempt number that returns schema-violating output, 0 = never
+		want         string
+		wantAttempts int
+	}{
+		{name: "all attempts comply", violateOn: 0, want: "ENFORCED", wantAttempts: constraintAttempts},
+		{name: "first attempt violates", violateOn: 1, want: "IGNORED", wantAttempts: 1},
+		{name: "last attempt violates", violateOn: constraintAttempts, want: "IGNORED", wantAttempts: constraintAttempts},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				calls++
+				// constraintProbe("maxLength") allows a one-character string.
+				value := "a"
+				if calls == test.violateOn {
+					value = "far too long"
+				}
+				inner, _ := json.Marshal(map[string]string{"value": value})
+				envelope, _ := json.Marshal(map[string]any{
+					"id": "r", "model": "configured-model",
+					"output": []any{map[string]any{"content": []any{map[string]any{"text": string(inner)}}}},
+					"usage":  map[string]any{"input_tokens": 1, "output_tokens": 1},
+				})
+				_, _ = writer.Write(envelope)
+			}))
+			defer server.Close()
+			runner := newProbeRunner(server.Client(), &probeAccountingStub{}, 1)
+			finding := runner.probeConstraint(context.Background(), testProbeConfig(server.URL), "responses", "maxLength")
+			if finding.Classification != test.want || finding.Attempts != test.wantAttempts {
+				t.Fatalf("finding=%+v want=%s attempts=%d (calls=%d)", finding, test.want, test.wantAttempts, calls)
+			}
+		})
 	}
 }

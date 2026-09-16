@@ -2,59 +2,68 @@
 
 ## Evidence Boundary
 
-- Evidence status: `UNVERIFIED`
-- Real-provider sample count: `0`
-- Time window: not started
-- Model: not configured
-- Region: not configured
-- Direction samples: Qwen generation / Doubao review `0`; Doubao generation / Qwen review `0`
+- Evidence status: `HARNESS VERIFIED (small sample)`
+- Harness run: `2026-09-16T11:45:46.915788Z` to `2026-09-16T11:47:50.69938Z`, `PROVIDER_PROBE_SAMPLES=5`
+- Model: `qwen3.7-plus-2026-05-26` (pinned snapshot)
+- Region: `cn-beijing`
+- Reasoning control applied to every call: `{"enable_thinking":false}`
+- Latency sample count: generation `5`, review `5`, reasoning-on comparison `3`
+- Direction samples: Doubao generation / Qwen review `5`; Qwen generation / Doubao review `5`
 
-No effective `ai_price_catalog` row exists for a Qwen model, so **the harness has not run and every check below is still `UNVERIFIED`**. Public documentation and OpenAI-gateway evidence are not treated as Qwen evidence.
+Every request below passed `ai_price_catalog` preflight and wrote an `ai_usage_records` row, so these are accounted real-provider observations. They are still a **small sample from a single session on one account**: they describe what that run observed and are not a general claim about what Qwen supports. Percentile figures at `n=5` are indicative only. Public documentation and OpenAI-gateway evidence are not treated as Qwen evidence.
 
-A separate manual smoke observation on 2026-09-16 did reach the provider. It is recorded under "Manual Smoke Observation" below and is a weaker evidence class than a harness run: it carried no price preflight, wrote no usage record, and sampled each cell once. It cannot close any check in the table.
+## Preferred Request Shape
+
+`chat_completions` — chat_completions enforced 5 of 7 probed schema constraints.
+
+Both shapes returned accounted `200` responses, so an accepted status code could not be used to choose between them. The shape was selected on observed constraint enforcement instead.
 
 ## Required Checks
 
-| ID | Check | Real-provider status | Current evidence |
+| ID | Check | Status | Observation |
 | --- | --- | --- | --- |
-| a | Endpoint availability; Responses `text.format.json_schema`; Chat Completions `response_format` | `UNVERIFIED` | The repeatable harness builds both request shapes. Mock tests only verify request construction. |
-| b | Direct strict acceptance of the three runtime schemas | `UNVERIFIED` | The harness sends each schema verbatim through each accepted request shape. No real request ran. |
-| c | Every keyword currently blocked in `compatibility.go` | `UNVERIFIED` | The harness obtains the keyword list at runtime and probes each keyword separately. The existing OpenAI/gateway list was not copied as a Qwen conclusion. |
-| d | Enforcement, ignore, or rejection of `additionalProperties:false`, `required`, `enum`, `minLength`, `maxLength`, `minimum`, `maximum` | `UNVERIFIED` | Local classification code distinguishes provider rejection, schema-valid output, and accepted schema-invalid output. Mock tests cover classifier behavior only. |
-| e | Usage and cached-token field paths | `UNVERIFIED` | The harness records numeric token paths and cache-related token paths without retaining response text. No Qwen response was observed. |
-| f | Response `model` versus configured model/endpoint ID | `UNVERIFIED` | The harness records both strings and equality. Production accounting remains keyed to the configured provider/model pair. |
-| g | `previous_response_id` or equivalent conversation linkage | `UNVERIFIED` | The harness performs a second Responses request with the actual first response ID or a Chat request with prior assistant content. No real request ran. |
-| h | Error HTTP status, error-code paths, and `Retry-After` | `UNVERIFIED` | The harness sends a deliberately invalid schema and records only bounded metadata paths, never the provider body. |
-| i | Context cancellation propagation and prompt connection return | `UNVERIFIED` | The harness cancels an in-flight request and records whether the client returns within five seconds. No real connection was opened. |
-| j | Generation/review P50, P95, P99 and both end-to-end directions against the 75-second budget | `UNVERIFIED` | The harness supports configurable sample counts, bounded 429/5xx retries, price preflight, usage recording, and both provider directions. No timing sample ran. |
+| a | Endpoint availability and structured-output shape | `OBSERVED` | Both `responses` and `chat_completions` returned accounted `200`. |
+| b | Strict acceptance of the three runtime schemas | `OBSERVED` | `analyze_answer`, `tutor_turn`, and `tutor_output_review` were accepted verbatim on both shapes. Acceptance is not enforcement; see check `d`. |
+| c | Keywords currently blocked in `compatibility.go` | `OBSERVED` | Rejected: `patternProperties`. Accepted: `allOf`, `anyOf`, `dependencies`, `dependentRequired`, `dependentSchemas`, `else`, `if`, `not`, `oneOf`, `then`. Accepted here means the request completed, not that the keyword changed the output. The OpenAI list was not reused. |
+| d | Enforcement of schema constraints | `OBSERVED` | See the table below. |
+| e | Usage and cached-token field paths | `OBSERVED` | `$.usage.completion_tokens`, `$.usage.prompt_tokens`, `$.usage.prompt_tokens_details.cached_tokens`, `$.usage.prompt_tokens_details.text_tokens`, `$.usage.total_tokens`. Cached tokens at `$.usage.prompt_tokens_details.cached_tokens`. |
+| f | Response `model` versus configured model | `OBSERVED` | Returned `qwen3.7-plus-2026-05-26`, matching the configured pinned snapshot. Accounting stays keyed to the configured pair regardless. |
+| g | Conversation linkage | `OBSERVED` | `ACCEPTED_ACCOUNTED` on `chat_completions`. |
+| h | Error status, error-code paths, `Retry-After` | `OBSERVED` | A deliberately invalid schema returned `400` with codes at `$.error.code`, `$.error.type`. No `Retry-After` header. |
+| i | Cancellation propagation | `OBSERVED` | `CANCEL_PROPAGATED`: an in-flight request returned within five seconds of cancellation. |
+| j | Latency against the 75-second budget | `OBSERVED (n=5)` | Generation p50 `1354ms` / p99 `1543ms`; review p50 `1544ms` / p99 `1597ms`. End to end: Doubao→Qwen p99 `4989ms`, Qwen→Doubao p99 `4198ms`. Both directions: `OBSERVED_SAMPLES_WITHIN_75_SECONDS`. |
+| k | Reasoning control and its worth | `OBSERVED` | With `{"enable_thinking":false}` generation p50 was `1354ms`. With the control removed, p50 was `15028ms` and p99 `16973ms` over 3 samples. Latency in this document is only valid with the control applied. |
 
-| k | Reasoning/thinking control: which request parameter disables it, and what it is worth against the 75-second budget | `UNVERIFIED` | The harness applies a configurable `PROVIDER_PROBE_QWEN_REASONING_CONTROL` overlay, records the applied value in every observation and in the report, and samples a small reasoning-on comparison series so latency is never reported without stating which control produced it. |
+## Constraint Enforcement
 
-## Manual Smoke Observation
+Each constraint was probed by sending a schema that forbids a value and a prompt that explicitly asks for that value. A compliant output means the provider constrained generation; a violating output means it did not. The verdicts are asymmetric on purpose: under real constrained decoding a violation cannot occur, so one violating sample settles `IGNORED`, while `ENFORCED` requires all 3 attempts to comply.
 
-Not harness evidence. Manual `curl`, 2026-09-16, one sample per cell, no price preflight, no usage record, model `qwen3.7-plus-2026-05-26`, region `cn-beijing`.
+| Constraint | `responses` | `chat_completions` |
+| --- | --- | --- |
+| `additionalProperties` | `ENFORCED` (3 attempt(s)) | `ENFORCED` (3 attempt(s)) |
+| `required` | `IGNORED` (1 attempt(s)) | `ENFORCED` (3 attempt(s)) |
+| `enum` | `IGNORED` (1 attempt(s)) | `ENFORCED` (3 attempt(s)) |
+| `minLength` | `IGNORED` (1 attempt(s)) | `IGNORED` (1 attempt(s)) |
+| `maxLength` | `IGNORED` (1 attempt(s)) | `IGNORED` (1 attempt(s)) |
+| `minimum` | `IGNORED` (1 attempt(s)) | `ENFORCED` (3 attempt(s)) |
+| `maximum` | `IGNORED` (1 attempt(s)) | `ENFORCED` (3 attempt(s)) |
 
-| Observed | Result of that run |
-| --- | --- |
-| Responses `text.format.json_schema` | HTTP 200, but the schema was **silently ignored**: the returned object used invented keys (`context`, `guiding_question`, `tone`) and none of the required `tutor_turn` fields |
-| Chat Completions `response_format.json_schema` | HTTP 200; output satisfied `tutor_turn.schema.json` under `santhosh-tekuri/jsonschema` v6.0.3 |
-| Provider default reasoning | 55.5s via Chat Completions; 18.3s via Responses |
-| `{"enable_thinking":false}` | 3.9s; output still schema-valid |
-| `maxLength: 1200` under default reasoning | Enforced at exactly 1200 characters, but the model filled the allowance with a repeating emoji sequence; with reasoning disabled the same field was 58 characters |
-| All three runtime schemas via Chat Completions | Accepted in that run |
-| Response `model` | Returned the configured pinned snapshot string unchanged |
+## Impact On The Runtime Schemas
 
-The silently-ignored Responses schema is the reason check `b` cannot be closed by a status code: an accepted request is not an enforced schema. These are statements about that run only, not a claim that Qwen supports or does not support any of the above.
+- `enum` is enforced on `chat_completions`, so the server-pinned Tutor action in `constrainActionEnum` is honoured by the provider on that shape.
+- Any constraint marked `IGNORED` is not enforced by the provider. Local `santhosh-tekuri/jsonschema` validation still rejects violating output, and a local schema failure is currently **not** retryable, so an ignored constraint turns into a hard generation failure rather than a safety hole.
+- No change to the runtime schemas, the local validator, or the retry classification is approved on this evidence. Widening retries or relaxing a schema is a separate proposal.
 
 ## Mock Evidence
 
 `server/cmd/provider-compat-probe/probe_test.go` proves only local harness behavior:
 
-- Responses and Chat Completions request payloads contain strict JSON Schema controls.
+- Both request shapes carry strict JSON Schema controls, and the reasoning control cannot overwrite them.
 - Missing price prevents all provider network traffic.
 - Successful responses are accounted under the configured provider/model identity even when the response model differs.
 - Accounting failure is never classified as accepted output.
-- Constraint classification distinguishes locally schema-valid and schema-invalid output.
+- Constraint classification distinguishes enforced from ignored, and `ENFORCED` requires every attempt to comply.
+- The preferred shape is chosen on enforcement, not on an accounted status code.
 
 These tests are `MOCK` evidence. They do not establish any Qwen capability.
 
@@ -78,7 +87,7 @@ PROVIDER_PROBE_QWEN_REGION
 TEST_DATABASE_URL
 ```
 
-Optional non-secret controls are `PROVIDER_PROBE_SAMPLES`, `PROVIDER_PROBE_TIMEOUT_SECONDS`, `PROVIDER_PROBE_OUTPUT_DIR`, per-provider auth header/prefix settings, and `PROVIDER_PROBE_<NAME>_REASONING_CONTROL`. The reasoning control is a JSON object merged into the top level of every request; it may not override `model`, `messages`, `input`, `instructions`, `response_format`, `text`, or `previous_response_id`. Set it to `none` to sample the provider's own default instead. Its default value is a convenience based on the 2026-09-16 manual observation, not a claim about the provider. Before execution, both configured provider/model pairs must have effective `ai_price_catalog` rows. Run from the repository root:
+Optional non-secret controls are `PROVIDER_PROBE_SAMPLES`, `PROVIDER_PROBE_TIMEOUT_SECONDS`, `PROVIDER_PROBE_OUTPUT_DIR`, per-provider auth header/prefix settings, and `PROVIDER_PROBE_<NAME>_REASONING_CONTROL`. The reasoning control is a JSON object merged into the top level of every request; it may not override `model`, `messages`, `input`, `instructions`, `response_format`, `text`, or `previous_response_id`. Set it to `none` to sample the provider's own default instead. Before execution, both configured provider/model pairs must have effective `ai_price_catalog` rows. Run from the repository root:
 
 ```sh
 PROVIDER_PROBE_CONFIRM_LIVE=1 go run ./server/cmd/provider-compat-probe
@@ -86,6 +95,9 @@ PROVIDER_PROBE_CONFIRM_LIVE=1 go run ./server/cmd/provider-compat-probe
 
 The generated report is written with mode `0600` below ignored `tmp/provider-compat` by default. It contains capability metadata and latency distributions, not keys, prompts returned by models, private answers, or raw response bodies.
 
-## Provider-Specific Decision
+## Not Yet Established
 
-No Qwen-specific blocked-keyword list, preferred endpoint shape, usage mapping, model-identity rule, retry conclusion, latency conclusion, or generator/reviewer assignment is approved. All remain `UNVERIFIED` pending a sufficiently sized real-provider run.
+- No generator/reviewer assignment between Qwen and Doubao is approved. Both directions completed inside the budget at `n=5`; that does not decide which provider should generate and which should review.
+- No 429 or 5xx was observed, so retry and `Retry-After` behavior is unmeasured.
+- No sustained-load, multi-session, or multi-day sample exists. `n=5` percentiles must not be quoted as production latency.
+- No real child usage evidence exists, and nothing here has been deployed to the test server.

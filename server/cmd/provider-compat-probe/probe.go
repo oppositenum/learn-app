@@ -96,9 +96,13 @@ type providerCompatibilityReport struct {
 	KeywordEvidence    map[string]probeObservation  `json:"keyword_evidence,omitempty"`
 	ConstraintEvidence map[string]constraintFinding `json:"constraint_evidence,omitempty"`
 	UsageAndModel      probeObservation             `json:"usage_and_model,omitempty"`
-	ConversationLink   map[string]probeObservation  `json:"conversation_link,omitempty"`
-	ErrorShape         probeObservation             `json:"error_shape,omitempty"`
-	Cancellation       probeObservation             `json:"cancellation,omitempty"`
+	// PreferredShape is chosen on observed constraint enforcement, not on an
+	// accounted status code, and the reason travels with it.
+	PreferredShape       string                      `json:"preferred_shape,omitempty"`
+	PreferredShapeReason string                      `json:"preferred_shape_reason,omitempty"`
+	ConversationLink     map[string]probeObservation `json:"conversation_link,omitempty"`
+	ErrorShape           probeObservation            `json:"error_shape,omitempty"`
+	Cancellation         probeObservation            `json:"cancellation,omitempty"`
 	// ReasoningControl states the request parameter the probe applied to every
 	// call. Latency below is only interpretable together with it.
 	ReasoningControl    string              `json:"reasoning_control"`
@@ -136,7 +140,17 @@ type constraintFinding struct {
 	Classification string `json:"classification"`
 	RequestShape   string `json:"request_shape"`
 	HTTPStatus     int    `json:"http_status,omitempty"`
+	// Attempts is how many violation-seeking samples produced this finding.
+	// ENFORCED is only credible across several attempts; see constraintAttempts.
+	Attempts int `json:"attempts,omitempty"`
 }
+
+// constraintAttempts is how many times each constraint probe asks the model to
+// violate the schema. The two verdicts are not symmetric: under real
+// constrained decoding a violation cannot occur, so one violating sample
+// settles IGNORED, while a single compliant sample only shows the model
+// happened to comply. Sampling once made verdicts flip between runs.
+const constraintAttempts = 3
 
 type latencyDistribution struct {
 	Samples int64 `json:"samples"`
@@ -180,7 +194,20 @@ func (runner *probeRunner) runProvider(ctx context.Context, config providerProbe
 			report.SchemaAcceptance[shape+":"+schemaName] = observation
 		}
 	}
-	shape := preferredShape(report.EndpointShapes)
+	// Run the constraint battery on every accounted shape before choosing one.
+	// A shape that returns 200 may still ignore the schema entirely, so the
+	// preferred shape has to be picked on observed enforcement rather than on
+	// the order this list happens to be written in.
+	for _, candidate := range []string{"responses", "chat_completions"} {
+		if report.EndpointShapes[candidate].Classification != "ACCEPTED_ACCOUNTED" {
+			continue
+		}
+		for _, keyword := range constraintKeywords {
+			report.ConstraintEvidence[candidate+":"+keyword] = runner.probeConstraint(ctx, config, candidate, keyword)
+		}
+	}
+	shape, reason := preferredShape(report.EndpointShapes, report.ConstraintEvidence)
+	report.PreferredShape, report.PreferredShapeReason = shape, reason
 	if shape == "" {
 		report.BudgetConclusion = "UNVERIFIED: neither request shape produced accounted output"
 		report.CompletedAt = time.Now().UTC()
@@ -189,11 +216,6 @@ func (runner *probeRunner) runProvider(ctx context.Context, config providerProbe
 	for keyword := range aioutputs.BlockedProviderSchemaKeywords() {
 		observation, _ := runner.call(ctx, config, shape, schemaWithKeyword(keyword), "Return JSON with value set to ok.", ai.PurposeSocraticTurn, "")
 		report.KeywordEvidence[keyword] = observation
-	}
-	for _, keyword := range []string{"additionalProperties", "required", "enum", "minLength", "maxLength", "minimum", "maximum"} {
-		schema, prompt := constraintProbe(keyword)
-		observation, output := runner.call(ctx, config, shape, schema, prompt, ai.PurposeSocraticTurn, "")
-		report.ConstraintEvidence[keyword] = classifyConstraint(shape, observation, schema, output)
 	}
 	usageObservation, _ := runner.call(ctx, config, shape, schemas["tutor_turn.schema.json"], "Return a brief PROBE question as strict JSON.", ai.PurposeSocraticTurn, "")
 	report.UsageAndModel = usageObservation
@@ -255,13 +277,39 @@ func (runner *probeRunner) runDirection(ctx context.Context, generator, reviewer
 	return report
 }
 
-func preferredShape(observations map[string]probeObservation) string {
+// constraintKeywords are the schema controls the runtime schemas depend on.
+// enum carries the most weight: the server pins the authorized Tutor action by
+// constraining that enum before the request leaves the process.
+var constraintKeywords = []string{"additionalProperties", "required", "enum", "minLength", "maxLength", "minimum", "maximum"}
+
+// preferredShape picks the request shape with the most observed enforcement,
+// because an accounted 200 only proves the provider took the request, not that
+// it honoured the schema. Ties fall back to declaration order.
+func preferredShape(observations map[string]probeObservation, constraints map[string]constraintFinding) (string, string) {
+	best, bestScore, bestEnforced := "", -1, 0
 	for _, shape := range []string{"responses", "chat_completions"} {
-		if observations[shape].Classification == "ACCEPTED_ACCOUNTED" {
-			return shape
+		if observations[shape].Classification != "ACCEPTED_ACCOUNTED" {
+			continue
+		}
+		enforced, rejected := 0, 0
+		for _, keyword := range constraintKeywords {
+			switch constraints[shape+":"+keyword].Classification {
+			case "ENFORCED":
+				enforced++
+			case "REJECTED":
+				rejected++
+			}
+		}
+		// A rejection is worse than an ignore: the request cannot even be sent.
+		score := enforced*2 - rejected
+		if score > bestScore {
+			best, bestScore, bestEnforced = shape, score, enforced
 		}
 	}
-	return ""
+	if best == "" {
+		return "", "no request shape produced accounted output"
+	}
+	return best, fmt.Sprintf("%s enforced %d of %d probed schema constraints", best, bestEnforced, len(constraintKeywords))
 }
 
 func (runner *probeRunner) call(ctx context.Context, config providerProbeConfig, shape string, schema json.RawMessage, prompt string, purpose ai.Purpose, previousID string) (probeObservation, json.RawMessage) {
@@ -310,10 +358,13 @@ func (runner *probeRunner) call(ctx context.Context, config providerProbeConfig,
 	}
 	var envelope any
 	_ = json.Unmarshal(body, &envelope)
-	observation.ErrorCodePaths = findJSONPaths(envelope, func(path string, _ any) bool {
-		return strings.HasSuffix(path, ".code") || strings.HasSuffix(path, ".type")
-	})
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// Only an error response carries error-code paths. Harvesting ".type"
+		// from a success body just records ordinary content fields as if they
+		// were diagnostics.
+		observation.ErrorCodePaths = findJSONPaths(envelope, func(path string, _ any) bool {
+			return strings.HasSuffix(path, ".code") || strings.HasSuffix(path, ".type")
+		})
 		observation.Classification = "PROVIDER_REJECTED"
 		runner.recordOutcome(config, requestID, purpose, ai.RequestProviderError, &response.StatusCode, started)
 		return observation, nil
@@ -497,6 +548,23 @@ func constraintProbe(keyword string) (json.RawMessage, string) {
 	}
 	encoded, _ := json.Marshal(document)
 	return encoded, prompt
+}
+
+// probeConstraint repeatedly asks the provider to violate one schema control.
+// Any violating or rejected sample settles the verdict immediately; ENFORCED
+// requires every attempt to have complied.
+func (runner *probeRunner) probeConstraint(ctx context.Context, config providerProbeConfig, shape, keyword string) constraintFinding {
+	schema, prompt := constraintProbe(keyword)
+	finding := constraintFinding{Classification: "UNVERIFIED", RequestShape: shape}
+	for attempt := 1; attempt <= constraintAttempts; attempt++ {
+		observation, output := runner.call(ctx, config, shape, schema, prompt, ai.PurposeSocraticTurn, "")
+		finding = classifyConstraint(shape, observation, schema, output)
+		finding.Attempts = attempt
+		if finding.Classification != "ENFORCED" {
+			return finding
+		}
+	}
+	return finding
 }
 
 func classifyConstraint(shape string, observation probeObservation, schema, output json.RawMessage) constraintFinding {
