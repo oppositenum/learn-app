@@ -197,24 +197,54 @@ func TestB7SubmitTimeoutReleasesLeaseAndRetryIsNotDeadlocked(t *testing.T) {
 	ctx := context.Background()
 	service, pool, userID, sessionID, cleanup := timeoutFixture(t, ctx)
 	defer cleanup()
-	agent := &slowSubmitAgent{mode: "analyze", delay: 200 * time.Millisecond}
+	service.WithSubmitTimeout(2 * time.Second)
+	agent := &slowSubmitAgent{mode: "analyze", delay: 5 * time.Second}
 	service.WithTeachingAgent(agent)
 	requestCtx, cancel := context.WithCancel(ctx)
-	started := make(chan struct{})
+	resultCh := make(chan error, 1)
 	go func() {
-		close(started)
-		_, _ = service.Submit(requestCtx, userID, sessionID, "客户端断开")
+		_, err := service.Submit(requestCtx, userID, sessionID, "客户端断开")
+		resultCh <- err
 	}()
-	<-started
-	time.Sleep(5 * time.Millisecond)
+	waitForTimeoutLeaseState(t, ctx, pool, sessionID, true)
 	cancel()
-	time.Sleep(20 * time.Millisecond)
+	if err := <-resultCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled submit error_type=%T error=%v want=%v", err, err, context.Canceled)
+	}
+	waitForTimeoutLeaseState(t, ctx, pool, sessionID, false)
 	// A second request must be able to acquire the lease after cancellation.
 	agent.mode = "none"
-	if _, err := service.Submit(ctx, userID, sessionID, "重试同一回答"); errors.Is(err, classroom.ErrClassroomChanged) {
-		t.Fatalf("retry remained blocked by an orphan lease: %v", err)
+	retryResult, retryErr := service.Submit(ctx, userID, sessionID, "重试同一回答")
+	switch {
+	case retryErr == nil:
+		t.Logf("retry submit outcome=success result=%+v", retryResult)
+	case errors.Is(retryErr, classroom.ErrClassroomChanged):
+		t.Fatalf("retry submit outcome=classroom_changed error_type=%T error=%v", retryErr, retryErr)
+	default:
+		t.Fatalf("retry submit outcome=unexpected_error error_type=%T error=%v result=%+v", retryErr, retryErr, retryResult)
 	}
 	assertTimeoutState(t, ctx, pool, sessionID, 2, 2, 3)
+}
+
+func waitForTimeoutLeaseState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sessionID uuid.UUID, wantHeld bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var token *uuid.UUID
+	var until *time.Time
+	for {
+		if err := pool.QueryRow(ctx, `SELECT processing_token,processing_until FROM learning_sessions WHERE id=$1`, sessionID).Scan(&token, &until); err != nil {
+			t.Fatal(err)
+		}
+		held := token != nil || until != nil
+		if held == wantHeld && ((token == nil) == (until == nil)) {
+			t.Logf("operation_lease_state: held=%t processing_token=%v processing_until=%v", held, token, until)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("operation lease wait timed out: want_held=%t actual_token=%v actual_until=%v", wantHeld, token, until)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 func TestB7InFlightSubmitIsExcludedFromStaleRecovery(t *testing.T) {
@@ -256,7 +286,7 @@ func assertTimeoutState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s
 		t.Fatal(err)
 	}
 	if status != "ACTIVE" || token != nil || answers != wantAnswers || analyses != wantAnalyses || turns != wantTurns {
-		t.Fatalf("timeout mutated classroom: status=%s token=%v answers=%d analyses=%d turns=%d", status, token, answers, analyses, turns)
+		t.Fatalf("classroom state mismatch: status actual=%s expected=ACTIVE; processing_token actual=%v expected=<nil>; answers actual=%d expected=%d; analyses actual=%d expected=%d; tutor_turns actual=%d expected=%d", status, token, answers, wantAnswers, analyses, wantAnalyses, turns, wantTurns)
 	}
 	t.Logf("timeout_session_state: status=%s processing_token=%v answers=%d analyses=%d tutor_turns=%d", status, token, answers, analyses, turns)
 }
