@@ -91,6 +91,18 @@ func TestTutorProviderConfigKeepsLegacyDisabledBehavior(t *testing.T) {
 	}
 }
 
+func TestTutorProviderContextCacheDefaultsOffAndCannotBeEnabled(t *testing.T) {
+	if config, err := loadTutorProviderConfig(mapLookup(nil)); err != nil || config.Enabled {
+		t.Fatalf("default configuration=%+v error=%v", config, err)
+	}
+	for _, name := range []string{tutorGeneratorCacheEnv, tutorReviewerCacheEnv} {
+		_, err := loadTutorProviderConfig(mapLookup(map[string]string{name: "true"}))
+		if err == nil || !strings.Contains(err.Error(), "no cache-write price field") {
+			t.Fatalf("%s enable error=%v", name, err)
+		}
+	}
+}
+
 func TestTutorProviderSecretsRemainServerOnly(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "apps", "web")
 	for _, subtree := range []string{"src", "dist"} {

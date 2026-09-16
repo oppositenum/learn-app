@@ -82,6 +82,65 @@ VALUES ($1, 'openai', 'test-model', $3::timestamptz - interval '30 days', $3::ti
 	}
 }
 
+func TestProviderCallBindsConfiguredIdentityToEffectivePriceVersion(t *testing.T) {
+	databaseURL := testDatabaseURL(t)
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, databaseURL)
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	now := time.Now().UTC()
+	oldID, currentID := uuid.New(), uuid.New()
+	_, err := pool.Exec(ctx, `
+INSERT INTO ai_price_catalog
+ (id,provider,model,effective_from,effective_to,input_price_per_million_usd,cached_input_price_per_million_usd,output_price_per_million_usd)
+VALUES ($1,'provider-a','configured-endpoint',$3::timestamptz-interval '30 days',$3::timestamptz-interval '1 day',99,99,99),
+       ($2,'provider-a','configured-endpoint',$3::timestamptz-interval '1 day',NULL,2,1,10)`, oldID, currentID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = writer.Write([]byte(`{
+          "id":"provider-call-price-version",
+          "model":"vendor-reported-alias",
+          "output":[{"content":[{"text":"{}"}]}],
+          "usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":40}}
+        }`))
+	}))
+	defer provider.Close()
+	client, err := ai.NewProviderResponsesClient(provider.Client(), provider.URL, "test-key", "provider-a", "configured-endpoint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.WithUsageRecorder(usage.NewRecorder(pool))
+	result, err := client.GenerateStructured(ctx, ai.StructuredRequest{
+		RequestID: "provider-call-price-version", Purpose: ai.PurposeSocraticTurn,
+		SchemaName: "probe", Schema: json.RawMessage(`{"type":"object"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || result.Usage.Provider != "provider-a" || result.Usage.Model != "configured-endpoint" {
+		t.Fatalf("calls=%d usage=%+v", calls, result.Usage)
+	}
+	var recordedProvider, recordedModel string
+	var recordedCatalogID uuid.UUID
+	if err := pool.QueryRow(ctx, `
+SELECT provider,model,price_catalog_id
+FROM ai_usage_records WHERE request_id='provider-call-price-version'`).Scan(
+		&recordedProvider, &recordedModel, &recordedCatalogID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if recordedProvider != "provider-a" || recordedModel != "configured-endpoint" || recordedCatalogID != currentID {
+		t.Fatalf("recorded identity/catalog=%s:%s/%s want provider-a:configured-endpoint/%s", recordedProvider, recordedModel, recordedCatalogID, currentID)
+	}
+}
+
 type meteredVoice struct{}
 
 func (meteredVoice) VoiceUsageIdentity() (string, string) { return "test", "tts-v1" }

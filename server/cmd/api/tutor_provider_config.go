@@ -15,6 +15,8 @@ const (
 	tutorReviewerBaseURLEnv   = "TUTOR_REVIEWER_BASE_URL"
 	tutorReviewerAPIKeyEnv    = "TUTOR_REVIEWER_API_KEY"
 	tutorReviewerModelEnv     = "TUTOR_REVIEWER_MODEL"
+	tutorGeneratorCacheEnv    = "TUTOR_GENERATOR_CONTEXT_CACHE"
+	tutorReviewerCacheEnv     = "TUTOR_REVIEWER_CONTEXT_CACHE"
 )
 
 var tutorChannelEnvNames = []string{
@@ -48,6 +50,12 @@ type tutorProviderConfig struct {
 type environmentLookup func(string) string
 
 func loadTutorProviderConfig(getenv environmentLookup) (tutorProviderConfig, error) {
+	if err := requireContextCacheDisabled(tutorGeneratorCacheEnv, getenv(tutorGeneratorCacheEnv)); err != nil {
+		return tutorProviderConfig{}, err
+	}
+	if err := requireContextCacheDisabled(tutorReviewerCacheEnv, getenv(tutorReviewerCacheEnv)); err != nil {
+		return tutorProviderConfig{}, err
+	}
 	explicit := false
 	for _, name := range tutorChannelEnvNames {
 		if strings.TrimSpace(getenv(name)) != "" {
@@ -92,6 +100,17 @@ func loadTutorProviderConfig(getenv environmentLookup) (tutorProviderConfig, err
 		)
 	}
 	return config, nil
+}
+
+func requireContextCacheDisabled(name, value string) error {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "0", "false", "off", "disabled":
+		return nil
+	case "1", "true", "on", "enabled":
+		return fmt.Errorf("%s cannot be enabled: ai_price_catalog has no cache-write price field", name)
+	default:
+		return fmt.Errorf("%s must be false or unset", name)
+	}
 }
 
 func validateTutorChannel(name string, config tutorChannelConfig) error {
