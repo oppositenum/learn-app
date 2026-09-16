@@ -1,0 +1,12 @@
+{
+  "result": "REJECT",
+  "no_answer_leak": false,
+  "reason_codes": ["SEGMENT_ANSWER_LEAK"],
+  "violations": [
+    {
+      "violation_type": "SEGMENT_ANSWER_LEAK",
+      "payload_kind": "SEGMENT",
+      "segment_index": 0
+    }
+  ]
+}

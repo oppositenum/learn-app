@@ -1,0 +1,17 @@
+{
+  "answer_correct": false,
+  "reasoning_quality": "PARTIAL",
+  "confidence": 0.82,
+  "error_type": "FIXED_COST_IGNORED",
+  "misconceptions": ["EQ-WORD-FIXED-COST"],
+  "core_ability_signals": [
+    {
+      "ability_id": "CA002",
+      "signal": "WEAK"
+    }
+  ],
+  "emotion_signal": "NEUTRAL",
+  "engagement": "NORMAL",
+  "recommended_action": "PROBE",
+  "safe_to_increase_difficulty": false
+}

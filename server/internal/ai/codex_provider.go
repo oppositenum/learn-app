@@ -115,7 +115,7 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 			PurposeAnswerAnalysis,
 			"analyze_answer.schema.json",
 			request,
-			"Analyze the answer. Return diagnosis only; never mutate mastery or planning state.",
+			analyzeAnswerInstructions,
 			"",
 			"",
 			target,
@@ -155,24 +155,20 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 }
 
 func (provider *CodexProvider) GenerateTurn(ctx context.Context, request GenerateTurnRequest) (TutorTurn, error) {
-	return provider.generateTurn(ctx, PurposeSocraticTurn, request, "Generate exactly the Tutor action authorized by the server decision. Do not reveal the original answer.")
+	return provider.generateTurn(ctx, PurposeSocraticTurn, request, generateTurnInstructions)
 }
 
 func (provider *CodexProvider) GenerateAnalogy(ctx context.Context, request AnalogyRequest) (TutorTurn, error) {
-	return provider.generateTurn(ctx, PurposeSocraticTurn, GenerateTurnRequest(request), "Generate a short life analogy without revealing the original answer.")
+	return provider.generateTurn(ctx, PurposeSocraticTurn, GenerateTurnRequest(request), generateAnalogyInstructions)
 }
 
 func (provider *CodexProvider) GenerateParallelExample(ctx context.Context, request ExampleRequest) (TutorTurn, error) {
-	return provider.generateTurn(ctx, PurposeExplanation, GenerateTurnRequest(request), "Explain with a parallel example using different values. Do not solve the original question.")
+	return provider.generateTurn(ctx, PurposeExplanation, GenerateTurnRequest(request), generateParallelExampleInstructions)
 }
 
 func (provider *CodexProvider) GenerateExplanation(ctx context.Context, request ExplainRequest) (Explanation, error) {
-	return provider.generateTurn(ctx, PurposeExplanation, GenerateTurnRequest(request), "Give a concise explanation or voice script using a parallel example. Do not reveal the original answer unless the server explicitly authorizes it.")
+	return provider.generateTurn(ctx, PurposeExplanation, GenerateTurnRequest(request), generateExplanationInstructions)
 }
-
-const turnStyleInstructions = "Write the message in warm, conversational Chinese for a primary or junior-secondary student. Keep it brief. Plain text only: never use markdown syntax such as headings, asterisks, bullet or dash list markers. Never directly quote, repeat, or equivalently paraphrase a sentence or phrase that uniquely supports the correct answer. Do not locate evidence for the student. Never provide the answer or a complete solution."
-
-const hintInstructions = "For a HINT, provide only an observation direction, a reasoning method, or a next-step question."
 
 func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose, request GenerateTurnRequest, instructions string) (TutorTurn, error) {
 	if provider.auditor == nil {

@@ -1,0 +1,11 @@
+{
+  "message": "我们先看一个数字不同但结构相同的小例子，再回到原题验证。",
+  "action": "EXPLAIN",
+  "answer_revealed": false,
+  "segments": [
+    {
+      "id": "segment-1",
+      "text": "先分清固定部分和随数量变化的部分。"
+    }
+  ]
+}

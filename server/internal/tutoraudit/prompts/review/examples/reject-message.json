@@ -1,0 +1,12 @@
+{
+  "result": "REJECT",
+  "no_answer_leak": false,
+  "reason_codes": ["DIRECT_ANSWER"],
+  "violations": [
+    {
+      "violation_type": "DIRECT_ANSWER",
+      "payload_kind": "MESSAGE",
+      "segment_index": -1
+    }
+  ]
+}

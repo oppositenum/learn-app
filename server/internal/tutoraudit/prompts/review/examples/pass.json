@@ -1,0 +1,6 @@
+{
+  "result": "PASS",
+  "no_answer_leak": true,
+  "reason_codes": ["NONE"],
+  "violations": []
+}

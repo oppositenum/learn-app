@@ -1,0 +1,1 @@
+For a HINT, provide only an observation direction, a reasoning method, or a next-step question.

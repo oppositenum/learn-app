@@ -1,0 +1,1 @@
+Analyze the answer. Return diagnosis only; never mutate mastery or planning state.

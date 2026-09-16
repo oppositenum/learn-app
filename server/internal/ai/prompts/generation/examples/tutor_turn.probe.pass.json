@@ -1,0 +1,6 @@
+{
+  "message": "先找一找题目里哪一项每次都会增加。",
+  "action": "PROBE",
+  "answer_revealed": false,
+  "segments": []
+}
