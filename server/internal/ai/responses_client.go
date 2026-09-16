@@ -64,22 +64,57 @@ func ResponsesErrorDiagnostics(err error) (httpStatus int, providerCode string, 
 	return responseErr.StatusCode, sanitizeResponsesProviderErrorCode(responseErr.providerCode), true
 }
 
-type OpenAIResponsesClient struct {
+const (
+	// ShapeResponses is the OpenAI Responses wire format: a json_schema under
+	// text.format, conversation chaining by previous_response_id.
+	ShapeResponses = "responses"
+	// ShapeChatCompletions is the OpenAI Chat Completions wire format: a
+	// json_schema under response_format, no server-side conversation chaining.
+	ShapeChatCompletions = "chat_completions"
+)
+
+// StructuredProviderClient calls one provider for strict structured output.
+// Price preflight, usage accounting, request-outcome recording, and error
+// classification are shared across wire formats on purpose: those are the
+// safety and cost boundaries, and a second copy of them would be free to drift.
+// Only the request body and the response decoding differ per shape.
+type StructuredProviderClient struct {
 	httpClient *http.Client
 	baseURL    string
 	apiKey     string
 	provider   string
 	model      string
-	usage      UsageRecorder
+	shape      string
+	// requestOverlay is merged into the top level of every request body. It
+	// carries provider-specific controls such as disabling reasoning mode; it
+	// may not touch the structured-output contract.
+	requestOverlay map[string]any
+	usage          UsageRecorder
 	// Some OpenAI-compatible relays reject previous_response_id chaining.
 	// Conversation context still travels in the request input (prior turns),
 	// so chaining is dropped for the process lifetime once rejected.
 	chainingUnsupported atomic.Bool
 }
 
+// OpenAIResponsesClient is the original name of the Responses-shaped client.
+type OpenAIResponsesClient = StructuredProviderClient
+
 const accountingWriteTimeout = 5 * time.Second
 
-func (client *OpenAIResponsesClient) WithUsageRecorder(recorder UsageRecorder) *OpenAIResponsesClient {
+// reservedRequestFields may never come from a request overlay: they are the
+// structured-output contract and the identity the call is accounted under.
+var reservedRequestFields = []string{"model", "messages", "input", "instructions", "response_format", "text", "previous_response_id"}
+
+func ValidateRequestOverlay(overlay map[string]any) error {
+	for _, reserved := range reservedRequestFields {
+		if _, present := overlay[reserved]; present {
+			return fmt.Errorf("request overlay must not override %q", reserved)
+		}
+	}
+	return nil
+}
+
+func (client *StructuredProviderClient) WithUsageRecorder(recorder UsageRecorder) *StructuredProviderClient {
 	client.usage = recorder
 	return client
 }
@@ -97,7 +132,11 @@ func NewOpenAIResponsesClient(httpClient *http.Client, baseURL, apiKey, model st
 	return NewProviderResponsesClient(httpClient, baseURL, apiKey, "openai", model)
 }
 
-func NewProviderResponsesClient(httpClient *http.Client, baseURL, apiKey, provider, model string) (*OpenAIResponsesClient, error) {
+func NewProviderResponsesClient(httpClient *http.Client, baseURL, apiKey, provider, model string) (*StructuredProviderClient, error) {
+	return NewStructuredProviderClient(httpClient, baseURL, apiKey, provider, model, ShapeResponses, nil)
+}
+
+func NewStructuredProviderClient(httpClient *http.Client, baseURL, apiKey, provider, model, shape string, overlay map[string]any) (*StructuredProviderClient, error) {
 	if httpClient == nil {
 		return nil, errors.New("http client is required")
 	}
@@ -111,51 +150,46 @@ func NewProviderResponsesClient(httpClient *http.Client, baseURL, apiKey, provid
 	if strings.TrimSpace(model) == "" {
 		return nil, errors.New("structured output model is required")
 	}
+	switch shape {
+	case ShapeResponses, ShapeChatCompletions:
+	default:
+		return nil, fmt.Errorf("unsupported structured output shape %q", shape)
+	}
+	if err := ValidateRequestOverlay(overlay); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(baseURL) == "" {
 		if provider != "openai" {
 			return nil, errors.New("structured output base URL is required for non-OpenAI providers")
 		}
 		baseURL = defaultOpenAIBaseURL
 	}
-	return &OpenAIResponsesClient{
-		httpClient: httpClient,
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		apiKey:     apiKey,
-		provider:   provider,
-		model:      model,
+	return &StructuredProviderClient{
+		httpClient:     httpClient,
+		baseURL:        strings.TrimRight(baseURL, "/"),
+		apiKey:         apiKey,
+		provider:       provider,
+		model:          model,
+		shape:          shape,
+		requestOverlay: overlay,
 	}, nil
 }
 
-type responsesRequest struct {
-	Model              string        `json:"model"`
-	Instructions       string        `json:"instructions"`
-	Input              string        `json:"input"`
-	PreviousResponseID string        `json:"previous_response_id,omitempty"`
-	Text               responsesText `json:"text"`
+type responsesOutputContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
-type responsesText struct {
-	Format responsesTextFormat `json:"format"`
-}
-
-type responsesTextFormat struct {
-	Type   string `json:"type"`
-	Name   string `json:"name"`
-	Strict bool   `json:"strict"`
-	Schema any    `json:"schema"`
+type responsesOutputItem struct {
+	Type    string                   `json:"type"`
+	Content []responsesOutputContent `json:"content"`
 }
 
 type responsesResponse struct {
-	ID     string `json:"id"`
-	Model  string `json:"model"`
-	Output []struct {
-		Type    string `json:"type"`
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	} `json:"output"`
-	Usage struct {
+	ID     string                `json:"id"`
+	Model  string                `json:"model"`
+	Output []responsesOutputItem `json:"output"`
+	Usage  struct {
 		InputTokens       int64 `json:"input_tokens"`
 		OutputTokens      int64 `json:"output_tokens"`
 		InputTokenDetails struct {
@@ -252,18 +286,11 @@ func (client *OpenAIResponsesClient) recordRequestOutcome(ctx context.Context, r
 
 func (client *OpenAIResponsesClient) callResponses(ctx context.Context, request StructuredRequest, schema any, previousResponseID string) (responsesResponse, error) {
 	var decoded responsesResponse
-	payload, err := json.Marshal(responsesRequest{
-		Model: client.model, Instructions: request.Instructions, Input: string(request.Input),
-		PreviousResponseID: previousResponseID,
-		Text: responsesText{Format: responsesTextFormat{
-			Type: "json_schema", Name: strings.TrimSuffix(request.SchemaName, ".schema.json"),
-			Strict: true, Schema: schema,
-		}},
-	})
+	payload, endpoint, err := client.buildRequest(request, schema, previousResponseID)
 	if err != nil {
-		return decoded, fmt.Errorf("encode Responses request: %w", err)
+		return decoded, err
 	}
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, client.baseURL+"/responses", bytes.NewReader(payload))
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, client.baseURL+endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return decoded, fmt.Errorf("create Responses request: %w", err)
 	}
@@ -287,10 +314,100 @@ func (client *OpenAIResponsesClient) callResponses(ctx context.Context, request 
 			providerCode: extractResponsesProviderErrorCode(body),
 		}
 	}
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		return decoded, fmt.Errorf("decode Responses API response: %w", err)
+	if err := client.decodeResponse(body, &decoded); err != nil {
+		return decoded, err
 	}
 	return decoded, nil
+}
+
+// buildRequest renders the same StructuredRequest into whichever wire format
+// the configured provider actually enforces the schema on.
+func (client *StructuredProviderClient) buildRequest(request StructuredRequest, schema any, previousResponseID string) ([]byte, string, error) {
+	schemaName := strings.TrimSuffix(request.SchemaName, ".schema.json")
+	var payload map[string]any
+	endpoint := "/responses"
+	if client.shape == ShapeChatCompletions {
+		endpoint = "/chat/completions"
+		messages := []map[string]string{}
+		if request.Instructions != "" {
+			messages = append(messages, map[string]string{"role": "system", "content": request.Instructions})
+		}
+		messages = append(messages, map[string]string{"role": "user", "content": string(request.Input)})
+		payload = map[string]any{
+			"model": client.model, "messages": messages,
+			"response_format": map[string]any{
+				"type": "json_schema",
+				"json_schema": map[string]any{
+					"name": schemaName, "strict": true, "schema": schema,
+				},
+			},
+		}
+	} else {
+		payload = map[string]any{
+			"model": client.model, "instructions": request.Instructions, "input": string(request.Input),
+			"text": map[string]any{"format": map[string]any{
+				"type": "json_schema", "name": schemaName, "strict": true, "schema": schema,
+			}},
+		}
+		if previousResponseID != "" {
+			payload["previous_response_id"] = previousResponseID
+		}
+	}
+	for key, value := range client.requestOverlay {
+		payload[key] = value
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, "", fmt.Errorf("encode %s request: %w", client.shape, err)
+	}
+	return encoded, endpoint, nil
+}
+
+type chatCompletionsResponse struct {
+	ID      string `json:"id"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens        int64 `json:"prompt_tokens"`
+		CompletionTokens    int64 `json:"completion_tokens"`
+		PromptTokensDetails struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	} `json:"usage"`
+}
+
+// decodeResponse normalizes either wire format into the internal shape, so the
+// accounting and output-extraction paths below stay identical.
+func (client *StructuredProviderClient) decodeResponse(body []byte, decoded *responsesResponse) error {
+	if client.shape != ShapeChatCompletions {
+		if err := json.Unmarshal(body, decoded); err != nil {
+			return fmt.Errorf("decode Responses API response: %w", err)
+		}
+		return nil
+	}
+	var chat chatCompletionsResponse
+	if err := json.Unmarshal(body, &chat); err != nil {
+		return fmt.Errorf("decode Chat Completions response: %w", err)
+	}
+	decoded.ID, decoded.Model = chat.ID, chat.Model
+	decoded.Usage.InputTokens = chat.Usage.PromptTokens
+	decoded.Usage.OutputTokens = chat.Usage.CompletionTokens
+	decoded.Usage.InputTokenDetails.CachedTokens = chat.Usage.PromptTokensDetails.CachedTokens
+	for _, choice := range chat.Choices {
+		if choice.Message.Content == "" {
+			continue
+		}
+		decoded.Output = append(decoded.Output, responsesOutputItem{
+			Type:    "message",
+			Content: []responsesOutputContent{{Type: "output_text", Text: choice.Message.Content}},
+		})
+		break
+	}
+	return nil
 }
 
 func extractResponsesProviderErrorCode(body []byte) string {

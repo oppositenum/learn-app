@@ -141,3 +141,64 @@ func TestTutorProviderSecretsRemainServerOnly(t *testing.T) {
 func mapLookup(values map[string]string) environmentLookup {
 	return func(name string) string { return values[name] }
 }
+
+func TestTutorProviderConfigShapeAndOverlay(t *testing.T) {
+	base := map[string]string{
+		"TUTOR_GENERATOR_PROVIDER": "doubao", "TUTOR_GENERATOR_BASE_URL": "https://ark.example/api/v3",
+		"TUTOR_GENERATOR_API_KEY": "gk", "TUTOR_GENERATOR_MODEL": "doubao-pro",
+		"TUTOR_REVIEWER_PROVIDER": "qwen", "TUTOR_REVIEWER_BASE_URL": "https://dashscope.example/v1",
+		"TUTOR_REVIEWER_API_KEY": "rk", "TUTOR_REVIEWER_MODEL": "qwen-plus",
+	}
+	with := func(extra map[string]string) func(string) string {
+		return func(name string) string {
+			if value, ok := extra[name]; ok {
+				return value
+			}
+			return base[name]
+		}
+	}
+
+	t.Run("shape and overlay reach both channels", func(t *testing.T) {
+		config, err := loadTutorProviderConfig(with(map[string]string{
+			"TUTOR_GENERATOR_API_SHAPE":       "chat_completions",
+			"TUTOR_GENERATOR_REQUEST_OVERLAY": `{"thinking":{"type":"disabled"}}`,
+			"TUTOR_REVIEWER_API_SHAPE":        "chat_completions",
+			"TUTOR_REVIEWER_REQUEST_OVERLAY":  `{"enable_thinking":false}`,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.Generator.Shape != "chat_completions" || config.Reviewer.Shape != "chat_completions" {
+			t.Fatalf("shapes=%s/%s", config.Generator.Shape, config.Reviewer.Shape)
+		}
+		if config.Generator.RequestOverlay["thinking"] == nil || config.Reviewer.RequestOverlay["enable_thinking"] != false {
+			t.Fatalf("overlays=%v/%v", config.Generator.RequestOverlay, config.Reviewer.RequestOverlay)
+		}
+	})
+
+	t.Run("default shape stays responses for existing deployments", func(t *testing.T) {
+		config, err := loadTutorProviderConfig(with(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.Generator.Shape != "responses" || config.Reviewer.Shape != "responses" {
+			t.Fatalf("default shapes=%s/%s", config.Generator.Shape, config.Reviewer.Shape)
+		}
+	})
+
+	for _, test := range []struct {
+		name  string
+		extra map[string]string
+	}{
+		{name: "unknown shape", extra: map[string]string{"TUTOR_GENERATOR_API_SHAPE": "grpc"}},
+		{name: "overlay is not an object", extra: map[string]string{"TUTOR_GENERATOR_REQUEST_OVERLAY": `"disabled"`}},
+		{name: "overlay rewrites the contract", extra: map[string]string{"TUTOR_REVIEWER_REQUEST_OVERLAY": `{"response_format":{"type":"text"}}`}},
+		{name: "overlay rewrites the model", extra: map[string]string{"TUTOR_GENERATOR_REQUEST_OVERLAY": `{"model":"cheaper"}`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := loadTutorProviderConfig(with(test.extra)); err == nil {
+				t.Fatal("unsafe Tutor provider configuration was accepted")
+			}
+		})
+	}
+}

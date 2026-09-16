@@ -89,16 +89,18 @@ func newDatabaseHandler(pool *pgxpool.Pool) http.Handler {
 		log.Fatalf("configure Tutor providers: %v", err)
 	}
 	if tutorConfig.Enabled {
-		client, err := ai.NewProviderResponsesClient(
+		client, err := ai.NewStructuredProviderClient(
 			&http.Client{Timeout: 90 * time.Second}, tutorConfig.Generator.BaseURL,
 			tutorConfig.Generator.APIKey, tutorConfig.Generator.Provider, tutorConfig.Generator.Model,
+			tutorConfig.Generator.Shape, tutorConfig.Generator.RequestOverlay,
 		)
 		if err != nil {
 			log.Fatalf("configure teaching client: %v", err)
 		}
-		reviewClient, err := ai.NewProviderResponsesClient(
+		reviewClient, err := ai.NewStructuredProviderClient(
 			&http.Client{Timeout: 90 * time.Second}, tutorConfig.Reviewer.BaseURL,
 			tutorConfig.Reviewer.APIKey, tutorConfig.Reviewer.Provider, tutorConfig.Reviewer.Model,
+			tutorConfig.Reviewer.Shape, tutorConfig.Reviewer.RequestOverlay,
 		)
 		if err != nil {
 			log.Fatalf("configure Tutor output review client: %v", err)

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
 )
 
 const (
@@ -17,6 +20,10 @@ const (
 	tutorReviewerModelEnv     = "TUTOR_REVIEWER_MODEL"
 	tutorGeneratorCacheEnv    = "TUTOR_GENERATOR_CONTEXT_CACHE"
 	tutorReviewerCacheEnv     = "TUTOR_REVIEWER_CONTEXT_CACHE"
+	tutorGeneratorShapeEnv    = "TUTOR_GENERATOR_API_SHAPE"
+	tutorReviewerShapeEnv     = "TUTOR_REVIEWER_API_SHAPE"
+	tutorGeneratorOverlayEnv  = "TUTOR_GENERATOR_REQUEST_OVERLAY"
+	tutorReviewerOverlayEnv   = "TUTOR_REVIEWER_REQUEST_OVERLAY"
 )
 
 var tutorChannelEnvNames = []string{
@@ -35,6 +42,14 @@ type tutorChannelConfig struct {
 	BaseURL  string
 	APIKey   string
 	Model    string
+	// Shape is the provider wire format. It is per channel because the shape a
+	// provider actually enforces the schema on is a property of that provider,
+	// not of the project.
+	Shape string
+	// RequestOverlay carries provider controls such as disabling reasoning
+	// mode. It is load bearing for the 75s submit budget: with reasoning left
+	// on, a single generation has been measured at most of that budget.
+	RequestOverlay map[string]any
 }
 
 func (config tutorChannelConfig) identity() string {
@@ -72,19 +87,31 @@ func loadTutorProviderConfig(getenv environmentLookup) (tutorProviderConfig, err
 		return tutorProviderConfig{}, nil
 	}
 
+	generatorOverlay, err := parseRequestOverlay(tutorGeneratorOverlayEnv, getenv(tutorGeneratorOverlayEnv))
+	if err != nil {
+		return tutorProviderConfig{}, err
+	}
+	reviewerOverlay, err := parseRequestOverlay(tutorReviewerOverlayEnv, getenv(tutorReviewerOverlayEnv))
+	if err != nil {
+		return tutorProviderConfig{}, err
+	}
 	config := tutorProviderConfig{
 		Enabled: true,
 		Generator: tutorChannelConfig{
-			Provider: valueOrDefault(getenv(tutorGeneratorProviderEnv), "openai"),
-			BaseURL:  valueOrDefault(getenv(tutorGeneratorBaseURLEnv), legacyBaseURL),
-			APIKey:   valueOrDefault(getenv(tutorGeneratorAPIKeyEnv), legacyKey),
-			Model:    valueOrDefault(getenv(tutorGeneratorModelEnv), legacyGeneratorModel),
+			Provider:       valueOrDefault(getenv(tutorGeneratorProviderEnv), "openai"),
+			BaseURL:        valueOrDefault(getenv(tutorGeneratorBaseURLEnv), legacyBaseURL),
+			APIKey:         valueOrDefault(getenv(tutorGeneratorAPIKeyEnv), legacyKey),
+			Model:          valueOrDefault(getenv(tutorGeneratorModelEnv), legacyGeneratorModel),
+			Shape:          valueOrDefault(getenv(tutorGeneratorShapeEnv), ai.ShapeResponses),
+			RequestOverlay: generatorOverlay,
 		},
 		Reviewer: tutorChannelConfig{
-			Provider: valueOrDefault(getenv(tutorReviewerProviderEnv), "openai"),
-			BaseURL:  valueOrDefault(getenv(tutorReviewerBaseURLEnv), legacyBaseURL),
-			APIKey:   valueOrDefault(getenv(tutorReviewerAPIKeyEnv), legacyKey),
-			Model:    valueOrDefault(getenv(tutorReviewerModelEnv), legacyReviewerModel),
+			Provider:       valueOrDefault(getenv(tutorReviewerProviderEnv), "openai"),
+			BaseURL:        valueOrDefault(getenv(tutorReviewerBaseURLEnv), legacyBaseURL),
+			APIKey:         valueOrDefault(getenv(tutorReviewerAPIKeyEnv), legacyKey),
+			Model:          valueOrDefault(getenv(tutorReviewerModelEnv), legacyReviewerModel),
+			Shape:          valueOrDefault(getenv(tutorReviewerShapeEnv), ai.ShapeResponses),
+			RequestOverlay: reviewerOverlay,
 		},
 	}
 	if err := validateTutorChannel("generator", config.Generator); err != nil {
@@ -113,6 +140,24 @@ func requireContextCacheDisabled(name, value string) error {
 	}
 }
 
+// parseRequestOverlay reads a JSON object of provider-specific request fields.
+// It refuses anything that would rewrite the structured-output contract or the
+// identity the call is priced and accounted under.
+func parseRequestOverlay(name, value string) (map[string]any, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	var overlay map[string]any
+	if err := json.Unmarshal([]byte(value), &overlay); err != nil {
+		return nil, fmt.Errorf("%s must be a JSON object: %w", name, err)
+	}
+	if err := ai.ValidateRequestOverlay(overlay); err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	return overlay, nil
+}
+
 func validateTutorChannel(name string, config tutorChannelConfig) error {
 	if config.Provider == "" {
 		return fmt.Errorf("Tutor %s provider is required", name)
@@ -128,6 +173,11 @@ func validateTutorChannel(name string, config tutorChannelConfig) error {
 	}
 	if strings.Contains(config.Provider, ":") {
 		return errors.New("Tutor provider must not contain ':'")
+	}
+	switch config.Shape {
+	case ai.ShapeResponses, ai.ShapeChatCompletions:
+	default:
+		return fmt.Errorf("Tutor %s API shape %q must be %q or %q", name, config.Shape, ai.ShapeResponses, ai.ShapeChatCompletions)
 	}
 	return nil
 }

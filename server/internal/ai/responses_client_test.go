@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -532,5 +533,122 @@ func TestParseRetryAfterHTTPDateAndInvalidValues(t *testing.T) {
 		if delay, ok := parseRetryAfter(value, now); ok || delay != 0 {
 			t.Fatalf("invalid %q delay=%v present=%v", value, delay, ok)
 		}
+	}
+}
+
+func TestChatCompletionsShapeBuildsContractAndMapsUsage(t *testing.T) {
+	var seenPath string
+	var seenBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		seenPath = request.URL.Path
+		body, _ := io.ReadAll(request.Body)
+		_ = json.Unmarshal(body, &seenBody)
+		_, _ = writer.Write([]byte(`{
+            "id":"chat-1","model":"served-alias",
+            "choices":[{"message":{"content":"{\"ok\":true}"}}],
+            "usage":{"prompt_tokens":30,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":11}}
+        }`))
+	}))
+	defer server.Close()
+
+	recorder := &collectingUsageRecorder{}
+	client, err := NewStructuredProviderClient(server.Client(), server.URL, "key", "qwen", "configured-model",
+		ShapeChatCompletions, map[string]any{"enable_thinking": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.WithUsageRecorder(recorder)
+	result, err := client.GenerateStructured(context.Background(), StructuredRequest{
+		RequestID: "chat-request", Purpose: PurposeSocraticTurn,
+		Instructions: "system rule", Input: json.RawMessage(`{"a":1}`),
+		SchemaName: "tutor_turn.schema.json", Schema: json.RawMessage(`{"type":"object"}`),
+		PreviousResponseID: "must-not-be-sent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seenPath != "/chat/completions" {
+		t.Fatalf("endpoint=%s", seenPath)
+	}
+	format, _ := seenBody["response_format"].(map[string]any)
+	schema, _ := format["json_schema"].(map[string]any)
+	if format["type"] != "json_schema" || schema["strict"] != true || schema["name"] != "tutor_turn" {
+		t.Fatalf("structured-output contract=%v", seenBody["response_format"])
+	}
+	if seenBody["enable_thinking"] != false {
+		t.Fatalf("request overlay was not applied: %v", seenBody)
+	}
+	if _, chained := seenBody["previous_response_id"]; chained {
+		t.Fatalf("chat completions must not carry previous_response_id: %v", seenBody)
+	}
+	messages, _ := seenBody["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("messages=%v", messages)
+	}
+	if string(result.OutputJSON) != `{"ok":true}` {
+		t.Fatalf("output=%s", result.OutputJSON)
+	}
+	if result.ReportedModel != "served-alias" {
+		t.Fatalf("reported model=%q", result.ReportedModel)
+	}
+	if result.Usage.Provider != "qwen" || result.Usage.Model != "configured-model" {
+		t.Fatalf("identity=%s:%s", result.Usage.Provider, result.Usage.Model)
+	}
+	if result.Usage.InputTokens != 30 || result.Usage.OutputTokens != 7 || result.Usage.CachedInputTokens != 11 {
+		t.Fatalf("usage mapping=%+v", result.Usage)
+	}
+	if len(recorder.priceChecks) != 1 || recorder.priceChecks[0].Provider != "qwen" || recorder.priceChecks[0].Model != "configured-model" {
+		t.Fatalf("price preflight=%+v", recorder.priceChecks)
+	}
+}
+
+func TestStructuredProviderClientRejectsBadShapeAndContractOverlay(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		shape   string
+		overlay map[string]any
+	}{
+		{name: "unknown shape", shape: "graphql", overlay: nil},
+		{name: "overlay rewrites model", shape: ShapeChatCompletions, overlay: map[string]any{"model": "cheaper"}},
+		{name: "overlay rewrites response_format", shape: ShapeChatCompletions, overlay: map[string]any{"response_format": map[string]any{"type": "text"}}},
+		{name: "overlay rewrites messages", shape: ShapeChatCompletions, overlay: map[string]any{"messages": []any{}}},
+		{name: "overlay rewrites text", shape: ShapeResponses, overlay: map[string]any{"text": map[string]any{}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewStructuredProviderClient(http.DefaultClient, "https://example.invalid", "k", "p", "m", test.shape, test.overlay); err == nil {
+				t.Fatal("client was constructed with an unsafe configuration")
+			}
+		})
+	}
+}
+
+func TestResponsesShapeIsUnchangedByTheSharedBuilder(t *testing.T) {
+	var seenPath string
+	var seenBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		seenPath = request.URL.Path
+		body, _ := io.ReadAll(request.Body)
+		_ = json.Unmarshal(body, &seenBody)
+		_, _ = writer.Write([]byte(`{"id":"r","model":"m","output":[{"type":"message","content":[{"type":"output_text","text":"{}"}]}],"usage":{"input_tokens":2,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+	client, err := NewOpenAIResponsesClient(server.Client(), server.URL, "key", "configured-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GenerateStructured(context.Background(), StructuredRequest{
+		RequestID: "r1", Purpose: PurposeSocraticTurn, Instructions: "inst",
+		Input: json.RawMessage(`{"a":1}`), SchemaName: "tutor_turn.schema.json",
+		Schema: json.RawMessage(`{"type":"object"}`), PreviousResponseID: "prev-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if seenPath != "/responses" || seenBody["previous_response_id"] != "prev-1" || seenBody["instructions"] != "inst" {
+		t.Fatalf("responses contract changed: path=%s body=%v", seenPath, seenBody)
+	}
+	text, _ := seenBody["text"].(map[string]any)
+	format, _ := text["format"].(map[string]any)
+	if format["type"] != "json_schema" || format["strict"] != true || format["name"] != "tutor_turn" {
+		t.Fatalf("responses json_schema contract=%v", text)
 	}
 }
