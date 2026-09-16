@@ -103,6 +103,7 @@ func (reviewer *OpenAIReviewer) ReviewTutorOutput(ctx context.Context, request a
 	}
 	evidence.Provider = result.Usage.Provider
 	evidence.Model = result.Usage.Model
+	evidence.ReportedModel = result.ReportedModel
 	evidence.RequestID = result.RequestID
 	var untyped any
 	if err := json.Unmarshal(result.OutputJSON, &untyped); err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io/fs"
+	"sort"
 	"strings"
 	"testing"
 
@@ -21,12 +22,37 @@ func TestReviewPromptMigrationPreservesExactText(t *testing.T) {
 	}
 }
 
+// The hash covers every embedded review asset, not only the instruction file:
+// the failure contract and the structured-output examples are part of the
+// prompt asset and must not change without a version bump.
 func TestReviewPromptVersionMatchesContent(t *testing.T) {
+	var paths []string
+	if err := fs.WalkDir(reviewPromptFiles, "prompts/review", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			paths = append(paths, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(paths)
+	if len(paths) < 5 {
+		t.Fatalf("review prompt hash covers only %d file(s): %v", len(paths), paths)
+	}
 	hasher := sha256.New()
-	_, _ = hasher.Write([]byte("reviewer.instructions.txt"))
-	_, _ = hasher.Write([]byte{0})
-	_, _ = hasher.Write([]byte(reviewerInstructions))
-	_, _ = hasher.Write([]byte{0})
+	for _, path := range paths {
+		contents, err := fs.ReadFile(reviewPromptFiles, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = hasher.Write([]byte(path))
+		_, _ = hasher.Write([]byte{0})
+		_, _ = hasher.Write(contents)
+		_, _ = hasher.Write([]byte{0})
+	}
 	want := "tutor-output-review-sha256:" + hex.EncodeToString(hasher.Sum(nil))
 	if ReviewPromptVersion != want {
 		t.Fatalf("review prompt content requires a version update: got %q want %q", ReviewPromptVersion, want)

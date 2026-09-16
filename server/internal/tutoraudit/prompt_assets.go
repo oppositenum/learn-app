@@ -6,7 +6,9 @@ import (
 	"strings"
 )
 
-const ReviewPromptVersion = "tutor-output-review-sha256:ea8ee8821dba52c27fd3e1f7862beed5a1d1bc62fa1294a1595f18f094d0b6fd"
+// ReviewPromptVersion covers every embedded review asset: the instruction
+// file, the failure contract, and the structured-output examples.
+const ReviewPromptVersion = "tutor-output-review-sha256:52d2be162c0aa1f864f9244c01a56d3c1e0f9a0f488f19cf3158ad5a1a6e6d3a"
 
 //go:embed prompts/review/*.instructions.txt prompts/review/*.md prompts/review/examples/*.json
 var reviewPromptFiles embed.FS

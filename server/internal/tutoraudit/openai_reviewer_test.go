@@ -120,6 +120,44 @@ func TestOpenAIReviewerActualGeneratorIdentityFailsServiceProvenance(t *testing.
 	}
 }
 
+func TestOpenAIReviewerSubstitutedServedModelFailsServiceProvenance(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		reportedModel string
+		want          error
+	}{
+		{name: "served model matches configured model", reportedModel: "reviewer-v1", want: nil},
+		{name: "provider served a different model", reportedModel: "reviewer-v1-cheap-alias", want: ErrInvalidProvenance},
+		{name: "provider reported no model", reportedModel: "", want: ErrInvalidProvenance},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &structuredClientStub{result: ai.StructuredResult{
+				Usage:         ai.ModelUsage{Provider: "openai", Model: "reviewer-v1"},
+				ReportedModel: test.reportedModel,
+				OutputJSON:    json.RawMessage(`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`),
+			}}
+			reviewer, err := NewOpenAIReviewer(client, "openai", "reviewer-v1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			service, err := NewService("openai:generator-v1", "openai:reviewer-v1", reviewer, &recorderStub{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = service.AuditTutorOutput(context.Background(), validAuditRequest("先找出固定费用。"))
+			if test.want == nil {
+				if err != nil {
+					t.Fatalf("matching served model did not pass provenance: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, test.want) {
+				t.Fatalf("substituted served model did not fail closed: %v", err)
+			}
+		})
+	}
+}
+
 func TestOpenAIReviewerRejectsInvalidSchemaWithRequestEvidence(t *testing.T) {
 	client := &structuredClientStub{result: ai.StructuredResult{Usage: ai.ModelUsage{Provider: "openai", Model: "reviewer-v1"}, OutputJSON: json.RawMessage(`{
 		"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[],"forged":true

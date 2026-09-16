@@ -40,21 +40,45 @@ func TestGenerationPromptVersionMatchesContent(t *testing.T) {
 	}
 }
 
+// generationPromptHash covers every embedded generation asset, not only the
+// instruction files: the failure contract and the structured-output examples
+// are part of the prompt asset and must not change without a version bump.
 func generationPromptHash(t *testing.T) string {
 	t.Helper()
-	filenames := make([]string, 0, len(generationPromptBaseline))
-	for filename := range generationPromptBaseline {
-		filenames = append(filenames, filename)
+	paths := embeddedPromptPaths(t, generationPromptFiles, "prompts/generation")
+	if len(paths) < len(generationPromptBaseline)+2 {
+		t.Fatalf("generation prompt hash covers only %d file(s): %v", len(paths), paths)
 	}
-	sort.Strings(filenames)
 	hasher := sha256.New()
-	for _, filename := range filenames {
-		_, _ = hasher.Write([]byte(filename))
+	for _, path := range paths {
+		contents, err := fs.ReadFile(generationPromptFiles, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = hasher.Write([]byte(path))
 		_, _ = hasher.Write([]byte{0})
-		_, _ = hasher.Write([]byte(generationPrompt(filename)))
+		_, _ = hasher.Write(contents)
 		_, _ = hasher.Write([]byte{0})
 	}
 	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func embeddedPromptPaths(t *testing.T, files fs.FS, root string) []string {
+	t.Helper()
+	var paths []string
+	if err := fs.WalkDir(files, root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			paths = append(paths, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func TestGenerationExamplesSatisfyLocalSchemas(t *testing.T) {

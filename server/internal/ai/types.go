@@ -107,8 +107,14 @@ type StructuredRequest struct {
 type StructuredResult struct {
 	RequestID  string
 	ResponseID string
-	OutputJSON json.RawMessage
-	Usage      ModelUsage
+	// ReportedModel is the raw model string the provider echoed back. Price
+	// preflight, usage accounting, and request outcomes all use the configured
+	// (provider, model) pair so they cannot diverge, so this value exists only
+	// to keep a provider that serves a different model than the configured one
+	// detectable by callers that verify provenance.
+	ReportedModel string
+	OutputJSON    json.RawMessage
+	Usage         ModelUsage
 }
 
 type ModelUsage struct {

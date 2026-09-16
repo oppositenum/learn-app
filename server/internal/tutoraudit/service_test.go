@@ -58,7 +58,7 @@ func passingReviewer() *reviewerStub {
 	return &reviewerStub{
 		review: Review{Result: ReviewPass, NoAnswerLeak: true, ReasonCodes: []string{"NONE"}, Violations: []Violation{}},
 		evidence: ReviewEvidence{
-			Provider: "openai", Model: "reviewer-v1",
+			Provider: "openai", Model: "reviewer-v1", ReportedModel: "reviewer-v1",
 			RequestID: "review-request-1", ExpectedRequestID: "review-request-1",
 		},
 	}
@@ -254,6 +254,8 @@ func TestServiceRejectsInvalidReviewerProvenance(t *testing.T) {
 		{name: "model mismatch", mutate: func(evidence *ReviewEvidence) { evidence.Model = "generator-v1" }},
 		{name: "request ID mismatch", mutate: func(evidence *ReviewEvidence) { evidence.RequestID = "different-review-request" }},
 		{name: "missing request ID", mutate: func(evidence *ReviewEvidence) { evidence.RequestID = "" }},
+		{name: "served model substituted", mutate: func(evidence *ReviewEvidence) { evidence.ReportedModel = "substituted-v9" }},
+		{name: "missing served model", mutate: func(evidence *ReviewEvidence) { evidence.ReportedModel = "" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reviewer := passingReviewer()

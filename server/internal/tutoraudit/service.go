@@ -44,8 +44,12 @@ type Violation struct {
 }
 
 type ReviewEvidence struct {
-	Provider          string
-	Model             string
+	Provider string
+	Model    string
+	// ReportedModel is the model the provider said it actually served. It must
+	// match the configured Model so a provider or gateway that silently
+	// substitutes a model cannot pass as the configured independent reviewer.
+	ReportedModel     string
 	RequestID         string
 	ExpectedRequestID string
 }
@@ -166,6 +170,7 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 
 func (service *Service) validReviewEvidence(evidence ReviewEvidence) bool {
 	return evidence.Provider+":"+evidence.Model == service.reviewerIdentity &&
+		evidence.ReportedModel == evidence.Model &&
 		strings.TrimSpace(evidence.RequestID) != "" &&
 		strings.TrimSpace(evidence.ExpectedRequestID) != "" &&
 		evidence.RequestID == evidence.ExpectedRequestID

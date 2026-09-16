@@ -201,7 +201,7 @@ func (client *OpenAIResponsesClient) GenerateStructured(ctx context.Context, req
 		return StructuredResult{}, err
 	}
 	result := StructuredResult{
-		RequestID: request.RequestID, ResponseID: decoded.ID,
+		RequestID: request.RequestID, ResponseID: decoded.ID, ReportedModel: decoded.Model,
 		Usage: ModelUsage{
 			Provider: client.provider, Model: client.model, InputTokens: decoded.Usage.InputTokens,
 			CachedInputTokens: decoded.Usage.InputTokenDetails.CachedTokens,
