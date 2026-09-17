@@ -132,7 +132,7 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
         <article
           v-for="place in places"
           :key="place.name"
-          class="flex items-center gap-4 border border-zinc-200 bg-white p-4"
+          class="card-flat flex items-center gap-4 p-4"
         >
           <span
             :class="place.color"

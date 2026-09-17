@@ -178,7 +178,7 @@ onBeforeUnmount(() => {
       </h2>
       <RouterLink
         :to="`/student/session/${current.id}`"
-        class="mt-4 flex min-h-36 flex-col justify-between bg-zinc-900 p-5 text-white"
+        class="continue-card mt-4 flex min-h-36 flex-col justify-between p-5"
       >
         <div class="flex items-center justify-between">
           <span class="text-sm text-zinc-300">{{ current.subject_name }} · {{ current.knowledge_point }}</span>
@@ -214,7 +214,7 @@ onBeforeUnmount(() => {
       </p>
       <div
         v-else-if="plan"
-        class="mt-3 divide-y divide-zinc-200 border-y border-zinc-200"
+        class="card-flat mt-3 divide-y divide-[var(--hairline)] overflow-hidden"
       >
         <button
           v-for="block in plan.blocks"

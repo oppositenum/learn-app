@@ -107,10 +107,10 @@ onBeforeUnmount(() => window.clearInterval(timer))
       aria-busy="true"
       aria-live="polite"
     >
-      <div class="h-3 w-28 animate-pulse bg-zinc-200" />
-      <div class="mt-8 h-8 w-4/5 animate-pulse bg-zinc-200" />
-      <div class="mt-3 h-8 w-2/3 animate-pulse bg-zinc-200" />
-      <div class="mt-10 h-36 animate-pulse bg-white" />
+      <div class="h-3 w-28 animate-pulse rounded-full bg-zinc-200" />
+      <div class="mt-8 h-8 w-4/5 animate-pulse rounded-lg bg-zinc-200" />
+      <div class="mt-3 h-8 w-2/3 animate-pulse rounded-lg bg-zinc-200" />
+      <div class="card mt-10 h-36 animate-pulse" />
       <p class="mt-5 text-sm font-medium text-zinc-600">
         正在准备这次探索
       </p>
@@ -140,7 +140,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
     </section>
 
     <template v-else>
-      <header class="sticky top-0 z-10 border-b border-zinc-200 bg-[#f5f5f1]/95 px-4 py-3 backdrop-blur sm:px-7">
+      <header class="sticky top-0 z-10 border-b border-[var(--hairline)] bg-[rgb(255_255_255/88%)] px-4 py-3 backdrop-blur sm:px-7">
         <div class="grid grid-cols-[2.75rem_minmax(0,1fr)_2.75rem] items-center gap-2">
           <RouterLink
             to="/student"
@@ -211,7 +211,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
         aria-label="当前课堂"
       >
         <div class="flex items-center gap-2 text-sm font-semibold text-teal-700">
-          <span class="grid size-7 place-items-center bg-teal-100">AI</span>
+          <span class="agent-badge">AI</span>
           <span>{{ tutorActionLabels[learning.tutorAction] }}</span>
         </div>
         <h1 class="mt-5 text-[1.65rem] font-semibold leading-10 sm:text-3xl">
@@ -221,9 +221,9 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <div
           v-if="showTutorTurn"
           data-tutor-turn
-          class="mt-6 border-l-2 border-teal-500 pl-4"
+          class="tutor-turn mt-6"
         >
-          <p class="whitespace-pre-line leading-7 text-zinc-700">
+          <p class="whitespace-pre-line leading-7">
             {{ currentTutorTurn?.text }}
           </p>
         </div>
@@ -231,7 +231,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
         <div
           v-if="learning.safetyNotice"
           data-testid="safety-notice"
-          class="mt-6 border-y border-amber-300 bg-amber-50 px-4 py-4 text-amber-950"
+          class="notice-warm mt-6 px-4 py-4"
           role="alert"
           aria-live="assertive"
         >
@@ -373,7 +373,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
                 id="student-answer"
                 v-model="answer"
                 rows="3"
-                class="mt-2 w-full resize-none border border-zinc-300 bg-white p-4 text-base leading-7 outline-none transition-colors focus:border-teal-600 focus:ring-2 focus:ring-teal-100"
+                class="answer-field mt-2"
                 placeholder="不必只写答案，也可以说说你准备先算什么"
               />
               <StudentInteractionRenderer

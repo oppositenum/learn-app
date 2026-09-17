@@ -29,12 +29,12 @@ async function submit() {
 </script>
 
 <template>
-  <main class="grid min-h-svh place-items-center bg-[#f4f4f1] px-4 py-10 text-zinc-900">
+  <main class="grid min-h-svh place-items-center bg-[var(--surface)] px-4 py-10">
     <section
       class="w-full max-w-sm"
       aria-labelledby="login-title"
     >
-      <div class="flex size-11 items-center justify-center bg-teal-700 text-white">
+      <div class="flex size-11 items-center justify-center rounded-[var(--radius)] bg-[var(--accent)] text-white shadow-[var(--lift-sm)]">
         <LockKeyhole
           :size="21"
           aria-hidden="true"
@@ -55,7 +55,7 @@ async function submit() {
       >
         <p
           v-if="error"
-          class="mb-4 border-l-2 border-red-600 pl-3 text-sm text-red-700"
+          class="mb-4 rounded-[var(--radius-sm)] bg-red-50 px-3 py-2.5 text-sm text-red-700 shadow-[inset_3px_0_0_#dc2626]"
           role="alert"
         >
           {{ error }}
@@ -70,7 +70,7 @@ async function submit() {
           type="email"
           autocomplete="username"
           required
-          class="mt-2 h-12 w-full border border-zinc-300 bg-white px-3 text-base"
+          class="answer-field mt-2 h-12 px-3.5 py-0"
         >
         <label
           for="login-password"
@@ -83,7 +83,7 @@ async function submit() {
           autocomplete="current-password"
           required
           minlength="3"
-          class="mt-2 h-12 w-full border border-zinc-300 bg-white px-3 text-base"
+          class="answer-field mt-2 h-12 px-3.5 py-0"
         >
         <button
           type="submit"

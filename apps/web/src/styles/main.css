@@ -1,9 +1,40 @@
 @import "tailwindcss";
 
+/* Design tokens. A ninth-grader should feel they are using a good app, not a
+   school form, so the system stays calm: one accent, soft surfaces, real
+   corner radius, and shadows light enough to suggest depth without noise.
+   Every duration honours the 150-400ms house rule and the reduced-motion
+   block at the end of this file. */
 :root {
+  --ink: #1c1c1e;
+  --ink-soft: #55555c;
+  --ink-faint: #85858e;
+
+  --surface: #f6f6f3;
+  --surface-raised: #ffffff;
+  --surface-sunken: #efefea;
+  --hairline: #e3e3dd;
+
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  --accent-tint: #e6f2f0;
+  --accent-edge: #9fccc6;
+
+  --warm: #b45309;
+  --warm-tint: #fdf3e3;
+
+  --radius-sm: 0.625rem;
+  --radius: 0.875rem;
+  --radius-lg: 1.125rem;
+
+  --lift: 0 1px 2px rgb(28 28 30 / 4%), 0 4px 12px rgb(28 28 30 / 5%);
+  --lift-sm: 0 1px 2px rgb(28 28 30 / 5%);
+
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+
   font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Inter, ui-sans-serif, system-ui, sans-serif;
-  color: #18181b;
-  background: #f7f7f4;
+  color: var(--ink);
+  background: var(--surface);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -50,8 +81,8 @@ input:focus-visible {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   min-height: 4.5rem;
   padding: 0.4rem max(0.5rem, env(safe-area-inset-right)) max(0.4rem, env(safe-area-inset-bottom)) max(0.5rem, env(safe-area-inset-left));
-  border-top: 1px solid #deded9;
-  background: rgb(250 250 248 / 96%);
+  border-top: 1px solid var(--hairline);
+  background: rgb(255 255 255 / 92%);
   backdrop-filter: blur(16px);
 }
 
@@ -63,13 +94,16 @@ input:focus-visible {
   align-items: center;
   justify-content: center;
   gap: 0.2rem;
-  color: #71717a;
+  border-radius: var(--radius-sm);
+  color: var(--ink-faint);
   font-size: 0.7rem;
   font-weight: 600;
+  transition: color 180ms var(--ease), background-color 180ms var(--ease);
 }
 
 .nav-item.router-link-active {
-  color: #0f766e;
+  background: var(--accent-tint);
+  color: var(--accent-strong);
 }
 
 .owner-shell .bottom-nav {
@@ -93,53 +127,64 @@ input:focus-visible {
 .secondary-button,
 .choice-button {
   display: inline-flex;
-  min-height: 2.75rem;
+  min-height: 2.875rem;
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
-  padding: 0.7rem 1rem;
-  font-size: 0.925rem;
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 1.1rem;
+  font-size: 0.95rem;
   font-weight: 650;
-  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease, transform 180ms ease;
+  transition: background-color 180ms var(--ease), color 180ms var(--ease),
+    border-color 180ms var(--ease), box-shadow 180ms var(--ease), transform 120ms var(--ease);
+}
+
+.primary-button:active:not(:disabled),
+.secondary-button:active:not(:disabled),
+.choice-button:active:not(:disabled) {
+  transform: scale(0.985);
 }
 
 .primary-button {
-  background: #0f766e;
+  background: var(--accent);
+  box-shadow: var(--lift-sm);
   color: white;
 }
 
-.primary-button:hover {
-  background: #115e59;
+.primary-button:hover:not(:disabled) {
+  background: var(--accent-strong);
 }
 
 .primary-button:disabled {
   cursor: not-allowed;
-  background: #a1a1aa;
+  background: #c8c8c3;
+  box-shadow: none;
 }
 
 .secondary-button {
-  border: 1px solid #d4d4d4;
-  background: #fff;
-  color: #27272a;
+  border: 1px solid var(--hairline);
+  background: var(--surface-raised);
+  color: var(--ink);
 }
 
-.secondary-button:hover,
-.choice-button:hover {
-  border-color: #0f766e;
-  color: #115e59;
+.secondary-button:hover:not(:disabled),
+.choice-button:hover:not(:disabled) {
+  border-color: var(--accent-edge);
+  background: var(--accent-tint);
+  color: var(--accent-strong);
 }
 
 .secondary-button:disabled,
 .choice-button:disabled {
   cursor: not-allowed;
-  border-color: #d4d4d8;
-  background: #e4e4e7;
-  color: #71717a;
+  border-color: var(--hairline);
+  background: var(--surface-sunken);
+  color: var(--ink-faint);
 }
 
 .choice-button {
-  border: 1px solid #d4d4d4;
-  background: #fff;
+  border: 1px solid var(--hairline);
+  background: var(--surface-raised);
   font-size: 1.05rem;
 }
 
@@ -150,9 +195,10 @@ input:focus-visible {
 }
 
 .voice-active {
-  border-left: 3px solid #0d9488;
-  padding: 0.8rem 0 0.8rem 1rem;
-  background: #dfece8;
+  border-radius: var(--radius-sm);
+  padding: 0.8rem 1rem;
+  background: var(--accent-tint);
+  box-shadow: inset 3px 0 0 var(--accent);
   color: #134e4a;
   font-weight: 650;
 }
@@ -215,4 +261,89 @@ input:focus-visible {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+
+/* Surfaces. The classroom is one long column, so cards carry the hierarchy:
+   the task sits on a raised card, the tutor's turn on a tinted one, and
+   supporting text stays on the page background. */
+.card {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  box-shadow: var(--lift);
+}
+
+.card-flat {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.tutor-turn {
+  border-radius: var(--radius);
+  padding: 1rem 1.15rem;
+  background: var(--accent-tint);
+  box-shadow: inset 3px 0 0 var(--accent);
+  color: #12433f;
+}
+
+.notice-warm {
+  border: 1px solid #f0d9ae;
+  border-radius: var(--radius);
+  background: var(--warm-tint);
+  color: #6b3c05;
+}
+
+.answer-field {
+  width: 100%;
+  resize: none;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  padding: 0.9rem 1rem;
+  font-size: 1rem;
+  line-height: 1.75;
+  outline: none;
+  transition: border-color 180ms var(--ease), box-shadow 180ms var(--ease);
+}
+
+.answer-field:focus {
+  border-color: var(--accent-edge);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
+.agent-badge {
+  display: inline-grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent-tint);
+  color: var(--accent-strong);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.stage-dot {
+  border-radius: 999px;
+  transition: background-color 220ms var(--ease);
+}
+
+/* The "continue learning" card is the one place on the home screen that should
+   pull the eye, so it inverts to a dark surface instead of shouting in colour. */
+.continue-card {
+  border-radius: var(--radius-lg);
+  background: linear-gradient(160deg, #22302e 0%, #17211f 100%);
+  box-shadow: var(--lift);
+  color: #f4f7f6;
+}
+
+.continue-card .primary-button {
+  background: var(--surface-raised);
+  color: #17211f;
+}
+
+.continue-card .primary-button:hover:not(:disabled) {
+  background: #e8efed;
 }
