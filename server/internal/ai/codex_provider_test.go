@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -678,5 +679,69 @@ func TestCodexProviderGenerationOverallTimeoutStopsRetryWait(t *testing.T) {
 	}
 	if elapsed > 250*time.Millisecond || client.calls != 1 {
 		t.Fatalf("timeout elapsed=%v calls=%d", elapsed, client.calls)
+	}
+}
+
+func TestGenerationRetriesRejectedProviderOutputWithoutBackoff(t *testing.T) {
+	// A provider may honour every top-level enum and still emit an
+	// out-of-enum value nested inside array items; that was observed in
+	// production on analyze_answer core_ability_signals[].signal.
+	badEnum := StructuredResult{OutputJSON: json.RawMessage(`{
+		"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.8,
+		"error_type":"X","misconceptions":[],
+		"core_ability_signals":[{"ability_id":"a","signal":"PARTIAL"}],
+		"emotion_signal":"NEUTRAL","engagement":"NORMAL",
+		"recommended_action":"PROBE","safe_to_increase_difficulty":false}`)}
+	client := &structuredClientStub{results: []StructuredResult{badEnum, validAnswerAnalysis()}}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+		t.Fatalf("rejected output was not retried: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("calls=%d want 2", client.calls)
+	}
+	if len(waits) != 0 {
+		t.Fatalf("rejected output backed off before retrying: %v", waits)
+	}
+}
+
+func TestGenerationFailsClosedAfterMaxAttemptsOnRejectedOutput(t *testing.T) {
+	bad := StructuredResult{OutputJSON: json.RawMessage(`{"answer_correct":false}`)}
+	client := &structuredClientStub{results: []StructuredResult{bad, bad, bad, bad}}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{})
+	if !errors.Is(err, ErrTutorGenerationBusy) {
+		t.Fatalf("exhausted retries did not fail closed: %v", err)
+	}
+	if client.calls != TutorRetryMaxAttempts {
+		t.Fatalf("calls=%d want %d", client.calls, TutorRetryMaxAttempts)
+	}
+	details, ok := TutorGenerationBusyFailureDetails(err)
+	if !ok || details.Category != TutorReviewFailureInvalidSchema {
+		t.Fatalf("category=%+v want %s", details, TutorReviewFailureInvalidSchema)
+	}
+}
+
+func TestRequestBuildFailuresAreNotRetryable(t *testing.T) {
+	if IsRetryableGenerationError(errors.New("marshal teaching request: boom")) {
+		t.Fatal("a failure building our own request must not be retried")
+	}
+	if !IsRetryableGenerationError(fmt.Errorf("%w: validate structured output", ErrInvalidProviderOutput)) {
+		t.Fatal("rejected provider output must be retryable")
+	}
+	if !IsRetryableGenerationError(generationResponseError(http.StatusTooManyRequests, 0, false)) {
+		t.Fatal("429 must stay retryable")
 	}
 }

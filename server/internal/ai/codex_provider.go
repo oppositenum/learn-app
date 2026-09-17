@@ -125,13 +125,19 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 			return nil
 		}
 		lastErr = err
-		if !IsRetryableResponsesError(err) {
+		if !IsRetryableGenerationError(err) {
 			return err
 		}
-		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
 		if attempt == provider.generationRetry.maxAttempts {
 			break
 		}
+		if errors.Is(err, ErrInvalidProviderOutput) {
+			// The provider is healthy; it just produced output this service
+			// rejected. Backing off would spend submit budget without making
+			// the next sample any more likely to validate.
+			continue
+		}
+		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
 
 		delay := provider.generationRetry.baseDelay << (attempt - 1)
 		delay += provider.generationRetryJitter(provider.generationRetry.maxJitter)
@@ -148,6 +154,9 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 		waited += delay
 	}
 	category := TutorReviewFailureRetryExhausted
+	if errors.Is(lastErr, ErrInvalidProviderOutput) {
+		category = TutorReviewFailureInvalidSchema
+	}
 	if errors.Is(lastErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		category = TutorReviewFailureTimeout
 	}
@@ -224,13 +233,19 @@ func (provider *CodexProvider) generateTutorTurn(ctx context.Context, purpose Pu
 			return nil
 		}
 		lastErr = err
-		if !IsRetryableResponsesError(err) {
+		if !IsRetryableGenerationError(err) {
 			return err
 		}
-		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
 		if attempt == provider.generationRetry.maxAttempts {
 			break
 		}
+		if errors.Is(err, ErrInvalidProviderOutput) {
+			// The provider is healthy; it just produced output this service
+			// rejected. Backing off would spend submit budget without making
+			// the next sample any more likely to validate.
+			continue
+		}
+		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
 
 		delay := provider.generationRetry.baseDelay << (attempt - 1)
 		delay += provider.generationRetryJitter(provider.generationRetry.maxJitter)
@@ -247,6 +262,9 @@ func (provider *CodexProvider) generateTutorTurn(ctx context.Context, purpose Pu
 		waited += delay
 	}
 	category := TutorReviewFailureRetryExhausted
+	if errors.Is(lastErr, ErrInvalidProviderOutput) {
+		category = TutorReviewFailureInvalidSchema
+	}
 	if errors.Is(lastErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		category = TutorReviewFailureTimeout
 	}
@@ -296,13 +314,13 @@ func (provider *CodexProvider) generateAttempt(ctx context.Context, purpose Purp
 	}
 	var untyped any
 	if err := json.Unmarshal(result.OutputJSON, &untyped); err != nil {
-		return fmt.Errorf("decode structured output: %w", err)
+		return fmt.Errorf("%w: decode structured output: %v", ErrInvalidProviderOutput, err)
 	}
 	if err := provider.schemas[schemaFile].Validate(untyped); err != nil {
-		return fmt.Errorf("validate structured output: %w", err)
+		return fmt.Errorf("%w: validate structured output: %v", ErrInvalidProviderOutput, err)
 	}
 	if err := json.Unmarshal(result.OutputJSON, target); err != nil {
-		return fmt.Errorf("decode typed output: %w", err)
+		return fmt.Errorf("%w: decode typed output: %v", ErrInvalidProviderOutput, err)
 	}
 	if turn, ok := target.(*TutorTurn); ok {
 		turn.ResponseID = result.ResponseID

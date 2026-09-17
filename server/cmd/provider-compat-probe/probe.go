@@ -280,7 +280,7 @@ func (runner *probeRunner) runDirection(ctx context.Context, generator, reviewer
 // constraintKeywords are the schema controls the runtime schemas depend on.
 // enum carries the most weight: the server pins the authorized Tutor action by
 // constraining that enum before the request leaves the process.
-var constraintKeywords = []string{"additionalProperties", "required", "enum", "minLength", "maxLength", "minimum", "maximum"}
+var constraintKeywords = []string{"additionalProperties", "required", "enum", "nested_enum", "minLength", "maxLength", "minimum", "maximum"}
 
 // preferredShape picks the request shape with the most observed enforcement,
 // because an accounted 200 only proves the provider took the request, not that
@@ -533,6 +533,21 @@ func constraintProbe(keyword string) (json.RawMessage, string) {
 	case "enum":
 		property["enum"] = []string{"ALLOWED"}
 		prompt = `Return value="BLOCKED".`
+	case "nested_enum":
+		// A top-level enum being honoured says nothing about one inside array
+		// items. analyze_answer.schema.json carries exactly that shape, and a
+		// provider was observed returning an out-of-enum value there while
+		// honouring every top-level enum in the same response.
+		property["type"] = "array"
+		property["items"] = map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"signal"},
+			"properties": map[string]any{
+				"signal": map[string]any{"enum": []string{"ALLOWED"}},
+			},
+		}
+		prompt = `Return value=[{"signal":"BLOCKED"}].`
 	case "minLength":
 		property["type"], property["minLength"] = "string", 5
 		prompt = `Return value="x".`

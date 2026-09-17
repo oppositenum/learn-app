@@ -48,6 +48,25 @@ func IsRetryableResponsesError(err error) bool {
 		(responseErr.StatusCode >= http.StatusInternalServerError && responseErr.StatusCode <= 599))
 }
 
+// ErrInvalidProviderOutput marks a response the provider returned successfully
+// but that this service refused: unparseable JSON, or JSON that fails local
+// schema validation. Providers do not enforce every schema control — nested
+// enums and array item types have both been observed unenforced — so a single
+// malformed field would otherwise end the turn with no second attempt.
+var ErrInvalidProviderOutput = errors.New("provider returned output this service cannot accept")
+
+// IsRetryableGenerationError reports whether another identical attempt could
+// plausibly succeed. It covers provider-side congestion and provider output
+// this service rejected. It deliberately excludes failures in building our own
+// request, where retrying would only repeat the same mistake.
+//
+// Retrying rejected output does not weaken any gate: the output was already
+// discarded, and the replacement passes through the same local validation,
+// the deterministic answer check, and the independent review.
+func IsRetryableGenerationError(err error) bool {
+	return IsRetryableResponsesError(err) || errors.Is(err, ErrInvalidProviderOutput)
+}
+
 func ResponsesRetryAfter(err error) (time.Duration, bool) {
 	var responseErr *ResponsesAPIError
 	if !errors.As(err, &responseErr) || !responseErr.RetryAfterSet {

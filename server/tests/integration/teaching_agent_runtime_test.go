@@ -40,9 +40,19 @@ func TestClassroomMetersRealResponsesClientBeforeStateMutation(t *testing.T) {
 		auditor           ai.TutorOutputAuditor
 	}{
 		{
-			name:      "malformed analysis",
-			outputs:   []string{`{"answer_correct":false}`},
-			wantUsage: 1, wantPurposeCounts: map[string]int{"ANSWER_ANALYSIS": 1},
+			// Output the provider returns but this service rejects is retried
+			// within the generation budget, so a provider that keeps answering
+			// malformed JSON is metered once per accounted attempt. The
+			// invariant under test is unchanged: every attempt is metered, and
+			// none of them mutates classroom state.
+			name: "malformed analysis",
+			outputs: []string{
+				`{"answer_correct":false}`,
+				`{"answer_correct":false}`,
+				`{"answer_correct":false}`,
+			},
+			wantUsage:         ai.TutorRetryMaxAttempts,
+			wantPurposeCounts: map[string]int{"ANSWER_ANALYSIS": ai.TutorRetryMaxAttempts},
 		},
 		{
 			name:      "agent action mismatch",
