@@ -110,7 +110,10 @@ func TestLogTutorGenerationBusyUsesOnlyBoundedStructuredDiagnostics(t *testing.T
 	)
 	logTutorGenerationBusy("support", err)
 
-	want := "classroom tutor_generation_busy operation=support failure_category=RETRY_EXHAUSTED http_status=429 provider_error_code=gateway_concurrency_limit generation_request_id=generation-request-429\n"
+	// rejected_paths stays "none" here: this failure came from provider
+	// congestion, not from output local validation refused, and the unsafe
+	// cause above must not reach the log through the new field either.
+	want := "classroom tutor_generation_busy operation=support failure_category=RETRY_EXHAUSTED http_status=429 provider_error_code=gateway_concurrency_limit generation_request_id=generation-request-429 rejected_paths=none\n"
 	if output.String() != want {
 		t.Fatalf("structured log=%q want=%q", output.String(), want)
 	}

@@ -688,11 +688,19 @@ func logTutorGenerationBusy(operation string, err error) {
 		}
 	}
 	log.Printf(
-		"classroom tutor_generation_busy operation=%s failure_category=%s http_status=%d provider_error_code=%s generation_request_id=%s",
+		"classroom tutor_generation_busy operation=%s failure_category=%s http_status=%d provider_error_code=%s generation_request_id=%s rejected_paths=%s",
 		operation,
 		details.Category,
 		details.HTTPStatus,
 		details.ProviderCode,
 		details.RequestID,
+		valueOrNone(details.RejectedPaths),
 	)
+}
+
+func valueOrNone(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
 }

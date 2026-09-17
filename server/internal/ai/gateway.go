@@ -29,6 +29,12 @@ type TutorGenerationFailureDetails struct {
 	HTTPStatus   int
 	ProviderCode string
 	RequestID    string
+	// RejectedPaths names the schema locations local validation refused, as
+	// JSON pointers such as "/core_ability_signals/0/signal". Without them an
+	// INVALID_SCHEMA failure is undiagnosable: the operator sees that output
+	// was rejected three times and nothing about why. Only locations are kept,
+	// never values, because a value could carry student content.
+	RejectedPaths string
 }
 
 type tutorGenerationBusyFailure struct {
@@ -53,10 +59,11 @@ func NewTutorGenerationBusyFailure(category string, httpStatus int, providerCode
 	}
 	return &tutorGenerationBusyFailure{
 		details: TutorGenerationFailureDetails{
-			Category:     category,
-			HTTPStatus:   httpStatus,
-			ProviderCode: sanitizeResponsesProviderErrorCode(providerCode),
-			RequestID:    sanitizeDiagnosticIdentifier(requestID),
+			Category:      category,
+			HTTPStatus:    httpStatus,
+			ProviderCode:  sanitizeResponsesProviderErrorCode(providerCode),
+			RequestID:     sanitizeDiagnosticIdentifier(requestID),
+			RejectedPaths: RejectedSchemaPaths(cause),
 		},
 		cause: cause,
 	}

@@ -745,3 +745,35 @@ func TestRequestBuildFailuresAreNotRetryable(t *testing.T) {
 		t.Fatal("429 must stay retryable")
 	}
 }
+
+func TestRejectedSchemaPathsNameLocationsWithoutValues(t *testing.T) {
+	// A nested enum the provider does not enforce is exactly the shape that
+	// took a classroom down, and the value carries student-adjacent content.
+	bad := StructuredResult{OutputJSON: json.RawMessage(`{
+		"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.8,
+		"error_type":"CANARY_ERROR_TYPE","misconceptions":[],
+		"core_ability_signals":[{"ability_id":"CANARY_ABILITY","signal":"PARTIAL"}],
+		"emotion_signal":"NEUTRAL","engagement":"NORMAL",
+		"recommended_action":"PROBE","safe_to_increase_difficulty":false}`)}
+	client := &structuredClientStub{results: []StructuredResult{bad, bad, bad, bad}}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{})
+	details, ok := TutorGenerationBusyFailureDetails(err)
+	if !ok {
+		t.Fatalf("no diagnostics for a rejected analysis: %v", err)
+	}
+	if !strings.Contains(details.RejectedPaths, "/core_ability_signals/0/signal") {
+		t.Fatalf("rejected paths did not name the failing location: %q", details.RejectedPaths)
+	}
+	for _, canary := range []string{"PARTIAL", "CANARY_ABILITY", "CANARY_ERROR_TYPE"} {
+		if strings.Contains(details.RejectedPaths, canary) {
+			t.Fatalf("diagnostics leaked a provider output value %q: %q", canary, details.RejectedPaths)
+		}
+	}
+}

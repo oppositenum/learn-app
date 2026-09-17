@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io/fs"
 	"math/rand/v2"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -317,7 +319,7 @@ func (provider *CodexProvider) generateAttempt(ctx context.Context, purpose Purp
 		return fmt.Errorf("%w: decode structured output: %v", ErrInvalidProviderOutput, err)
 	}
 	if err := provider.schemas[schemaFile].Validate(untyped); err != nil {
-		return fmt.Errorf("%w: validate structured output: %v", ErrInvalidProviderOutput, err)
+		return fmt.Errorf("%w: validate structured output at %s", ErrInvalidProviderOutput, schemaRejectionPaths(err))
 	}
 	if err := json.Unmarshal(result.OutputJSON, target); err != nil {
 		return fmt.Errorf("%w: decode typed output: %v", ErrInvalidProviderOutput, err)
@@ -377,4 +379,54 @@ func sessionID(input any) string {
 	default:
 		return ""
 	}
+}
+
+// schemaRejectionPaths renders where local validation refused the provider's
+// output, as a compact list of JSON pointers. Values are deliberately dropped:
+// a rejected analysis can carry student content, and this string reaches logs.
+func schemaRejectionPaths(err error) string {
+	var validation *jsonschema.ValidationError
+	if !errors.As(err, &validation) {
+		return "unknown"
+	}
+	seen := map[string]struct{}{}
+	paths := make([]string, 0, 4)
+	var walk func(node *jsonschema.ValidationError)
+	walk = func(node *jsonschema.ValidationError) {
+		if len(node.Causes) == 0 {
+			location := "/" + strings.Join(node.InstanceLocation, "/")
+			if location == "/" {
+				location = "/(root)"
+			}
+			if _, done := seen[location]; !done {
+				seen[location] = struct{}{}
+				paths = append(paths, location)
+			}
+			return
+		}
+		for _, cause := range node.Causes {
+			walk(cause)
+		}
+	}
+	walk(validation)
+	sort.Strings(paths)
+	if len(paths) > 6 {
+		paths = paths[:6]
+	}
+	return strings.Join(paths, ",")
+}
+
+// RejectedSchemaPaths exposes the rejected locations for diagnostics.
+func RejectedSchemaPaths(err error) string {
+	if err == nil || !errors.Is(err, ErrInvalidProviderOutput) {
+		return ""
+	}
+	var validation *jsonschema.ValidationError
+	if errors.As(err, &validation) {
+		return schemaRejectionPaths(err)
+	}
+	if _, rest, found := strings.Cut(err.Error(), "validate structured output at "); found {
+		return rest
+	}
+	return ""
 }
