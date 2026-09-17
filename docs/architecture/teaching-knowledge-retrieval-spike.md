@@ -82,11 +82,12 @@ workspace/index 配置。
 - **计费**：官方知识库说明写明知识库构建本身不收费，仅调用 `Retrieve` 不经过
   百炼应用生成回答时不产生费用；若通过应用生成回答，召回切片会增加模型输入
   Token 并增加模型推理费用。[官方知识库计费说明](https://docs.modelstudio.console.alibabacloud.com/zh/model-studio/rag-knowledge-base)
-  另一官方计费总览将知识库列为独立服务，并说明知识库账单按小时生成，模型推理
-  则按 Token 计费。[官方产品计费说明](https://www.alibabacloud.com/help/zh/model-studio/what-is-model-studio)
-- **结论**：百炼的纯检索路径在官方口径下可不产生模型 Token 费用，但仍有知识库
-  服务账单/规格口径需要从控制台或账单明细取得；现有 `ai_price_catalog` 无法表达
-  这种按规格时长或独立服务账单。模型生成部分仍必须走现有价格预检和用量记录。
+  知识库功能本身免费，构建、管理运维和纯 `Retrieve` 不收费；选择 ADB-PG
+  向量存储可能产生费用，应单独评估，不推广到默认知识库路径。
+- **结论**：百炼纯检索按上述官方口径免费；召回文本引入的生成成本就是模型
+  输入 Token，现有 `ai_price_catalog` 可以表达。因此百炼当前不需要新增计价
+  维度，计价建模不构成其 P1 阻断。免费检索仍须记录调用、零成本依据与归因，
+  后续模型调用仍必须走现有价格预检和用量记录。
 
 ### 3.2 豆包 / 火山方舟
 
@@ -107,16 +108,20 @@ workspace/index 配置。
 以上均为官方文档能力/计费说明，不是本项目的实时调用证据。当前没有向任一厂商
 发送请求，也没有读取或保存密钥、workspace、index 或知识库内容。
 
-## 4. 计价与记账决策（阻断项）
+## 4. 计价与记账决策（百炼不阻断，方舟阻断）
 
-现有目录只能表达“模型输入/缓存输入/输出 Token”和音频分钟，不能表达：
+百炼默认纯 `Retrieve` 路径免费，召回新增模型输入 Token 可由现有目录表达，
+不需要为了该路径新增价格维度。调用归因与零成本检索记录仍需在 P1 设计，记录
+结构若需持久化变更仍走前向 migration；这不等同于新增收费维度。
+
+方舟价格证据仍不足。现有目录只能表达模型 Token 和音频分钟，不能表达：
 
 - 按检索次数或套餐配额；
 - 知识库规格时长、索引构建、文档处理或存储；
 - 云厂商按小时生成的知识库账单；
 - 一次检索关联多个召回 chunk 的外部账单明细。
 
-**最小 migration 提案（未实施）**：新增前向 migration，建立独立的
+**最小 migration 提案（未实施，仅适用于方舟等独立收费路径）**：新增前向 migration，建立独立的
 `knowledge_retrieval_price_catalog`（provider、knowledge_base_id、region、
 pricing_unit、unit_price_usd、effective_from/to、source_ref），以及
 `knowledge_retrieval_records`（request_id、provider、knowledge_base_id、
@@ -125,13 +130,13 @@ price_catalog_id、estimated_cost_usd、created_at）。按次/按小时/按 Tok
 使用不同 `pricing_unit`，不要污染 `ai_price_catalog` 的模型字段语义。所有
 检索请求在联网前也执行 fail-closed 价格预检。
 
-**不迁移的替代方案（不批准）**：检索不进 AI 用量，只另记无成本的审计事件，
+**不迁移的替代方案（方舟收费路径，不批准）**：检索不进 AI 用量，只另记无成本的审计事件，
 由云账单人工对账。后果是 Owner 成本报表、单位知识点成本和预算告警低估或无法
 解释，不能满足“每次 AI 请求有适用价格版本”的可审计要求，也无法在发布前阻止
 未计价检索。
 
-在裁决前，任何检索调用都不得绕过 `EnsurePrice`、usage/outcome 记录或等价的
-独立检索价格门禁。
+百炼免费检索必须保留官方零成本依据与检索记录，不得把后续模型调用漏记；模型
+调用不得绕过 `EnsurePrice`。方舟收费路径在价格方案裁决前不得联网调用。
 
 ## 5. 授权与合规（阻断项）
 
@@ -165,8 +170,9 @@ Token。样本量 `n=3`，不能外推生产分布。
 例如仅为展示数量级，若目录测试行的 input 价格为 `$1.00/M`（仓库测试夹具值，
 不是豆包或千问生产报价），132 Token 的单次增量是 `$0.000132`；若为 `$0.10/M`
 则是 `$0.0000132`。这不能替代两家按区域、模型、知识库规格和账单周期提供的
-真实报价。百炼纯 `Retrieve` 可能不产生模型 Token 费用，但其知识库独立账单仍
-需另建价格维度；方舟的检索/规格/模型费用也必须拆开记录。
+真实报价。百炼纯 `Retrieve` 按官方口径免费，召回引入的模型输入成本由现有
+目录表达，不需要新增知识库计价维度。方舟的独立检索/规格费用仍待核实，不得
+直接套用上述模型 Token 成本公式。
 
 ## 7. 运行时可行性独立判断
 
@@ -195,7 +201,8 @@ Token。样本量 `n=3`，不能外推生产分布。
 
 - 未取得项目方实际的百炼 `WORKSPACE_ID`、index/knowledge-base ID、北京地域权限、
   子账号策略；未取得方舟 region/project/知识库规格和 AK/SK 配置。
-- 未取得两家生产知识库按次、按小时、索引/存储和模型调用的可入账价格明细。
+- 方舟独立知识库价格明细仍未取得，构成方舟适配器阻断；百炼默认免费检索
+  不受此阻断，后续模型仍需有效价格行。ADB-PG 收费存储不纳入当前先行方案。
 - 未建立外部文档授权清单，不能导入第三方教材或商业题库。
 - 未实现检索接口、适配器、同步器、检索记录表或 migration，符合本期不写业务代码
   的范围。
@@ -203,7 +210,7 @@ Token。样本量 `n=3`，不能外推生产分布。
 
 ## 10. 主动提出但未实施的提案
 
-1. **独立检索价格目录与记录表**：解决现有 token-only 目录无法表达知识库账单
+1. **方舟独立检索价格目录与记录表**：解决现有 token-only 目录无法表达收费知识库账单
    的问题；影响新增 migration、Owner 报表和发布前预检；不做会导致成本不可审计。
 2. **内容流水线统一检索接口 + 单一适配器**：P0 裁决后只接一家，将 provider、
    knowledge base、document/chunk、TopK、latency、adopted 和模型 request ID
@@ -236,9 +243,14 @@ ok github.com/oppositenum/ai-learning-tutor/schemas/ai_outputs
 `CI=1 TEST_DATABASE_URL='postgres://a0000@127.0.0.1:5432/learning_tutor_rag_spike?sslmode=disable' go test -count=1 ./server/tests/integration`
 ```text
 ok github.com/oppositenum/ai-learning-tutor/server/tests/integration 68.970s
-TOP_LEVEL PASS=147 FAIL=0 SKIP=0
+TOP_LEVEL PASS=125 FAIL=0 SKIP=0
 TestIntegrationDatabaseConfiguredInCI: PASS
 ```
+
+审计纠正：顶层只统计测试名不含 `/` 的测试，排除子测试和包级 PASS。
+原报告的 147 是错误计数（146 个含子测试 PASS 加 1 个包级 PASS），不是顶层
+基线。正确计数为 125；FAIL=0、SKIP=0 不变，门禁实质通过。此处计数为审计复核
+结果，不伪称原命令直接输出了正确计数。
 
 `npm test && npm run lint && npm run build`
 ```text
@@ -261,10 +273,11 @@ Running 1 test using 1 worker
 
 ## 12. 结论
 
-P0 建议：**暂不批准课堂运行时 RAG；批准继续设计内容流水线侧的离线检索，但前提
-是先完成独立知识库价格/账单建模和授权清单。** P1 只在该裁决、实际账号前置条件、
-至少一组脱敏召回样本和可审计价格行齐备后启动；在此之前禁止任何检索网络调用绕过
-价格预检与用量记录。
+P0 建议：**不接课堂运行时；P1 只按千问/百炼单家推进，方舟留接口不实现。**
+百炼默认免费检索不构成计价建模阻断，方舟仍受独立计价证据阻断。内容授权清单
+是百炼先行路径剩余的决策阻断；实际执行还需华北2（北京）的 workspace ID、
+index ID、子账号权限、脱敏样本和有效模型价格行。P1 尚未实施，需项目负责人
+裁决；免费检索记录和后续模型价格预检、用量归因均不得省略。
 
 落款：
 ```text
