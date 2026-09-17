@@ -109,6 +109,7 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 	var lastHTTPStatus int
 	lastProviderCode := TutorReviewDiagnosticUnavailable
 	var waited time.Duration
+	instructions := analyzeAnswerInstructions + " " + outputShapeInstructions
 	for attempt := 1; attempt <= provider.generationRetry.maxAttempts; attempt++ {
 		requestID := uuid.NewString()
 		lastRequestID = requestID
@@ -117,7 +118,7 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 			PurposeAnswerAnalysis,
 			"analyze_answer.schema.json",
 			request,
-			analyzeAnswerInstructions+" "+outputShapeInstructions,
+			instructions,
 			"",
 			"",
 			target,
@@ -136,7 +137,10 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 		if errors.Is(err, ErrInvalidProviderOutput) {
 			// The provider is healthy; it just produced output this service
 			// rejected. Backing off would spend submit budget without making
-			// the next sample any more likely to validate.
+			// the next sample any more likely to validate — but repeating the
+			// identical request would not either, so tell the next attempt
+			// which location was refused. Locations only, never values.
+			instructions = withSchemaCorrection(instructions, err)
 			continue
 		}
 		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
@@ -244,7 +248,10 @@ func (provider *CodexProvider) generateTutorTurn(ctx context.Context, purpose Pu
 		if errors.Is(err, ErrInvalidProviderOutput) {
 			// The provider is healthy; it just produced output this service
 			// rejected. Backing off would spend submit budget without making
-			// the next sample any more likely to validate.
+			// the next sample any more likely to validate — but repeating the
+			// identical request would not either, so tell the next attempt
+			// which location was refused. Locations only, never values.
+			instructions = withSchemaCorrection(instructions, err)
 			continue
 		}
 		lastHTTPStatus, lastProviderCode, _ = ResponsesErrorDiagnostics(err)
@@ -429,4 +436,18 @@ func RejectedSchemaPaths(err error) string {
 		return rest
 	}
 	return ""
+}
+
+// withSchemaCorrection appends a one-line correction naming the schema
+// locations local validation refused, so a retry is informed rather than an
+// identical repeat. Providers have been observed not enforcing nested enums,
+// and the two enums in analyze_answer overlap on two of three values, so an
+// uncorrected retry tends to reproduce the same rejection.
+func withSchemaCorrection(instructions string, err error) string {
+	paths := RejectedSchemaPaths(err)
+	if paths == "" || paths == "unknown" {
+		return instructions
+	}
+	return instructions + " Your previous reply was rejected by local schema validation at " + paths +
+		". Re-read the schema for those fields and return a value the schema allows there."
 }

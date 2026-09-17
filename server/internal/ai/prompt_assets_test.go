@@ -15,7 +15,7 @@ import (
 )
 
 var generationPromptBaseline = map[string]string{
-	"analyze_answer.instructions.txt":            "Analyze the answer. Return diagnosis only; never mutate mastery or planning state.",
+	"analyze_answer.instructions.txt":            "Analyze the answer. Return diagnosis only; never mutate mastery or planning state. Two enums in this schema overlap and are easy to confuse: reasoning_quality is one of STRONG, PARTIAL, WEAK, UNKNOWN, while every core_ability_signals entry takes signal from STRONG, NORMAL, WEAK only. PARTIAL and UNKNOWN are never valid for a signal; use NORMAL for the middle level.",
 	"generate_turn.instructions.txt":             "Generate exactly the Tutor action authorized by the server decision. Do not reveal the original answer.",
 	"generate_analogy.instructions.txt":          "Generate a short life analogy without revealing the original answer.",
 	"generate_parallel_example.instructions.txt": "Explain with a parallel example using different values. Do not solve the original question.",
@@ -24,10 +24,13 @@ var generationPromptBaseline = map[string]string{
 	"hint.instructions.txt":                      "For a HINT, provide only an observation direction, a reasoning method, or a next-step question.",
 }
 
-func TestGenerationPromptMigrationPreservesExactText(t *testing.T) {
+// TestGenerationPromptTextIsPinned holds the exact wording sent to the
+// provider. Prompt changes are product changes: they must be made here on
+// purpose, with the version constant bumped alongside, never drift in.
+func TestGenerationPromptTextIsPinned(t *testing.T) {
 	for filename, baseline := range generationPromptBaseline {
 		if got := generationPrompt(filename); got != baseline {
-			t.Errorf("%s changed during asset migration\ngot:  %q\nwant: %q", filename, got, baseline)
+			t.Errorf("%s changed without updating the pinned text\ngot:  %q\nwant: %q", filename, got, baseline)
 		}
 	}
 }

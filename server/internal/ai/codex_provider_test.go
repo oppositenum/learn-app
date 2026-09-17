@@ -777,3 +777,40 @@ func TestRejectedSchemaPathsNameLocationsWithoutValues(t *testing.T) {
 		}
 	}
 }
+
+func TestRetryTellsTheProviderWhichLocationWasRejected(t *testing.T) {
+	bad := StructuredResult{OutputJSON: json.RawMessage(`{
+		"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.8,
+		"error_type":"CANARY_ERROR","misconceptions":[],
+		"core_ability_signals":[{"ability_id":"CANARY_ABILITY","signal":"PARTIAL"}],
+		"emotion_signal":"NEUTRAL","engagement":"NORMAL",
+		"recommended_action":"PROBE","safe_to_increase_difficulty":false}`)}
+	client := &structuredClientStub{results: []StructuredResult{bad, validAnswerAnalysis()}}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	configureImmediateGenerationRetries(provider, &waits)
+
+	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("attempts=%d want 2", len(client.requests))
+	}
+	first, second := client.requests[0].Instructions, client.requests[1].Instructions
+	if strings.Contains(first, "rejected by local schema validation") {
+		t.Fatal("the first attempt carried a correction it could not have earned")
+	}
+	if !strings.Contains(second, "/core_ability_signals/0/signal") {
+		t.Fatalf("retry did not name the rejected location: %q", second)
+	}
+	// PARTIAL is not a usable canary here: the analyze prompt now names it
+	// deliberately when disambiguating the two overlapping enums.
+	for _, canary := range []string{"CANARY_ABILITY", "CANARY_ERROR"} {
+		if strings.Contains(second, canary) {
+			t.Fatalf("retry instructions leaked a provider output value %q", canary)
+		}
+	}
+}
