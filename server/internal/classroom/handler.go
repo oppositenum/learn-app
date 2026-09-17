@@ -112,7 +112,7 @@ func (handler *Handler) SubmitAnswer(writer http.ResponseWriter, request *http.R
 		return
 	}
 	if errors.Is(err, ErrSessionNotActive) {
-		http.Error(writer, "resume the session before answering", http.StatusConflict)
+		writeJSON(writer, http.StatusConflict, map[string]string{"code": SessionResumeRequiredCode})
 		return
 	}
 	if errors.Is(err, ErrClassroomChanged) {
@@ -195,7 +195,7 @@ func (handler *Handler) ReturnFromVoice(writer http.ResponseWriter, request *htt
 		return
 	}
 	if errors.Is(err, ErrSessionNotActive) {
-		http.Error(writer, "resume the session before returning", http.StatusConflict)
+		writeJSON(writer, http.StatusConflict, map[string]string{"code": SessionResumeRequiredCode})
 		return
 	}
 	if errors.Is(err, ErrVoiceNotActive) {
@@ -275,7 +275,7 @@ func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http
 		return
 	}
 	if errors.Is(err, ErrSessionNotActive) {
-		http.Error(writer, "resume the session before requesting support", http.StatusConflict)
+		writeJSON(writer, http.StatusConflict, map[string]string{"code": SessionResumeRequiredCode})
 		return
 	}
 	if errors.Is(err, ErrClassroomChanged) {

@@ -10,6 +10,7 @@ import {
   requestStudentSupport,
   requestStudentStageSupport,
   resumeStudentSession,
+  sessionResumeRequiredCode,
   submitSessionReflection,
   submitStudentAnswer,
   submitStudentStageResponse,
@@ -263,7 +264,7 @@ export const useLearningStore = defineStore('learning', {
 				return false
 			}
 		},
-	    async submitAnswer(sessionID: string, answer: string) {
+	    async submitAnswer(sessionID: string, answer: string, retried = false): Promise<boolean> {
       const value = answer.trim()
 			if (!value || this.sessionID !== sessionID || this.loading) return false
 			const operation = ++this.operationSequence
@@ -311,6 +312,22 @@ export const useLearningStore = defineStore('learning', {
       } catch (error) {
 				if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
 				if (error instanceof ApiError && error.status === 404) this.sessionGone = true
+				// Idle-session recovery paused the classroom while the child was
+				// thinking. Resume once and resubmit rather than telling a student
+				// their answer could not be sent.
+				if (error instanceof ApiError && error.code === sessionResumeRequiredCode && !retried) {
+					this.loading = false
+					this.submissionInFlight = false
+					// Resume reports success through several timing conditions, so do
+					// not gate the retry on its return value; the retried flag already
+					// bounds this to a single extra attempt.
+					await this.resumeSession()
+					if (this.sessionID === sessionID) {
+						this.loading = false
+						this.submissionInFlight = false
+						return await this.submitAnswer(sessionID, value, true)
+					}
+				}
         this.error = error instanceof Error ? error.message : '课堂暂时无法提交'
         return false
       } finally {

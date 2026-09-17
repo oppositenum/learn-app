@@ -37,6 +37,12 @@ var (
 	ErrSubmitTimedOut      = errors.New("classroom submission timed out")
 )
 
+// SessionResumeRequiredCode tells the client the session was paused by
+// idle-session recovery rather than by anything the student did wrong. The
+// student has simply been thinking; the client resumes and retries instead of
+// showing a conflict.
+const SessionResumeRequiredCode = "SESSION_RESUME_REQUIRED"
+
 type VoiceResult struct {
 	Provider        string
 	Model           string

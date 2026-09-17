@@ -461,3 +461,61 @@ test.each([
 	expect(learning.error).toBe(message)
 	expect(fetch).not.toHaveBeenCalled()
 })
+
+test('resumes a session paused by idle recovery and resubmits once', async () => {
+  const store = useLearningStore()
+  store.$patch({ sessionID: 'session-1', status: 'PAUSED', version: 1, loading: false })
+  let submits = 0
+  let resumes = 0
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/answers')) {
+      submits += 1
+      if (submits === 1) return jsonResponse({ code: 'SESSION_RESUME_REQUIRED' }, 409)
+      return jsonResponse({
+        session_id: 'session-1', version: 3, action: 'HINT',
+        message: '再看看哪一句在讲动作。', status: 'ACTIVE',
+      })
+    }
+    if (url.endsWith('/resume')) {
+      resumes += 1
+      return jsonResponse({
+        session_id: 'session-1', version: 2, timing_version: 2, status: 'ACTIVE',
+        active_seconds: 10, current_active_seconds: 10,
+        timing_observed_at: '2026-08-26T12:00:10Z',
+      })
+    }
+    return jsonResponse(session('session-1', { version: 3 }))
+  }))
+
+  const accepted = await store.submitAnswer('session-1', '我觉得是递伞那句')
+  expect(resumes).toBe(1)
+  expect(submits).toBe(2)
+  expect(accepted).toBe(true)
+  expect(store.error).toBe('')
+})
+
+test('retries the resumed submit only once', async () => {
+  const store = useLearningStore()
+  store.$patch({ sessionID: 'session-1', status: 'PAUSED', version: 1, loading: false })
+  let submits = 0
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/answers')) {
+      submits += 1
+      return jsonResponse({ code: 'SESSION_RESUME_REQUIRED' }, 409)
+    }
+    if (url.endsWith('/resume')) {
+      return jsonResponse({
+        session_id: 'session-1', version: 2, timing_version: 2, status: 'ACTIVE',
+        active_seconds: 10, current_active_seconds: 10,
+        timing_observed_at: '2026-08-26T12:00:10Z',
+      })
+    }
+    return jsonResponse(session('session-1', { version: 3 }))
+  }))
+
+  const accepted = await store.submitAnswer('session-1', '再试一次')
+  expect(submits).toBe(2)
+  expect(accepted).toBe(false)
+})

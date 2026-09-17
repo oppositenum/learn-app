@@ -130,6 +130,10 @@ export class ApiError extends Error {
 const tutorReviewUnavailableCode = 'TUTOR_REVIEW_TEMPORARILY_UNAVAILABLE'
 const tutorOutputRephraseRequiredCode = 'TUTOR_OUTPUT_REPHRASE_REQUIRED'
 const tutorGenerationBusyCode = 'TUTOR_GENERATION_BUSY'
+// The server pauses a session that has been idle, which happens whenever a
+// child spends a while thinking. That is bookkeeping, not a student error, so
+// the client resumes and retries rather than surfacing a conflict.
+export const sessionResumeRequiredCode = 'SESSION_RESUME_REQUIRED'
 const tutorGenerationBusyMessage = '现在有点挤，老师马上就来。请稍等一下再试一次'
 const tutorHintRephraseMessage = '刚才的提示不太合适，老师换个问法。请再点一次『一点提示』'
 const tutorExplainRephraseMessage = '刚才的讲解不太合适，老师换个说法。请再点一次『我不会』'

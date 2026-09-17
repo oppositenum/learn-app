@@ -215,3 +215,38 @@ func TestExplanationAlwaysReturnsToOriginalTask(t *testing.T) {
 		t.Fatalf("message=%q", turn.Message)
 	}
 }
+
+func TestClassifierOneIsNotIntroducedMaterial(t *testing.T) {
+	question := content.QuestionPublic{Prompt: "三杯同样的饮料一共 36 元，每杯多少元？"}
+	for _, test := range []struct {
+		name    string
+		message string
+		allowed bool
+	}{
+		{name: "每一杯 is distributive", message: "可以试着把总价平均分给每一杯，看看每份是多少。", allowed: true},
+		{name: "哪一步 is interrogative", message: "你想先做哪一步呢？", allowed: true},
+		{name: "bare 一杯 stays material", message: "先算出一杯要多少钱。", allowed: false},
+		{name: "每 plus a real number stays material", message: "如果每12元一杯呢？", allowed: false},
+		{name: "question numbers stay allowed", message: "把36平均分成3份，每份是多少？", allowed: true},
+		{name: "一个字母 introduces an unknown", message: "你可以用一个字母来代表每张门票的价格。", allowed: true},
+		{name: "一个未知数 introduces an unknown", message: "先设一个未知数,再把关系写出来。", allowed: true},
+		{name: "一个苹果 adds a real quantity", message: "再拿一个苹果试试。", allowed: false},
+		{name: "一部分 names a part", message: "先把总钱数分成两部分，一部分是门票钱。", allowed: true},
+		{name: "一种 names an approach", message: "这是一种想法，还有别的吗？", allowed: true},
+		{name: "一共 with a real total stays material", message: "一共是48元。", allowed: false},
+		{name: "一张 without a classifier stays material", message: "先算一张要多少钱。", allowed: false},
+		{name: "introduced number still rejected", message: "先用36减去6，再看看结果。", allowed: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := enforceTutorMaterialPolicy(question, TutorTurn{
+				Action: tutor.StateHint, Message: test.message,
+			})
+			if test.allowed && err != nil {
+				t.Fatalf("sound hint was rejected: %v", err)
+			}
+			if !test.allowed && err == nil {
+				t.Fatal("introduced numeric material was accepted")
+			}
+		})
+	}
+}

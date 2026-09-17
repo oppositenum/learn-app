@@ -267,6 +267,9 @@ func chineseNumeralHasMaterialContext(runes []rune, start, end int) bool {
 	if isProceduralChineseNumeral(runes, start, end) {
 		return false
 	}
+	if isClassifierOne(runes, start, end) {
+		return false
+	}
 	token := string(runes[start:end])
 	if (token == "万一" || token == "千万") && !hasExplicitNumericContext(runes, start, end) {
 		return false
@@ -278,6 +281,62 @@ func chineseNumeralHasMaterialContext(runes []rune, start, end int) bool {
 		return true
 	}
 	return start == 0 && end == len(runes)
+}
+
+// indefiniteArticleClassifiers are measure words that make a bare 一 an
+// indefinite article rather than a quantity whatever follows them: 分成一部分
+// names a part, 这是一种想法 names an approach.
+var indefiniteArticleClassifiers = map[rune]struct{}{
+	'部': {}, '种': {}, '样': {}, '类': {}, '些': {}, '下': {},
+}
+
+// abstractPlaceholderNouns complete 一个 when it introduces a symbol to reason
+// with rather than a countable thing. 用一个字母表示 is the standard way to
+// teach a student to set up an equation; 再拿一个苹果 adds a real quantity and
+// must stay material, so 个 alone cannot decide this.
+var abstractPlaceholderNouns = []string{
+	"字母", "未知数", "符号", "式子", "方程", "关系", "数来", "数表示",
+	"想法", "办法", "方法", "思路", "角度", "例子",
+}
+
+// isClassifierOne reports whether a bare 一 is grammatical rather than task
+// material. Two cases qualify: 每 or 哪 in front make it distributive or
+// interrogative — 每一杯 is "each cup", 哪一步 is "which step" — and an
+// indefinite-article classifier behind it makes it "a", not "one".
+//
+// REQ-TEACH-01 requires a guided turn to preserve the question's numbers and
+// not swap them for new ones. Counting this 一 as an introduced number
+// rejected the standard way to teach algebra in Chinese: live runs showed
+// hints such as 用一个字母来代表单张门票的价格 turned away for "introducing"
+// the number 1, which is exactly the move a student needs to learn.
+//
+// The exemption stays narrow. It applies only to the single character 一, so
+// 每12元 and 一共36元 remain material. Answer disclosure is unaffected: it is
+// enforced separately by the deterministic answer comparison and the
+// independent reviewer.
+func isClassifierOne(runes []rune, start, end int) bool {
+	if end-start != 1 || runes[start] != '一' {
+		return false
+	}
+	if start > 0 && (runes[start-1] == '每' || runes[start-1] == '哪') {
+		return true
+	}
+	if end >= len(runes) {
+		return false
+	}
+	if _, indefinite := indefiniteArticleClassifiers[runes[end]]; indefinite {
+		return true
+	}
+	if runes[end] != '个' {
+		return false
+	}
+	rest := string(runes[end+1:])
+	for _, noun := range abstractPlaceholderNouns {
+		if strings.HasPrefix(rest, noun) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasExplicitNumericContext(runes []rune, start, end int) bool {
