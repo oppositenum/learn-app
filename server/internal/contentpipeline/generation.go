@@ -145,7 +145,42 @@ func NewOpenAIGenerator(client ai.StructuredClient, provider, model string) (*Op
 	return &OpenAIGenerator{client: client, provider: provider, model: model, schema: compiled, raw: raw}, nil
 }
 
+// contentGenerationMaxAttempts bounds provider calls for one generation.
+// Output the provider returned successfully but this service could not accept
+// — invalid JSON, or JSON the schema rejects — is worth one more sample, and a
+// second failure fails closed. Every attempt is a real, separately priced and
+// separately accounted call, so this stays small on purpose.
+const contentGenerationMaxAttempts = 2
+
 func (generator *OpenAIGenerator) Generate(ctx context.Context, input GenerationContext) (GenerationResult, GenerationMetadata, error) {
+	var lastErr error
+	for attempt := 1; attempt <= contentGenerationMaxAttempts; attempt++ {
+		// The caller owns the deadline. Content generation is an offline
+		// pipeline and must not borrow the classroom submit budget.
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return GenerationResult{}, GenerationMetadata{}, lastErr
+			}
+			return GenerationResult{}, GenerationMetadata{}, err
+		}
+		result, metadata, err := generator.generateAttempt(ctx, input)
+		if err == nil {
+			return result, metadata, nil
+		}
+		lastErr = err
+		// Only a reply this service refused is resampled. A failure building
+		// our own request would repeat identically, and provider-side HTTP
+		// failures are deliberately left unretried on this path for now.
+		if !errors.Is(err, ai.ErrInvalidProviderOutput) {
+			return GenerationResult{}, GenerationMetadata{}, err
+		}
+		// No backoff: the provider is healthy, and an offline pipeline gains
+		// nothing from waiting. Scheduling belongs to the caller.
+	}
+	return GenerationResult{}, GenerationMetadata{}, lastErr
+}
+
+func (generator *OpenAIGenerator) generateAttempt(ctx context.Context, input GenerationContext) (GenerationResult, GenerationMetadata, error) {
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return GenerationResult{}, GenerationMetadata{}, fmt.Errorf("encode generation context: %w", err)
@@ -170,14 +205,14 @@ func (generator *OpenAIGenerator) Generate(ctx context.Context, input Generation
 	}
 	var untyped any
 	if err := json.Unmarshal(result.OutputJSON, &untyped); err != nil {
-		return GenerationResult{}, GenerationMetadata{}, fmt.Errorf("decode content generation output: %w", err)
+		return GenerationResult{}, GenerationMetadata{}, fmt.Errorf("%w: decode content generation output: %v", ai.ErrInvalidProviderOutput, err)
 	}
 	if err := generator.schema.Validate(untyped); err != nil {
-		return GenerationResult{}, GenerationMetadata{}, fmt.Errorf("validate content generation output: %w", err)
+		return GenerationResult{}, GenerationMetadata{}, fmt.Errorf("%w: validate content generation output: %v", ai.ErrInvalidProviderOutput, err)
 	}
 	var generated GenerationResult
 	if err := json.Unmarshal(result.OutputJSON, &generated); err != nil {
-		return GenerationResult{}, GenerationMetadata{}, fmt.Errorf("decode typed content generation: %w", err)
+		return GenerationResult{}, GenerationMetadata{}, fmt.Errorf("%w: decode typed content generation: %v", ai.ErrInvalidProviderOutput, err)
 	}
 	providerRequestID := result.ResponseID
 	if providerRequestID == "" {
