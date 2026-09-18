@@ -186,6 +186,29 @@ test('keeps an invalidated stage task answer-free and recoverable', async () => 
   expect(wrapper.find('form').exists()).toBe(false)
   expect(wrapper.get('[role="alert"]').text()).toContain('本次不会记录答题证据')
   expect(wrapper.get('[role="alert"] button').text()).toContain('重新加载任务')
+  // Reloading can fail too; leaving the plan must always be possible.
+  expect(wrapper.get('[role="alert"]').text()).toContain('返回今日计划')
+  wrapper.unmount()
+})
+
+test('a paused classroom can still be resumed when the stage material is unavailable', async () => {
+  // The two conditions met at once: the classroom auto-paused on idle, and the
+  // stage material came back in fallback mode. The composer is hidden by
+  // design, so the resume control must live outside it — otherwise the student
+  // is left with a readable question and not one thing to click.
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({
+    status: 'PAUSED', state: 'EXPLAIN',
+    interaction: {
+      version: 'student-text-fallback-v1', renderer: 'TEXT_FALLBACK', answer_schema: { type: 'string' },
+      accessible_fallback: '保留的文字任务', fallback: true,
+    },
+    stage_flow: { version: 'classroom-stage-flow-v1', stage: 'ORIGINAL', task_version: 'content-v1' },
+  }))))
+
+  expect(wrapper.find('[data-testid="classroom-composer"]').exists()).toBe(false)
+  const resume = wrapper.get('[data-testid="resume-session"]')
+  expect(resume.text()).toContain('继续探索')
+  expect(resume.attributes('disabled')).toBeUndefined()
   wrapper.unmount()
 })
 
@@ -724,7 +747,12 @@ test('keeps a variable-height composer after the Tutor turn in normal document f
   expect(composer.classes()).not.toContain('sticky')
   expect(composer.classes()).not.toContain('fixed')
   expect(composer.classes()).not.toContain('absolute')
-  expect(composer.text()).toContain('这次探索已暂停')
+  // The paused guidance now sits above the composer rather than inside it, so
+  // that it survives when the composer is hidden. It must still precede the
+  // composer and still push it down the page rather than overlap it.
+  const paused = wrapper.get('[data-testid="paused-support-guidance"]')
+  expect(paused.text()).toContain('这次探索已暂停')
+  expect(paused.element.compareDocumentPosition(composer.element) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
   expect(composer.get('[data-testid="answer-controls"]').attributes('disabled')).toBe('')
   wrapper.unmount()
 })

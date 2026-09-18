@@ -27,6 +27,15 @@ watch(() => route.params.id, async (value) => {
 
 <template>
   <main class="page-wrap min-h-dvh pb-8 pt-6">
+    <!-- Outside the loading branch on purpose: the way back to the question
+         must exist even while the supply is still being prepared. -->
+    <RouterLink
+      :to="classroomRoute"
+      class="icon-button"
+      aria-label="返回原题"
+    >
+      <ArrowLeft :size="20" />
+    </RouterLink>
     <section
       v-if="learning.preparing"
       class="py-8"
@@ -40,14 +49,6 @@ watch(() => route.params.id, async (value) => {
       </p>
     </section>
     <template v-else>
-      <RouterLink
-        :to="classroomRoute"
-        class="icon-button"
-        aria-label="返回课堂"
-      >
-        <ArrowLeft :size="20" />
-      </RouterLink>
-
       <section class="mt-8">
         <div
           v-if="learning.status === 'PAUSED'"

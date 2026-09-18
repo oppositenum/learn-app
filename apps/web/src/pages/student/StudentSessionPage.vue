@@ -114,6 +114,14 @@ onBeforeUnmount(() => window.clearInterval(timer))
       <p class="mt-5 text-sm font-medium text-zinc-600">
         正在准备这次探索
       </p>
+      <!-- A loading state must never be a dead end: if preparing outlives the
+           request for any reason, this is the student's way out. -->
+      <RouterLink
+        to="/student"
+        class="secondary-button mt-8"
+      >
+        返回今日计划
+      </RouterLink>
     </section>
 
     <section
@@ -300,6 +308,40 @@ onBeforeUnmount(() => window.clearInterval(timer))
           >
             <RefreshCw :size="17" />重新加载任务
           </button>
+          <RouterLink
+            to="/student"
+            class="secondary-button ml-3 mt-3"
+          >
+            返回今日计划
+          </RouterLink>
+        </div>
+
+        <!-- Resuming a paused classroom has nothing to do with the stage
+             material, so it must not sit behind stageMaterialUnavailable.
+             While it did, a paused session whose material arrived in fallback
+             mode showed the student no controls at all: nothing to answer
+             with, nothing to ask for help with, and no way to resume. -->
+        <div
+          v-if="learning.status === 'PAUSED' && !complete"
+          data-testid="paused-support-guidance"
+          class="mt-8 border-t border-zinc-200 py-5"
+          aria-live="polite"
+        >
+          <p class="font-medium">
+            这次探索已暂停
+          </p>
+          <p class="mt-1 text-sm text-zinc-600">
+            要使用「一点提示」或「我不会」，请先继续这次探索。
+          </p>
+          <button
+            type="button"
+            data-testid="resume-session"
+            class="primary-button mt-3"
+            :disabled="learning.loading"
+            @click="learning.resumeSession()"
+          >
+            <RefreshCw :size="17" />{{ learning.loading ? '正在继续' : '继续探索' }}
+          </button>
         </div>
 
         <div
@@ -308,29 +350,6 @@ onBeforeUnmount(() => window.clearInterval(timer))
           data-layout-contract="normal-flow"
           class="classroom-composer mt-8 border-t border-zinc-200 bg-[#f5f5f1] py-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
         >
-          <div
-            v-if="learning.status === 'PAUSED'"
-            data-testid="paused-support-guidance"
-            class="mb-5 border-b border-zinc-200 pb-5"
-            aria-live="polite"
-          >
-            <p class="font-medium">
-              这次探索已暂停
-            </p>
-            <p class="mt-1 text-sm text-zinc-600">
-              要使用「一点提示」或「我不会」，请先继续这次探索。
-            </p>
-            <button
-              type="button"
-              data-testid="resume-session"
-              class="primary-button mt-3"
-              :disabled="learning.loading"
-              @click="learning.resumeSession()"
-            >
-              <RefreshCw :size="17" />{{ learning.loading ? '正在继续' : '继续探索' }}
-            </button>
-          </div>
-
           <div
             v-if="sessionMismatch"
             data-testid="session-mismatch-guidance"
