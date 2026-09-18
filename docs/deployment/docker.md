@@ -118,12 +118,50 @@ identity creation and Parent-Student links under Owner control.
 
 ## 5. Enable AI features
 
-Question generation requires all of the following:
+Three capabilities call providers and are configured separately in
+`.env.production`. Tutor text and content-pipeline text each use two independent
+channels; speech still uses the OpenAI variables.
 
-- `OPENAI_API_KEY` and `OPENAI_CONTENT_GENERATION_MODEL` in `.env.production`.
-- A currently effective `ai_price_catalog` row matching provider `openai` and
-  the exact configured model.
-- A different configured reviewer identity/model before independent AI review.
+| Capability | Variables |
+| --- | --- |
+| Tutor text | `TUTOR_GENERATOR_*` and `TUTOR_REVIEWER_*` |
+| Content-pipeline text | `CONTENT_GENERATOR_*` and `CONTENT_REVIEWER_*` |
+| STT/TTS | `OPENAI_API_KEY`, `OPENAI_STT_MODEL`, `OPENAI_TTS_MODEL`, `OPENAI_TTS_VOICE` |
+
+Each text channel takes `_PROVIDER`, `_BASE_URL`, `_API_KEY`, `_MODEL`, and
+optionally `_API_SHAPE` (`responses` or `chat_completions`) and
+`_REQUEST_OVERLAY`. `_BASE_URL` is required for any provider other than
+`openai`. `_API_SHAPE` defaults to `responses` for Tutor and
+`chat_completions` for the content pipeline.
+
+Owner AI question generation additionally requires:
+
+- A `CONTENT_REVIEWER_*` identity that differs from `CONTENT_GENERATOR_*`.
+  Equal `provider:model` identities fail at startup, not at first use.
+- A currently effective `ai_price_catalog` row for each configured identity,
+  matching its provider and exact model.
+
+> **Retired variables block startup.** `OPENAI_CONTENT_GENERATION_MODEL` and
+> `OPENAI_CONTENT_REVIEW_MODEL` no longer configure anything, and the API
+> container **exits on start** while either is present. Remove both from
+> `.env.production` before deploying, or the release will fail at container
+> start rather than degrade silently. `OPENAI_TUTOR_MODEL` and
+> `OPENAI_TUTOR_OUTPUT_REVIEW_MODEL` are different: they still work as an
+> OpenAI-only fallback, but prefer the `TUTOR_*` channels.
+
+Also keep every `*_CONTEXT_CACHE` variable unset or false; enabling one is
+refused at startup because `ai_price_catalog` has no cache-write price field.
+
+> **Known gap — the bundled compose files do not forward these yet.**
+> `compose.prod.yaml` and `compose.deploy.yaml` declare an explicit
+> `environment:` map with no `env_file:`, so only the variables listed there
+> reach the API container. Neither file lists any `TUTOR_GENERATOR_*`,
+> `TUTOR_REVIEWER_*`, `CONTENT_GENERATOR_*` or `CONTENT_REVIEWER_*` variable;
+> both still forward the two retired `OPENAI_CONTENT_*` names. Setting the
+> channel variables in `.env.production` therefore has no effect on a Docker
+> deployment until the compose files are updated. Until then, do not treat a
+> Docker release from this repository as able to run the Doubao or Qwen
+> channels.
 
 Tutor, STT, and TTS have the same price-catalog gate. Do not invent or hard-code
 prices: insert the supplier's effective, versioned prices through an

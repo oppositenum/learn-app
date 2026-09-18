@@ -81,13 +81,41 @@ PROVISION_PASSWORD='<at-least-12-bytes>' go run ./server/cmd/provision \
 
 The command prints generated user/student identifiers, but never prints the password or a session token. Browser login creates a revocable server-side session and a `HttpOnly`, `SameSite=Strict` cookie.
 
-Speech routes are enabled only when `OPENAI_API_KEY`, `OPENAI_STT_MODEL`, `OPENAI_TTS_MODEL`, and `OPENAI_TTS_VOICE` are all set. Every AI/STT/TTS provider must declare its provider/model billing identity. Add matching effective rows to `ai_price_catalog`; the server checks them before provider network calls, and prices are never hardcoded in business logic.
+### AI capabilities are configured separately
 
-Tutor output requires both `OPENAI_TUTOR_MODEL` and the dedicated `OPENAI_TUTOR_OUTPUT_REVIEW_MODEL`. Their `provider:model` identities must differ; a missing or non-independent reviewer fails closed before student-visible output is persisted, published, or sent to TTS. Both models require effective `ai_price_catalog` rows, and the independent review call is metered under `TUTOR_OUTPUT_REVIEW` even when its structured result is later rejected. Reviewer HTTP 429 and 5xx responses use a bounded reviewer-only retry policy; exhaustion remains fail closed and returns a stable child-safe error without discarding typed Student input. `OPENAI_CONTENT_REVIEW_MODEL` remains a separate content-pipeline responsibility and must not be reused for Tutor output review.
+Three capabilities call providers, and each is configured on its own. They are independent on purpose: Tutor text and content-pipeline text moved to Doubao and Qwen, while speech still runs on OpenAI. Do not reuse one capability's variables for another.
+
+Every AI/STT/TTS provider must declare its provider/model billing identity. Add matching effective rows to `ai_price_catalog`; the server checks them before provider network calls, and prices are never hardcoded in business logic.
+
+**Speech (STT/TTS).** Enabled only when `OPENAI_API_KEY`, `OPENAI_STT_MODEL`, `OPENAI_TTS_MODEL`, and `OPENAI_TTS_VOICE` are all set. These remain OpenAI variables and are still current.
+
+**Tutor text.** Configured through two independent channels, each with its own `_PROVIDER`, `_BASE_URL`, `_API_KEY`, `_MODEL`, and optionally `_API_SHAPE` and `_REQUEST_OVERLAY`:
+
+| Channel | Prefix |
+| --- | --- |
+| Generation | `TUTOR_GENERATOR_` |
+| Independent output review | `TUTOR_REVIEWER_` |
+
+`_API_SHAPE` is `responses` or `chat_completions` and defaults to `responses` for Tutor. `_BASE_URL` is required for any provider other than `openai`. The two channels' `provider:model` identities must differ; a missing or non-independent reviewer fails closed before student-visible output is persisted, published, or sent to TTS. Both identities require effective `ai_price_catalog` rows, and the independent review call is metered under `TUTOR_OUTPUT_REVIEW` even when its structured result is later rejected. Reviewer HTTP 429 and 5xx responses use a bounded reviewer-only retry policy; exhaustion remains fail closed and returns a stable child-safe error without discarding typed Student input.
+
+`OPENAI_TUTOR_MODEL` and `OPENAI_TUTOR_OUTPUT_REVIEW_MODEL` still work as a fallback for the model fields, using `OPENAI_API_KEY` and `OPENAI_BASE_URL` and defaulting the provider to `openai`. New deployments should set the channel variables instead, because the fallback cannot express a non-OpenAI provider or wire shape.
 
 Cost-accounting limitation for B6: the test gateway was observed to inject about 4,390 reviewer input tokens, including 3,840 cached tokens, and the observed review cost was about 4.8 times the Tutor generation cost for that sample. The catalog has no cache-write price field, so GPT-5.6+ cache-write cost can be understated; current cost totals must not be described as fully exact, and Terra's $2.50/1M cache-write reference price must not be stored in an audio price field.
 
-Owner AI question generation is enabled with `OPENAI_CONTENT_GENERATION_MODEL`. The configured provider/model must have an effective `ai_price_catalog` row before any request is sent. Generation accepts only released, source-linked curriculum knowledge points and licensed content sources, creates server-owned `DRAFT` assets, and never skips deterministic validation, independent review, or Owner release. The Owner UI filters the catalog by subject, grade band, domain, unit metadata, name, and stable code. Configure a different provider/model for `OPENAI_CONTENT_REVIEW_MODEL`; generated content cannot be independently reviewed by the same provider/model that created it.
+**Content-pipeline text.** Owner AI question generation uses the same two-channel shape as Tutor, with its own prefixes:
+
+| Channel | Prefix |
+| --- | --- |
+| Generation | `CONTENT_GENERATOR_` |
+| Independent content review | `CONTENT_REVIEWER_` |
+
+`_API_SHAPE` defaults to `chat_completions` here, because both Doubao and Qwen were measured enforcing JSON Schema on Chat Completions and ignoring it on Responses. `_PROVIDER`, `_API_KEY`, and `_MODEL` are required, and `_BASE_URL` is required for any provider other than `openai`. The two identities must differ: generated content cannot be independently reviewed by the same `provider:model` that created it, and equal identities fail at startup rather than at runtime. Each identity must have an effective `ai_price_catalog` row before any request is sent.
+
+Generation accepts only released, source-linked curriculum knowledge points and licensed content sources, creates server-owned `DRAFT` assets, and never skips deterministic validation, independent review, or Owner release. The Owner UI filters the catalog by subject, grade band, domain, unit metadata, name, and stable code.
+
+> **Retired — remove these before upgrading.** `OPENAI_CONTENT_GENERATION_MODEL` and `OPENAI_CONTENT_REVIEW_MODEL` no longer configure anything, and the server **refuses to start** while either is set. This is deliberate: ignoring them would silently drop AI content generation at the next restart, and a failed start is easier to diagnose than a silent downgrade. Unlike the Tutor variables above, there is no fallback path for these.
+
+`*_CONTEXT_CACHE` exists on all four channels and must stay unset or false. Enabling it is refused at startup because `ai_price_catalog` has no cache-write price field, so cached calls could not be costed correctly.
 
 ## Verify
 
