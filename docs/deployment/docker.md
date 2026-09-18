@@ -152,16 +152,21 @@ Owner AI question generation additionally requires:
 Also keep every `*_CONTEXT_CACHE` variable unset or false; enabling one is
 refused at startup because `ai_price_catalog` has no cache-write price field.
 
-> **Known gap — the bundled compose files do not forward these yet.**
-> `compose.prod.yaml` and `compose.deploy.yaml` declare an explicit
-> `environment:` map with no `env_file:`, so only the variables listed there
-> reach the API container. Neither file lists any `TUTOR_GENERATOR_*`,
-> `TUTOR_REVIEWER_*`, `CONTENT_GENERATOR_*` or `CONTENT_REVIEWER_*` variable;
-> both still forward the two retired `OPENAI_CONTENT_*` names. Setting the
-> channel variables in `.env.production` therefore has no effect on a Docker
-> deployment until the compose files are updated. Until then, do not treat a
-> Docker release from this repository as able to run the Doubao or Qwen
-> channels.
+`compose.prod.yaml` and `compose.deploy.yaml` declare an explicit
+`environment:` map with no `env_file:`, so a variable reaches the API container
+only if it is listed there. Both files forward every variable above. Because
+that coupling is easy to break silently — a channel variable added to the Go
+config but not to compose produces a deployment where the channel cannot be
+configured at all — it is checked:
+
+```sh
+bash scripts/assert-provider-env-forwarding.sh
+```
+
+The script derives the expected variable list from the Go configuration rather
+than repeating it, so a channel added later is caught without editing the
+script. Run it after changing provider configuration, compose, or
+`.env.production.example`.
 
 Tutor, STT, and TTS have the same price-catalog gate. Do not invent or hard-code
 prices: insert the supplier's effective, versioned prices through an
