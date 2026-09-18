@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -37,7 +36,10 @@ var tutorChannelEnvNames = []string{
 	tutorReviewerModelEnv,
 }
 
-type tutorChannelConfig struct {
+// providerChannelConfig is one configured AI channel. Tutor and the content
+// pipeline both use it so the two never drift into different configuration
+// semantics for the same underlying client.
+type providerChannelConfig struct {
 	Provider string
 	BaseURL  string
 	APIKey   string
@@ -52,9 +54,11 @@ type tutorChannelConfig struct {
 	RequestOverlay map[string]any
 }
 
-func (config tutorChannelConfig) identity() string {
+func (config providerChannelConfig) identity() string {
 	return config.Provider + ":" + config.Model
 }
+
+type tutorChannelConfig = providerChannelConfig
 
 type tutorProviderConfig struct {
 	Enabled   bool
@@ -114,10 +118,10 @@ func loadTutorProviderConfig(getenv environmentLookup) (tutorProviderConfig, err
 			RequestOverlay: reviewerOverlay,
 		},
 	}
-	if err := validateTutorChannel("generator", config.Generator); err != nil {
+	if err := validateProviderChannel("Tutor generator", config.Generator); err != nil {
 		return tutorProviderConfig{}, err
 	}
-	if err := validateTutorChannel("reviewer", config.Reviewer); err != nil {
+	if err := validateProviderChannel("Tutor reviewer", config.Reviewer); err != nil {
 		return tutorProviderConfig{}, err
 	}
 	if config.Generator.identity() == config.Reviewer.identity() {
@@ -158,26 +162,26 @@ func parseRequestOverlay(name, value string) (map[string]any, error) {
 	return overlay, nil
 }
 
-func validateTutorChannel(name string, config tutorChannelConfig) error {
+func validateProviderChannel(name string, config providerChannelConfig) error {
 	if config.Provider == "" {
-		return fmt.Errorf("Tutor %s provider is required", name)
+		return fmt.Errorf("%s provider is required", name)
 	}
 	if config.APIKey == "" {
-		return fmt.Errorf("Tutor %s API key is required", name)
+		return fmt.Errorf("%s API key is required", name)
 	}
 	if config.Model == "" {
-		return fmt.Errorf("Tutor %s model is required", name)
+		return fmt.Errorf("%s model is required", name)
 	}
 	if config.Provider != "openai" && config.BaseURL == "" {
-		return fmt.Errorf("Tutor %s base URL is required for non-OpenAI provider %q", name, config.Provider)
+		return fmt.Errorf("%s base URL is required for non-OpenAI provider %q", name, config.Provider)
 	}
 	if strings.Contains(config.Provider, ":") {
-		return errors.New("Tutor provider must not contain ':'")
+		return fmt.Errorf("%s provider must not contain ':'", name)
 	}
 	switch config.Shape {
 	case ai.ShapeResponses, ai.ShapeChatCompletions:
 	default:
-		return fmt.Errorf("Tutor %s API shape %q must be %q or %q", name, config.Shape, ai.ShapeResponses, ai.ShapeChatCompletions)
+		return fmt.Errorf("%s API shape %q must be %q or %q", name, config.Shape, ai.ShapeResponses, ai.ShapeChatCompletions)
 	}
 	return nil
 }

@@ -138,28 +138,48 @@ func newDatabaseHandler(pool *pgxpool.Pool) http.Handler {
 	if generatorIdentity == "" {
 		generatorIdentity = "codex:content-generator"
 	}
-	if apiKey, generatorModel := os.Getenv("OPENAI_API_KEY"), os.Getenv("OPENAI_CONTENT_GENERATION_MODEL"); apiKey != "" && generatorModel != "" {
-		client, err := ai.NewOpenAIResponsesClient(&http.Client{Timeout: 90 * time.Second}, os.Getenv("OPENAI_BASE_URL"), apiKey, generatorModel)
+	contentConfig, err := loadContentProviderConfig(os.Getenv)
+	if err != nil {
+		log.Fatalf("configure content providers: %v", err)
+	}
+	var reviewService *contentpipeline.ReviewService
+	if contentConfig.Enabled {
+		generatorClient, err := ai.NewStructuredProviderClient(
+			&http.Client{Timeout: 90 * time.Second}, contentConfig.Generator.BaseURL,
+			contentConfig.Generator.APIKey, contentConfig.Generator.Provider,
+			contentConfig.Generator.Model, contentConfig.Generator.Shape,
+			contentConfig.Generator.RequestOverlay,
+		)
 		if err != nil {
 			log.Fatalf("configure content generation client: %v", err)
 		}
-		contentGenerator, err = contentpipeline.NewOpenAIGenerator(client.WithUsageRecorder(usageRecorder), "openai", generatorModel)
+		contentGenerator, err = contentpipeline.NewOpenAIGenerator(
+			generatorClient.WithUsageRecorder(usageRecorder),
+			contentConfig.Generator.Provider, contentConfig.Generator.Model,
+		)
 		if err != nil {
 			log.Fatalf("configure content generator: %v", err)
 		}
-		generatorIdentity = "openai:" + generatorModel
-	}
-	var reviewService *contentpipeline.ReviewService
-	if apiKey, reviewerModel := os.Getenv("OPENAI_API_KEY"), os.Getenv("OPENAI_CONTENT_REVIEW_MODEL"); apiKey != "" && reviewerModel != "" {
-		client, err := ai.NewOpenAIResponsesClient(&http.Client{Timeout: 90 * time.Second}, os.Getenv("OPENAI_BASE_URL"), apiKey, reviewerModel)
+		generatorIdentity = contentConfig.Generator.identity()
+
+		reviewerClient, err := ai.NewStructuredProviderClient(
+			&http.Client{Timeout: 90 * time.Second}, contentConfig.Reviewer.BaseURL,
+			contentConfig.Reviewer.APIKey, contentConfig.Reviewer.Provider,
+			contentConfig.Reviewer.Model, contentConfig.Reviewer.Shape,
+			contentConfig.Reviewer.RequestOverlay,
+		)
 		if err != nil {
 			log.Fatalf("configure content review client: %v", err)
 		}
-		reviewer, err := contentpipeline.NewOpenAIReviewer(client.WithUsageRecorder(usageRecorder), "openai", reviewerModel)
+		reviewer, err := contentpipeline.NewOpenAIReviewer(
+			reviewerClient.WithUsageRecorder(usageRecorder),
+			contentConfig.Reviewer.Provider, contentConfig.Reviewer.Model,
+		)
 		if err != nil {
 			log.Fatalf("configure content reviewer: %v", err)
 		}
-		reviewService, err = contentpipeline.NewReviewService(generatorIdentity, "openai:"+reviewerModel, reviewer)
+		reviewService, err = contentpipeline.NewReviewService(
+			generatorIdentity, contentConfig.Reviewer.identity(), reviewer)
 		if err != nil {
 			log.Fatalf("configure independent content review: %v", err)
 		}
