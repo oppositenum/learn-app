@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, CalendarCheck2, Lightbulb, Pause, RefreshCw, Send, ShieldAlert, StopCircle, Volume2 } from '@lucide/vue'
+import { ArrowLeft, ArrowRight, CalendarCheck2, Lightbulb, Pause, RefreshCw, Send, ShieldAlert, StopCircle, Volume2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -504,6 +504,21 @@ onBeforeUnmount(() => window.clearInterval(timer))
           >
             {{ learning.reflectionStatus }}
           </p>
+          <!-- Finishing a session is the one path that had no exit: the reflection
+               buttons only record a choice, so without this the student was left on
+               the completion screen with no way back to the plan. It stays visible
+               before and after choosing, because the choice can be changed. -->
+          <RouterLink
+            to="/student"
+            data-testid="finish-to-plan"
+            class="primary-button mt-6 w-full sm:w-auto"
+          >
+            返回今日计划
+            <ArrowRight
+              :size="18"
+              aria-hidden="true"
+            />
+          </RouterLink>
         </section>
       </section>
     </template>

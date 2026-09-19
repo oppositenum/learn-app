@@ -191,6 +191,21 @@ test('keeps an invalidated stage task answer-free and recoverable', async () => 
   wrapper.unmount()
 })
 
+test('a finished classroom offers a way back to the plan', async () => {
+  // The reflection buttons only record a choice; they deliberately stay on the
+  // page so the choice can be changed. Without an explicit link the student is
+  // left on the completion screen with nothing that leaves it.
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({
+    status: 'COMPLETED', state: 'COMPLETE',
+  }))))
+
+  expect(wrapper.text()).toContain('明天还想继续吗？')
+  const exit = wrapper.get('[data-testid="finish-to-plan"]')
+  expect(exit.text()).toContain('返回今日计划')
+  expect(exit.attributes('href')).toBe('/student')
+  wrapper.unmount()
+})
+
 test('a paused classroom can still be resumed when the stage material is unavailable', async () => {
   // The two conditions met at once: the classroom auto-paused on idle, and the
   // stage material came back in fallback mode. The composer is hidden by
