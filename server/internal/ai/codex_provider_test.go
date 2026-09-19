@@ -949,3 +949,70 @@ func TestTutorOutputAuditReceivesTheTeachingContext(t *testing.T) {
 		t.Fatalf("auditor teaching context=%+v", auditor.requests)
 	}
 }
+
+func TestAnswerAnalysisCarriesTheTeachingRules(t *testing.T) {
+	// The analysis stage decides what the answer was an attempt at. If it judges
+	// an English reading answer as arithmetic, the later generation rules arrive
+	// too late to undo that reading.
+	for _, test := range []struct {
+		name              string
+		teaching          content.TeachingContext
+		wantInstruction   string
+		rejectInstruction string
+	}{
+		{
+			name: "english reading",
+			teaching: content.TeachingContext{
+				SubjectCode: "ENGLISH", SubjectName: "英语",
+				KnowledgePointCode: "ENG-READ-DETAIL", KnowledgePointName: "英语阅读细节",
+			},
+			wantInstruction:   "language reading task",
+			rejectInstruction: "mathematics task",
+		},
+		{
+			name: "mathematics goal",
+			teaching: content.TeachingContext{
+				SubjectCode: "MATH", SubjectName: "数学",
+				KnowledgePointCode: "MATH-JUN-LINEAR-EQUATION", KnowledgePointName: "一元一次方程",
+			},
+			wantInstruction:   "mathematics task",
+			rejectInstruction: "language reading task",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &structuredClientStub{result: validAnswerAnalysis()}
+			provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{
+				Question:      content.QuestionForTeaching{Teaching: test.teaching},
+				StudentAnswer: "我看不懂这个英文",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(client.requests) != 1 {
+				t.Fatalf("analysis calls=%d", len(client.requests))
+			}
+			instructions := client.requests[0].Instructions
+			for _, required := range []string{
+				"teaching_context field states the subject",
+				test.wantInstruction,
+			} {
+				if !strings.Contains(instructions, required) {
+					t.Fatalf("analysis instructions lack %q: %s", required, instructions)
+				}
+			}
+			if strings.Contains(instructions, test.rejectInstruction) {
+				t.Fatalf("analysis instructions carried the other subject's rule %q", test.rejectInstruction)
+			}
+			// The original analysis rules must survive alongside the new ones.
+			if !strings.Contains(instructions, analyzeAnswerInstructions) {
+				t.Fatal("analysis instructions dropped the original analysis rules")
+			}
+			if !strings.Contains(instructions, outputShapeInstructions) {
+				t.Fatal("analysis instructions dropped the output shape contract")
+			}
+		})
+	}
+}

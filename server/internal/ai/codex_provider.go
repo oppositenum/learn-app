@@ -130,7 +130,13 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 	var lastHTTPStatus int
 	lastProviderCode := TutorReviewDiagnosticUnavailable
 	var waited time.Duration
-	instructions := analyzeAnswerInstructions + " " + outputShapeInstructions
+	// The analysis stage decides what the answer was an attempt at, so it needs
+	// the subject rules as much as generation does. Carrying the context only in
+	// the payload was not enough: a reading answer could still be judged as
+	// arithmetic here, and by the time generation applied the rules the wrong
+	// reading had already been fixed.
+	instructions := analyzeAnswerInstructions + " " + teachingContextInstructions +
+		subjectInstructions(request.Question.Teaching) + " " + outputShapeInstructions
 	for attempt := 1; attempt <= provider.generationRetry.maxAttempts; attempt++ {
 		requestID := uuid.NewString()
 		lastRequestID = requestID
