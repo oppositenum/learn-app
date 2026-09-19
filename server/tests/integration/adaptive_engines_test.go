@@ -296,6 +296,21 @@ func TestFullStudentParentOwnerE2E(t *testing.T) {
 	if err := json.Unmarshal(recoveredVoice.Body.Bytes(), &recoveredSession); err != nil || len(recoveredSession.VoiceSegments) != 2 {
 		t.Fatalf("recovered voice segments=%d err=%v", len(recoveredSession.VoiceSegments), err)
 	}
+	// The plan card compares identities, not display names, to decide whether it
+	// still describes this classroom, so the current question's knowledge point
+	// has to be in the student payload.
+	if recoveredSession.KnowledgePointID == uuid.Nil {
+		t.Fatalf("student session omitted knowledge_point_id: %s", recoveredVoice.Body.String())
+	}
+	if !strings.Contains(recoveredVoice.Body.String(), `"knowledge_point_id":"`+recoveredSession.KnowledgePointID.String()+`"`) {
+		t.Fatalf("knowledge_point_id is not serialized for the student: %s", recoveredVoice.Body.String())
+	}
+	// Teaching metadata stays server-side; only the identifier crosses.
+	for _, leaked := range []string{"teaching_context", "knowledge_point_code", "full_solution", "teacher_reference_answer", "scoring_key"} {
+		if strings.Contains(recoveredVoice.Body.String(), leaked) {
+			t.Fatalf("student session exposed %q", leaked)
+		}
+	}
 	blockedAnswer := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/answers", fixture.studentToken, map[string]any{"answer": fixture.privateCanary})
 	if blockedAnswer.Code != http.StatusConflict {
 		t.Fatalf("answer bypassed voice RETURN: %d %s", blockedAnswer.Code, blockedAnswer.Body.String())

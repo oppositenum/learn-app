@@ -18,6 +18,7 @@ function session(overrides: Partial<StudentSession> = {}): StudentSession {
 		subject_code: 'MATH',
 		subject_name: '数学',
 		knowledge_point: '分数通分',
+		knowledge_point_id: 'kp-fraction',
 		difficulty: 'L1',
 		question_id: 'question-1',
 		prompt: '三分之一和四分之一的小格一样大吗？',

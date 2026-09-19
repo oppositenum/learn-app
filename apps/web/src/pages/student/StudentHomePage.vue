@@ -76,11 +76,35 @@ function load(force = false): Promise<void> {
 	return operation
 }
 
+
+// A plan card may only present itself as the running classroom when it still
+// describes it. A cross-subject MICRO_BACKTRACK block starts a session for its
+// own prerequisite, but once the classroom returns to the original task the
+// session serves a different subject and knowledge point while plan_block_id
+// still points here. Identity is compared on subject_code and
+// knowledge_point_id only: display names are not identities.
+function blockMatchesCurrentSession(block: PlanBlock, session: StudentSession | null): boolean {
+	if (!session) return false
+	const bound = block.session_id === session.id || block.id === session.plan_block_id
+	if (!bound) return false
+	// Fail closed on a missing identity rather than treating it as a match.
+	if (!session.subject_code || !session.knowledge_point_id) return false
+	return block.subject === session.subject_code && block.knowledge_point_id === session.knowledge_point_id
+}
+
+// Bound to the running session by plan_block_id, but no longer describing it.
+function blockDivergedFromCurrentSession(block: PlanBlock, session: StudentSession | null): boolean {
+	if (!session) return false
+	const bound = block.session_id === session.id || block.id === session.plan_block_id
+	return bound && !blockMatchesCurrentSession(block, session)
+}
+
 async function begin(block: PlanBlock) {
-  if (current.value && (block.session_id === current.value.id || block.id === current.value.plan_block_id)) {
-    await router.push(`/student/session/${current.value.id}`)
+  if (blockMatchesCurrentSession(block, current.value)) {
+    await router.push(`/student/session/${current.value!.id}`)
     return
   }
+  if (blockDivergedFromCurrentSession(block, current.value)) return
   starting.value = block.id
   error.value = ''
   try {
@@ -221,7 +245,7 @@ onBeforeUnmount(() => {
           :key="block.id"
           type="button"
           class="flex min-h-20 w-full items-center justify-between gap-4 py-4 text-left"
-          :disabled="Boolean(starting) || block.status === 'COMPLETED' || Boolean(current && block.session_id !== current.id && block.id !== current.plan_block_id)"
+          :disabled="Boolean(starting) || block.status === 'COMPLETED' || blockDivergedFromCurrentSession(block, current) || Boolean(current && block.session_id !== current.id && block.id !== current.plan_block_id)"
           @click="begin(block)"
         >
           <span class="min-w-0"><strong class="block font-medium">{{ subjectNames[block.subject] ?? block.subject }}</strong><span class="mt-1 block break-words text-sm text-zinc-500">{{ block.focus }} · {{ planModeLabels[block.mode] ?? '当前任务' }}</span></span>
@@ -230,9 +254,14 @@ onBeforeUnmount(() => {
             class="flex shrink-0 items-center gap-1 text-sm font-semibold text-teal-800"
           ><Check :size="17" />已完成</span>
           <span
-            v-else-if="current && (block.session_id === current.id || block.id === current.plan_block_id)"
+            v-else-if="blockMatchesCurrentSession(block, current)"
             class="flex shrink-0 items-center gap-1 text-sm font-semibold text-teal-800"
-          >{{ current.status === 'PAUSED' ? '继续' : '进行中' }}<Play :size="17" /></span>
+          >{{ current!.status === 'PAUSED' ? '继续' : '进行中' }}<Play :size="17" /></span>
+          <span
+            v-else-if="blockDivergedFromCurrentSession(block, current)"
+            data-testid="plan-block-diverged"
+            class="flex max-w-40 shrink-0 items-center gap-1 text-right text-xs font-medium text-zinc-500"
+          ><Lock :size="15" />当前课堂已回到：{{ subjectNames[current!.subject_code] ?? current!.subject_code }} · {{ current!.knowledge_point }}</span>
           <span
             v-else-if="current"
             class="flex max-w-28 shrink-0 items-center gap-1 text-right text-xs font-medium text-zinc-500"

@@ -17,32 +17,37 @@ import (
 )
 
 type StudentSession struct {
-	ID             uuid.UUID                   `json:"id"`
-	Version        int64                       `json:"version"`
-	TimingVersion  int64                       `json:"timing_version"`
-	PlanBlockID    *uuid.UUID                  `json:"plan_block_id,omitempty"`
-	SubjectCode    string                      `json:"subject_code"`
-	SubjectName    string                      `json:"subject_name"`
-	KnowledgePoint string                      `json:"knowledge_point"`
-	Difficulty     string                      `json:"difficulty"`
-	QuestionID     uuid.UUID                   `json:"question_id"`
-	Prompt         string                      `json:"prompt"`
-	Scene          json.RawMessage             `json:"scene"`
-	InputSchema    json.RawMessage             `json:"input_schema"`
-	StartedAt      time.Time                   `json:"started_at"`
-	TargetMinutes  int                         `json:"target_minutes"`
-	Status         string                      `json:"status"`
-	ActiveSeconds  int                         `json:"active_seconds"`
-	CurrentSeconds int                         `json:"current_active_seconds"`
-	ActiveSince    *time.Time                  `json:"active_since,omitempty"`
-	TimingAt       time.Time                   `json:"timing_observed_at"`
-	State          string                      `json:"state"`
-	SocraticRound  int                         `json:"socratic_round"`
-	Timeline       []StudentTurn               `json:"timeline"`
-	VoiceSegments  []speech.Segment            `json:"voice_segments,omitempty"`
-	VoiceAudio     string                      `json:"voice_audio,omitempty"`
-	StageFlow      *StudentStageFlow           `json:"stage_flow,omitempty"`
-	Interaction    studentinteraction.Material `json:"interaction"`
+	ID             uuid.UUID  `json:"id"`
+	Version        int64      `json:"version"`
+	TimingVersion  int64      `json:"timing_version"`
+	PlanBlockID    *uuid.UUID `json:"plan_block_id,omitempty"`
+	SubjectCode    string     `json:"subject_code"`
+	SubjectName    string     `json:"subject_name"`
+	KnowledgePoint string     `json:"knowledge_point"`
+	// KnowledgePointID identifies the knowledge point of the question the
+	// classroom is serving right now. The plan card needs it to tell whether it
+	// still describes this session: after a cross-subject backtrack returns to
+	// the original task, the block's own knowledge point no longer does.
+	KnowledgePointID uuid.UUID                   `json:"knowledge_point_id"`
+	Difficulty       string                      `json:"difficulty"`
+	QuestionID       uuid.UUID                   `json:"question_id"`
+	Prompt           string                      `json:"prompt"`
+	Scene            json.RawMessage             `json:"scene"`
+	InputSchema      json.RawMessage             `json:"input_schema"`
+	StartedAt        time.Time                   `json:"started_at"`
+	TargetMinutes    int                         `json:"target_minutes"`
+	Status           string                      `json:"status"`
+	ActiveSeconds    int                         `json:"active_seconds"`
+	CurrentSeconds   int                         `json:"current_active_seconds"`
+	ActiveSince      *time.Time                  `json:"active_since,omitempty"`
+	TimingAt         time.Time                   `json:"timing_observed_at"`
+	State            string                      `json:"state"`
+	SocraticRound    int                         `json:"socratic_round"`
+	Timeline         []StudentTurn               `json:"timeline"`
+	VoiceSegments    []speech.Segment            `json:"voice_segments,omitempty"`
+	VoiceAudio       string                      `json:"voice_audio,omitempty"`
+	StageFlow        *StudentStageFlow           `json:"stage_flow,omitempty"`
+	Interaction      studentinteraction.Material `json:"interaction"`
 }
 
 type StudentTurn struct {
@@ -311,13 +316,13 @@ func readStudentSession(ctx context.Context, db studentSessionQueryer, userID, s
 	var lastResumedAt *time.Time
 	var stageTaskVersion *string
 	err := db.QueryRow(ctx, `
-		SELECT ls.id,ls.version,ls.timing_version,ls.plan_block_id,s.code,s.name_zh,kp.name,q.difficulty,q.id,q.prompt_public,q.scene_public_json,q.input_schema_json,ls.started_at,ls.target_minutes,ls.status,ls.accumulated_seconds,ls.last_resumed_at,ls.current_state,ls.socratic_fail_count,stage_session.current_task_version
+		SELECT ls.id,ls.version,ls.timing_version,ls.plan_block_id,s.code,s.name_zh,kp.name,q.knowledge_point_id,q.difficulty,q.id,q.prompt_public,q.scene_public_json,q.input_schema_json,ls.started_at,ls.target_minutes,ls.status,ls.accumulated_seconds,ls.last_resumed_at,ls.current_state,ls.socratic_fail_count,stage_session.current_task_version
 		FROM learning_sessions ls JOIN students st ON st.id=ls.student_id
 		JOIN subjects s ON s.id=ls.subject_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED'
 		JOIN knowledge_points kp ON kp.id=q.knowledge_point_id
 		LEFT JOIN classroom_stage_sessions stage_session ON stage_session.session_id=ls.id
 			WHERE ls.id=$1 AND st.user_id=$2
-			  AND (NOT $3 OR ls.status IN ('ACTIVE','PAUSED'))`, sessionID, userID, requireOpen).Scan(&session.ID, &session.Version, &session.TimingVersion, &session.PlanBlockID, &session.SubjectCode, &session.SubjectName, &session.KnowledgePoint, &session.Difficulty, &session.QuestionID, &session.Prompt, &session.Scene, &session.InputSchema, &session.StartedAt, &session.TargetMinutes, &session.Status, &accumulatedSeconds, &lastResumedAt, &session.State, &session.SocraticRound, &stageTaskVersion)
+			  AND (NOT $3 OR ls.status IN ('ACTIVE','PAUSED'))`, sessionID, userID, requireOpen).Scan(&session.ID, &session.Version, &session.TimingVersion, &session.PlanBlockID, &session.SubjectCode, &session.SubjectName, &session.KnowledgePoint, &session.KnowledgePointID, &session.Difficulty, &session.QuestionID, &session.Prompt, &session.Scene, &session.InputSchema, &session.StartedAt, &session.TargetMinutes, &session.Status, &accumulatedSeconds, &lastResumedAt, &session.State, &session.SocraticRound, &stageTaskVersion)
 	if err != nil {
 		return session, err
 	}

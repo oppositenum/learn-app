@@ -270,3 +270,149 @@ test('hides a mismatched streak and stops after one bounded retry', async () => 
   expect(wrapper.get('[aria-label="连续学习天数正在同步"]').text()).toBe('--')
   wrapper.unmount()
 })
+
+// A cross-subject MICRO_BACKTRACK block opens a session for its own
+// prerequisite. Once the classroom returns to the original task, the session
+// serves another subject while plan_block_id still points at this block. The
+// card must stop presenting itself as that classroom.
+function backtrackPlan(): TodayPlan {
+  return {
+    id: 'plan-guard',
+    date: '2026-08-26',
+    target_minutes: 20,
+    blocks: [{
+      id: 'block-chinese',
+      sequence: 1,
+      subject: 'CHINESE',
+      knowledge_point_id: 'kp-info-extraction',
+      minutes: 10,
+      mode: 'MICRO_BACKTRACK',
+      reason: 'cross_subject_prerequisite',
+      focus: '信息提取',
+      status: 'AVAILABLE',
+    }],
+  }
+}
+
+function currentSession(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'session-guard',
+    version: 1,
+    timing_version: 1,
+    plan_block_id: 'block-chinese',
+    subject_code: 'CHINESE',
+    subject_name: '语文',
+    knowledge_point: '信息提取',
+    knowledge_point_id: 'kp-info-extraction',
+    difficulty: 'L1',
+    question_id: 'question-guard',
+    prompt: '通知写着：周五下午三点集合。',
+    scene: {},
+    input_schema: {},
+    started_at: '2026-08-26T12:00:00Z',
+    target_minutes: 10,
+    status: 'PAUSED',
+    active_seconds: 30,
+    current_active_seconds: 0,
+    timing_observed_at: '2026-08-26T12:00:30Z',
+    state: 'ASK',
+    socratic_round: 0,
+    timeline: [],
+    ...overrides,
+  }
+}
+
+async function mountWithCurrent(session: Record<string, unknown> | null) {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/student/today')) return response({ learning_date: '2026-08-26', plans: [backtrackPlan()] })
+    if (path.endsWith('/sessions/current')) return session ? response(session) : response(null, 204)
+    if (path.endsWith('/student/growth')) return response(growth('2026-08-26'))
+    throw new Error(`unexpected request: ${path}`)
+  }))
+  return mountHome()
+}
+
+test('a plan card that still describes the classroom can be continued', async () => {
+  const wrapper = await mountWithCurrent(currentSession())
+  const card = wrapper.findAll('button').find((button) => button.text().includes('信息提取'))!
+
+  expect(card.text()).toContain('继续')
+  expect(card.attributes('disabled')).toBeUndefined()
+  expect(wrapper.find('[data-testid="plan-block-diverged"]').exists()).toBe(false)
+
+  await card.trigger('click')
+  await flushPromises()
+  expect(wrapper.vm.$router.currentRoute.value.path).toBe('/student/session/session-guard')
+  wrapper.unmount()
+})
+
+test('a plan card whose subject no longer matches the classroom cannot be continued', async () => {
+  // The live case: the classroom returned to the English original task.
+  const wrapper = await mountWithCurrent(currentSession({
+    subject_code: 'ENGLISH', subject_name: '英语',
+    knowledge_point: '英语阅读细节', knowledge_point_id: 'kp-reading-detail',
+  }))
+  const card = wrapper.findAll('button').find((button) => button.text().includes('信息提取'))!
+
+  expect(card.text()).not.toContain('继续')
+  expect(card.attributes('disabled')).toBe('')
+  const notice = wrapper.get('[data-testid="plan-block-diverged"]')
+  expect(notice.text()).toContain('英语')
+  expect(notice.text()).toContain('英语阅读细节')
+
+  await card.trigger('click')
+  await flushPromises()
+  expect(wrapper.vm.$router.currentRoute.value.path).toBe('/student')
+  wrapper.unmount()
+})
+
+test('a plan card whose knowledge point changed within the same subject cannot be continued', async () => {
+  // Identity is the knowledge point id, not the displayed focus text.
+  const wrapper = await mountWithCurrent(currentSession({
+    knowledge_point: '证据定位', knowledge_point_id: 'kp-evidence-location',
+  }))
+  const card = wrapper.findAll('button').find((button) => button.text().includes('信息提取'))!
+
+  expect(card.text()).not.toContain('继续')
+  expect(card.attributes('disabled')).toBe('')
+  expect(wrapper.get('[data-testid="plan-block-diverged"]').text()).toContain('证据定位')
+  wrapper.unmount()
+})
+
+test('a missing knowledge point id is not treated as a match', async () => {
+  const session = currentSession()
+  delete (session as Record<string, unknown>).knowledge_point_id
+  const wrapper = await mountWithCurrent(session)
+  const card = wrapper.findAll('button').find((button) => button.text().includes('信息提取'))!
+
+  expect(card.text()).not.toContain('继续')
+  expect(card.attributes('disabled')).toBe('')
+  wrapper.unmount()
+})
+
+test('a plan card unrelated to the running classroom keeps the existing lock', async () => {
+  const wrapper = await mountWithCurrent(currentSession({
+    id: 'session-other', plan_block_id: 'block-other',
+  }))
+  const card = wrapper.findAll('button').find((button) => button.text().includes('信息提取'))!
+
+  expect(card.text()).toContain('完成当前探索后解锁')
+  expect(card.attributes('disabled')).toBe('')
+  expect(wrapper.find('[data-testid="plan-block-diverged"]').exists()).toBe(false)
+  wrapper.unmount()
+})
+
+test('a plan card sharing a knowledge point id under another subject cannot be continued', async () => {
+  // Both halves of the identity are compared. Holding the knowledge point id
+  // fixed isolates the subject check, so removing it cannot pass unnoticed.
+  const wrapper = await mountWithCurrent(currentSession({
+    subject_code: 'ENGLISH', subject_name: '英语', knowledge_point: '英语阅读细节',
+  }))
+  const card = wrapper.findAll('button').find((button) => button.text().includes('信息提取'))!
+
+  expect(card.text()).not.toContain('继续')
+  expect(card.attributes('disabled')).toBe('')
+  expect(wrapper.get('[data-testid="plan-block-diverged"]').text()).toContain('英语')
+  wrapper.unmount()
+})

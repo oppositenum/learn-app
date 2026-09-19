@@ -12,6 +12,7 @@ function session(id: string, overrides: Partial<StudentSession> = {}): StudentSe
     subject_code: 'MATH',
     subject_name: '数学',
     knowledge_point: '一元一次方程',
+    knowledge_point_id: 'kp-linear-equation',
     difficulty: 'L1',
     question_id: 'question-1',
     prompt: `安全公开题目 ${id}`,
