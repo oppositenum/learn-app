@@ -15,10 +15,28 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	aioutputs "github.com/oppositenum/ai-learning-tutor/schemas/ai_outputs"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/content"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 )
 
 var ErrTutorOutputAuditorUnavailable = errors.New("independent Tutor output auditor is unavailable")
+
+// ErrTutorTeachingContextMissing keeps a teaching request from reaching a
+// provider without its subject and knowledge point.
+var ErrTutorTeachingContextMissing = errors.New("teaching context is required for a Tutor request")
+
+// subjectInstructions adds the rules that differ by subject. The subject comes
+// from released curriculum data, never from reading the question text.
+func subjectInstructions(teaching content.TeachingContext) string {
+	switch teaching.SubjectCode {
+	case "ENGLISH", "CHINESE":
+		return " " + languageReadingInstructions
+	case "MATH", "PHYSICS", "CHEMISTRY":
+		return " " + mathGoalInstructions
+	default:
+		return ""
+	}
+}
 
 const tutorOutputOperationTimeout = 85 * time.Second
 
@@ -93,6 +111,9 @@ func NewCodexProvider(client StructuredClient, auditors ...TutorOutputAuditor) (
 }
 
 func (provider *CodexProvider) AnalyzeAnswer(ctx context.Context, request AnalyzeAnswerRequest) (AnalyzeAnswerResult, error) {
+	if !request.Question.Teaching.Complete() {
+		return AnalyzeAnswerResult{}, ErrTutorTeachingContextMissing
+	}
 	var result AnalyzeAnswerResult
 	if err := provider.analyzeAnswerWithRetry(ctx, request, &result); err != nil {
 		return AnalyzeAnswerResult{}, err
@@ -189,9 +210,16 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	if provider.auditor == nil {
 		return TutorTurn{}, ErrTutorOutputAuditorUnavailable
 	}
+	// Fail closed rather than fall back to a request carrying only a knowledge
+	// point UUID. That fallback is what made the Tutor answer an English
+	// reading task with a Chinese arithmetic analogy.
+	if !request.Teaching.Complete() {
+		return TutorTurn{}, ErrTutorTeachingContextMissing
+	}
 	ctx, cancel := context.WithTimeout(ctx, tutorOutputOperationTimeout)
 	defer cancel()
-	instructions = instructions + " " + turnStyleInstructions + " " + outputShapeInstructions
+	instructions = instructions + " " + teachingContextInstructions + subjectInstructions(request.Teaching) +
+		" " + turnStyleInstructions + " " + outputShapeInstructions
 	requiredAction := string(request.TutorDecision.NextState)
 	if request.TutorDecision.NextState == tutor.StateHint {
 		instructions = instructions + " " + hintInstructions
@@ -212,6 +240,7 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	}
 	if err := provider.auditor.AuditTutorOutput(ctx, TutorOutputAuditRequest{
 		StudentID: request.StudentID, SessionID: request.SessionID, Question: request.Question,
+		Teaching:      request.Teaching,
 		PrivateAnswer: request.AuditPrivateAnswer, Candidate: turn, GeneratorResponseID: turn.ResponseID,
 	}); err != nil {
 		return TutorTurn{}, err

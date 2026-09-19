@@ -669,7 +669,7 @@ func (service *Service) RequestSupport(ctx context.Context, studentUserID, sessi
 		if err != nil {
 			return SubmitResult{}, err
 		}
-		request := ai.GenerateTurnRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question.Public, AuditPrivateAnswer: question.Private, TutorDecision: decision, PriorTurns: prior, PreviousResponseID: responseID}
+		request := ai.GenerateTurnRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question.Public, Teaching: question.Teaching, AuditPrivateAnswer: question.Private, TutorDecision: decision, PriorTurns: prior, PreviousResponseID: responseID}
 		var turn ai.TutorTurn
 		if support == SupportExplain {
 			turn, err = service.agent.GenerateParallelExample(ctx, ai.ExampleRequest(request))
@@ -859,7 +859,7 @@ func (service *Service) prepareAgent(ctx context.Context, userID, sessionID, ope
 	if decision.NextState == tutor.StateVariant {
 		return prepared, nil
 	}
-	request := ai.GenerateTurnRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question.Public, AuditPrivateAnswer: question.Private, StudentAnswer: answer, TutorDecision: decision, PriorTurns: prior, PreviousResponseID: responseID}
+	request := ai.GenerateTurnRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question.Public, Teaching: question.Teaching, AuditPrivateAnswer: question.Private, StudentAnswer: answer, TutorDecision: decision, PriorTurns: prior, PreviousResponseID: responseID}
 	var turn ai.TutorTurn
 	switch decision.NextState {
 	case tutor.StateAnalogy:

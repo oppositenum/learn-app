@@ -2,6 +2,7 @@ package content
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,7 +44,35 @@ type QuestionPrivateAnswer struct {
 	UpdatedAt              time.Time       `json:"updated_at"`
 }
 
+// TeachingContext tells the Tutor which subject and knowledge point it is
+// teaching. Without it the model receives a bare knowledge point UUID and has
+// to guess from the prompt text, which it gets wrong in both directions: an
+// English reading task whose sentence mentions two clock times is answered with
+// a Chinese arithmetic analogy, and a linear-equation task is coached only to
+// pick an unknown because nothing states that forming the equation is the goal.
+//
+// It deliberately lives outside QuestionPublic. QuestionPublic is serialized
+// straight into the student question response, so teaching metadata added there
+// would leak to the student client.
+type TeachingContext struct {
+	SubjectCode        string `json:"subject_code"`
+	SubjectName        string `json:"subject_name"`
+	KnowledgePointCode string `json:"knowledge_point_code"`
+	KnowledgePointName string `json:"knowledge_point_name"`
+}
+
+// Complete reports whether every field is present. Teaching requests fail
+// closed on an incomplete context rather than falling back to the old
+// UUID-only request, because that fallback is the defect itself.
+func (context TeachingContext) Complete() bool {
+	return strings.TrimSpace(context.SubjectCode) != "" &&
+		strings.TrimSpace(context.SubjectName) != "" &&
+		strings.TrimSpace(context.KnowledgePointCode) != "" &&
+		strings.TrimSpace(context.KnowledgePointName) != ""
+}
+
 type QuestionForTeaching struct {
-	Public  QuestionPublic
-	Private QuestionPrivateAnswer
+	Public   QuestionPublic
+	Private  QuestionPrivateAnswer
+	Teaching TeachingContext `json:"teaching_context"`
 }

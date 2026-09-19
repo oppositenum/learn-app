@@ -51,9 +51,13 @@ type AnalyzeAnswerResult struct {
 }
 
 type GenerateTurnRequest struct {
-	StudentID          string                        `json:"-"`
-	SessionID          string                        `json:"session_id"`
-	Question           content.QuestionPublic        `json:"question"`
+	StudentID string                 `json:"-"`
+	SessionID string                 `json:"session_id"`
+	Question  content.QuestionPublic `json:"question"`
+	// Teaching carries the subject and knowledge point. It is a sibling of
+	// Question rather than a field inside it because QuestionPublic is
+	// serialized into the student response.
+	Teaching           content.TeachingContext       `json:"teaching_context"`
 	AuditPrivateAnswer content.QuestionPrivateAnswer `json:"-"`
 	StudentAnswer      string                        `json:"student_answer"`
 	TutorDecision      tutor.Decision                `json:"tutor_decision"`
@@ -83,6 +87,7 @@ type TutorOutputAuditRequest struct {
 	StudentID           string
 	SessionID           string
 	Question            content.QuestionPublic
+	Teaching            content.TeachingContext
 	PrivateAnswer       content.QuestionPrivateAnswer
 	Candidate           TutorTurn
 	GeneratorResponseID string

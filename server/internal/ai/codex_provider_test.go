@@ -106,7 +106,7 @@ func TestCodexProviderAnalysis429RetryRecoversWithSharedPolicy(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{Question: content.QuestionForTeaching{Teaching: teachingFixture()}}); err != nil {
 		t.Fatal(err)
 	}
 	if client.calls != 2 || !slices.Equal(waits, []time.Duration{TutorRetryBaseDelay}) {
@@ -135,7 +135,7 @@ func TestCodexProviderAnalysis5xxUsesSharedRetryPredicate(t *testing.T) {
 			var waits []time.Duration
 			configureImmediateGenerationRetries(provider, &waits)
 
-			if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+			if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{Question: content.QuestionForTeaching{Teaching: teachingFixture()}}); err != nil {
 				t.Fatal(err)
 			}
 			if client.calls != 2 || !slices.Equal(waits, []time.Duration{TutorRetryBaseDelay}) {
@@ -159,7 +159,7 @@ func TestCodexProviderAnalysis429RetryExhaustionUsesExistingBusyError(t *testing
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{})
+	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{Question: content.QuestionForTeaching{Teaching: teachingFixture()}})
 	if !errors.Is(err, ErrTutorGenerationBusy) || !IsRetryableResponsesError(err) {
 		t.Fatalf("analysis exhaustion error=%v", err)
 	}
@@ -186,7 +186,7 @@ func TestCodexProviderAnalysis400DoesNotRetry(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{})
+	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{Question: content.QuestionForTeaching{Teaching: teachingFixture()}})
 	if err == nil || errors.Is(err, ErrTutorGenerationBusy) {
 		t.Fatalf("400 analysis error=%v", err)
 	}
@@ -208,7 +208,7 @@ func TestCodexProviderAnalysisRetryHonorsRetryAfter(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{Question: content.QuestionForTeaching{Teaching: teachingFixture()}}); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(waits, []time.Duration{7 * time.Second}) {
@@ -229,7 +229,7 @@ func TestCodexProviderRejectsSchemaViolation(t *testing.T) {
 		t.Fatalf("new provider: %v", err)
 	}
 
-	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(),
 		TutorDecision: tutor.Decision{NextState: tutor.StateProbe},
 	})
 	if err == nil {
@@ -251,7 +251,7 @@ func TestCodexProviderDoesNotTrustAnswerRevealedWhenAuditorRejectsBody(t *testin
 		t.Fatalf("new provider: %v", err)
 	}
 
-	_, err = provider.GenerateExplanation(context.Background(), ExplainRequest{
+	_, err = provider.GenerateExplanation(context.Background(), ExplainRequest{Teaching: teachingFixture(),
 		TutorDecision: tutor.Decision{NextState: tutor.StateExplain, AnswerRevealAllowed: false},
 	})
 	if !errors.Is(err, auditErr) || len(auditor.requests) != 1 || auditor.requests[0].Candidate.Message != "原题答案是10。" {
@@ -268,7 +268,7 @@ func TestCodexProviderRejectsIntroducedNumbersAfterIndependentDisclosureAudit(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(),
 		Question:      content.QuestionPublic{Prompt: "每盒12支，共3盒。"},
 		TutorDecision: tutor.Decision{NextState: tutor.StateHint},
 	})
@@ -289,7 +289,7 @@ func TestCodexProviderAddsOriginalTaskVerificationAfterExplanationAudit(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := provider.GenerateParallelExample(context.Background(), ExampleRequest(GenerateTurnRequest{
+	turn, err := provider.GenerateParallelExample(context.Background(), ExampleRequest(GenerateTurnRequest{Teaching: teachingFixture(),
 		Question:      content.QuestionPublic{Prompt: "每盒12支，共3盒。"},
 		TutorDecision: tutor.Decision{NextState: tutor.StateExplain},
 	}))
@@ -312,7 +312,7 @@ func TestCodexProviderFailsClosedWithoutTutorOutputAuditor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateProbe}}); !errors.Is(err, ErrTutorOutputAuditorUnavailable) {
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateProbe}}); !errors.Is(err, ErrTutorOutputAuditorUnavailable) {
 		t.Fatalf("missing auditor did not fail closed: %v", err)
 	}
 	if client.request.SchemaName != "" {
@@ -335,7 +335,7 @@ func TestCodexProviderCarriesResponseContext(t *testing.T) {
 		t.Fatalf("new provider: %v", err)
 	}
 
-	turn, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+	turn, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(),
 		PreviousResponseID: "resp_previous",
 		TutorDecision:      tutor.Decision{NextState: tutor.StateProbe},
 	})
@@ -362,7 +362,7 @@ func TestCodexProviderConstrainsActionEnumToServerDecision(t *testing.T) {
 		t.Fatalf("new provider: %v", err)
 	}
 
-	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(),
 		TutorDecision: tutor.Decision{NextState: tutor.StateHint},
 	}); err != nil {
 		t.Fatalf("generate turn: %v", err)
@@ -391,7 +391,7 @@ func TestCodexProviderSendsOnlyPublicQuestionDataToTutorGeneration(t *testing.T)
 		t.Fatalf("new provider: %v", err)
 	}
 
-	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(),
 		Question: content.QuestionPublic{
 			Prompt:      "公开题面",
 			Scene:       json.RawMessage(`{"kind":"NUMBER_LINE"}`),
@@ -461,7 +461,7 @@ func TestCodexProviderAuditsEveryStudentVisibleGenerationEntryPoint(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			request := GenerateTurnRequest{StudentID: "student", SessionID: "session", TutorDecision: tutor.Decision{NextState: test.action}}
+			request := GenerateTurnRequest{Teaching: teachingFixture(), StudentID: "student", SessionID: "session", TutorDecision: tutor.Decision{NextState: test.action}}
 			if err := test.call(provider, request); err != nil {
 				t.Fatal(err)
 			}
@@ -500,7 +500,7 @@ func TestCodexProviderBoundsGenerationRetryInsideTutorOperationDeadline(t *testi
 		t.Fatal(err)
 	}
 	started := time.Now()
-	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(),
 		TutorDecision: tutor.Decision{NextState: tutor.StateHint},
 	}); err != nil {
 		t.Fatal(err)
@@ -549,7 +549,7 @@ func TestCodexProviderGeneration429RetryRecoversBeforeOneAudit(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}}); err != nil {
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateHint}}); err != nil {
 		t.Fatal(err)
 	}
 	if client.calls != 2 || len(auditor.requests) != 1 || !slices.Equal(waits, []time.Duration{2 * time.Second}) {
@@ -576,7 +576,7 @@ func TestCodexProviderGeneration5xxUsesSharedRetryPredicate(t *testing.T) {
 			var waits []time.Duration
 			configureImmediateGenerationRetries(provider, &waits)
 
-			if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}}); err != nil {
+			if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateHint}}); err != nil {
 				t.Fatal(err)
 			}
 			if client.calls != 2 || len(auditor.requests) != 1 || !slices.Equal(waits, []time.Duration{2 * time.Second}) {
@@ -601,7 +601,7 @@ func TestCodexProviderGeneration429RetryExhaustionIsChildSafe(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
 	if !errors.Is(err, ErrTutorGenerationBusy) || !IsRetryableResponsesError(err) {
 		t.Fatalf("generation exhaustion error=%v", err)
 	}
@@ -629,7 +629,7 @@ func TestCodexProviderGeneration400DoesNotRetry(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
 	if err == nil || errors.Is(err, ErrTutorGenerationBusy) {
 		t.Fatalf("400 generation error=%v", err)
 	}
@@ -651,7 +651,7 @@ func TestCodexProviderGenerationRetryHonorsRetryAfter(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}}); err != nil {
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateHint}}); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(waits, []time.Duration{7 * time.Second}) {
@@ -671,7 +671,7 @@ func TestCodexProviderGenerationOverallTimeoutStopsRetryWait(t *testing.T) {
 	provider.generationRetryJitter = func(time.Duration) time.Duration { return 0 }
 
 	started := time.Now()
-	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
 	elapsed := time.Since(started)
 	details, ok := TutorGenerationBusyFailureDetails(err)
 	if !errors.Is(err, ErrTutorGenerationBusy) || !ok || details.Category != TutorReviewFailureTimeout {
@@ -700,7 +700,7 @@ func TestGenerationRetriesRejectedProviderOutputWithoutBackoff(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{Question: content.QuestionForTeaching{Teaching: teachingFixture()}}); err != nil {
 		t.Fatalf("rejected output was not retried: %v", err)
 	}
 	if client.calls != 2 {
@@ -721,7 +721,7 @@ func TestGenerationFailsClosedAfterMaxAttemptsOnRejectedOutput(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{})
+	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{Question: content.QuestionForTeaching{Teaching: teachingFixture()}})
 	if !errors.Is(err, ErrTutorGenerationBusy) {
 		t.Fatalf("exhausted retries did not fail closed: %v", err)
 	}
@@ -763,7 +763,7 @@ func TestRejectedSchemaPathsNameLocationsWithoutValues(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{})
+	_, err = provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{Question: content.QuestionForTeaching{Teaching: teachingFixture()}})
 	details, ok := TutorGenerationBusyFailureDetails(err)
 	if !ok {
 		t.Fatalf("no diagnostics for a rejected analysis: %v", err)
@@ -793,7 +793,7 @@ func TestRetryTellsTheProviderWhichLocationWasRejected(t *testing.T) {
 	var waits []time.Duration
 	configureImmediateGenerationRetries(provider, &waits)
 
-	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{}); err != nil {
+	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{Question: content.QuestionForTeaching{Teaching: teachingFixture()}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.requests) != 2 {
@@ -812,5 +812,140 @@ func TestRetryTellsTheProviderWhichLocationWasRejected(t *testing.T) {
 		if strings.Contains(second, canary) {
 			t.Fatalf("retry instructions leaked a provider output value %q", canary)
 		}
+	}
+}
+
+// teachingFixture is the subject and knowledge point every teaching request now
+// has to carry. Requests without one fail closed, which is the point.
+func teachingFixture() content.TeachingContext {
+	return content.TeachingContext{
+		SubjectCode: "MATH", SubjectName: "数学",
+		KnowledgePointCode: "MATH-JUN-LINEAR-EQUATION", KnowledgePointName: "一元一次方程",
+	}
+}
+
+func TestTutorRequestCarriesSubjectAndKnowledgePoint(t *testing.T) {
+	// Before this, the model received only a knowledge point UUID. It answered an
+	// English reading task whose sentence mentions 9:00 and 10:30 with a Chinese
+	// arithmetic analogy, and it coached a linear-equation task to pick an unknown
+	// without ever saying the equation had to be formed.
+	for _, test := range []struct {
+		name              string
+		teaching          content.TeachingContext
+		wantInstruction   string
+		rejectInstruction string
+	}{
+		{
+			name: "english reading is not turned into arithmetic",
+			teaching: content.TeachingContext{
+				SubjectCode: "ENGLISH", SubjectName: "英语",
+				KnowledgePointCode: "ENG-READ-DETAIL", KnowledgePointName: "英语阅读细节",
+			},
+			wantInstruction:   "language reading task",
+			rejectInstruction: "mathematics task",
+		},
+		{
+			name: "mathematics states the whole goal",
+			teaching: content.TeachingContext{
+				SubjectCode: "MATH", SubjectName: "数学",
+				KnowledgePointCode: "MATH-JUN-LINEAR-EQUATION", KnowledgePointName: "一元一次方程",
+			},
+			wantInstruction:   "mathematics task",
+			rejectInstruction: "language reading task",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{
+                "message":"先说说你从题目里读到了什么。",
+                "action":"PROBE",
+                "answer_revealed":false,
+                "segments":[]
+            }`)}}
+			provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+				Teaching:      test.teaching,
+				Question:      content.QuestionPublic{Prompt: "公开题面"},
+				TutorDecision: tutor.Decision{NextState: tutor.StateProbe},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(client.requests) != 1 {
+				t.Fatalf("provider calls=%d", len(client.requests))
+			}
+			payload := string(client.requests[0].Input)
+			for _, value := range []string{
+				test.teaching.SubjectCode, test.teaching.SubjectName,
+				test.teaching.KnowledgePointCode, test.teaching.KnowledgePointName,
+			} {
+				if !strings.Contains(payload, value) {
+					t.Fatalf("request payload omits %q: %s", value, payload)
+				}
+			}
+			instructions := client.requests[0].Instructions
+			if !strings.Contains(instructions, test.wantInstruction) {
+				t.Fatalf("instructions lack the subject rule %q", test.wantInstruction)
+			}
+			if strings.Contains(instructions, test.rejectInstruction) {
+				t.Fatalf("instructions carried the other subject's rule %q", test.rejectInstruction)
+			}
+		})
+	}
+}
+
+func TestTutorRequestFailsClosedWithoutTeachingContext(t *testing.T) {
+	// Falling back to a UUID-only request is the defect, so an incomplete context
+	// must stop the call rather than degrade it.
+	for _, test := range []struct {
+		name     string
+		teaching content.TeachingContext
+	}{
+		{name: "empty", teaching: content.TeachingContext{}},
+		{name: "subject only", teaching: content.TeachingContext{SubjectCode: "MATH", SubjectName: "数学"}},
+		{name: "knowledge point name missing", teaching: content.TeachingContext{
+			SubjectCode: "MATH", SubjectName: "数学", KnowledgePointCode: "MATH-JUN-LINEAR-EQUATION",
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{"message":"x","action":"PROBE","answer_revealed":false,"segments":[]}`)}}
+			provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+				Teaching: test.teaching, TutorDecision: tutor.Decision{NextState: tutor.StateProbe},
+			}); !errors.Is(err, ErrTutorTeachingContextMissing) {
+				t.Fatalf("generation error=%v", err)
+			}
+			if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{
+				Question: content.QuestionForTeaching{Teaching: test.teaching},
+			}); !errors.Is(err, ErrTutorTeachingContextMissing) {
+				t.Fatalf("analysis error=%v", err)
+			}
+			if len(client.requests) != 0 {
+				t.Fatalf("provider received %d request(s) without a teaching context", len(client.requests))
+			}
+		})
+	}
+}
+
+func TestTutorOutputAuditReceivesTheTeachingContext(t *testing.T) {
+	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{"message":"先读一遍题目。","action":"PROBE","answer_revealed":false,"segments":[]}`)}}
+	auditor := passingTutorOutputAuditor()
+	provider, err := NewCodexProvider(client, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+		Teaching:      teachingFixture(),
+		Question:      content.QuestionPublic{Prompt: "公开题面"},
+		TutorDecision: tutor.Decision{NextState: tutor.StateProbe},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(auditor.requests) != 1 || auditor.requests[0].Teaching != teachingFixture() {
+		t.Fatalf("auditor teaching context=%+v", auditor.requests)
 	}
 }

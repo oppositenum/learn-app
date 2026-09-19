@@ -83,9 +83,12 @@ SELECT q.id, q.knowledge_point_id, q.difficulty, q.question_type, q.prompt_publi
        q.scene_public_json, q.input_schema_json, q.content_version,
        a.correct_answer_json, a.full_solution_private, a.teacher_reference_answer,
        a.scoring_key_json, a.misconceptions_private_json, a.hint_policy_private_json,
-       a.created_at, a.updated_at
+       a.created_at, a.updated_at,
+       s.code, s.name_zh, kp.code, kp.name
 FROM questions q
 JOIN question_private_answers a ON a.question_id = q.id
+JOIN knowledge_points kp ON kp.id = q.knowledge_point_id
+JOIN subjects s ON s.id = kp.subject_id
 WHERE q.id = $1 AND q.status = 'RELEASED'`
 
 func (repository *Repository) ReleasedQuestionForTeaching(ctx context.Context, id uuid.UUID) (QuestionForTeaching, error) {
@@ -107,6 +110,10 @@ func (repository *Repository) ReleasedQuestionForTeaching(ctx context.Context, i
 		&question.Private.HintPolicy,
 		&question.Private.CreatedAt,
 		&question.Private.UpdatedAt,
+		&question.Teaching.SubjectCode,
+		&question.Teaching.SubjectName,
+		&question.Teaching.KnowledgePointCode,
+		&question.Teaching.KnowledgePointName,
 	)
 	question.Private.QuestionID = question.Public.ID
 	if errors.Is(err, pgx.ErrNoRows) {

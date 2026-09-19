@@ -456,6 +456,7 @@ func (service *Service) prepareStageFeedback(ctx context.Context, snapshot stage
 		StudentID:          snapshot.studentID.String(),
 		SessionID:          snapshot.sessionID.String(),
 		Question:           question.Public,
+		Teaching:           question.Teaching,
 		AuditPrivateAnswer: question.Private,
 		TutorDecision: tutor.Decision{
 			NextState: action,
