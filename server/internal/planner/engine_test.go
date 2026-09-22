@@ -55,6 +55,39 @@ func TestBuildPrefersFoundationWeakPointsOverLaterCatalog(t *testing.T) {
 	}
 }
 
+func TestBuildPrefersUnpracticedParenthesesOverPracticedTicketReview(t *testing.T) {
+	now := time.Date(2026, 9, 22, 9, 0, 0, 0, time.UTC)
+	due := now.Add(-time.Hour)
+	plan := (Engine{}).Build(Input{Date: now, Preferences: Preferences{DailyMinutes: 30}, Candidates: []Candidate{
+		juniorCandidate(Candidate{SubjectCode: "MATH", KnowledgePointID: "ticket", FoundationPriority: foundationPriority("MATH", "MATH-LINEAR-EQUATION"), ReviewDueAt: &due, Practiced: true}),
+		juniorCandidate(Candidate{SubjectCode: "MATH", KnowledgePointID: "parentheses", FoundationPriority: foundationPriority("MATH", "MATH-JUN-REMOVE-PARENTHESES")}),
+		juniorCandidate(Candidate{SubjectCode: "ENGLISH", KnowledgePointID: "reading", FoundationPriority: foundationPriority("ENGLISH", "ENGLISH-READING-DETAIL"), ReviewDueAt: &due, Practiced: true}),
+		juniorCandidate(Candidate{SubjectCode: "ENGLISH", KnowledgePointID: "vocab", FoundationPriority: foundationPriority("ENGLISH", "ENGLISH-JUN-VOCABULARY")}),
+	}})
+	bySubject := map[string]string{}
+	for _, block := range plan.Blocks {
+		bySubject[block.SubjectCode] = block.KnowledgePointID
+	}
+	if bySubject["MATH"] != "parentheses" {
+		t.Fatalf("math block=%s want parentheses: %+v", bySubject["MATH"], plan.Blocks)
+	}
+	if bySubject["ENGLISH"] != "vocab" {
+		t.Fatalf("english block=%s want vocab: %+v", bySubject["ENGLISH"], plan.Blocks)
+	}
+}
+
+func TestBuildKeepsUnderstoodReviewAheadOfUnpracticedParentheses(t *testing.T) {
+	now := time.Date(2026, 9, 22, 9, 0, 0, 0, time.UTC)
+	due := now.Add(-time.Hour)
+	plan := (Engine{}).Build(Input{Date: now, Preferences: Preferences{DailyMinutes: 30}, Candidates: []Candidate{
+		juniorCandidate(Candidate{SubjectCode: "MATH", KnowledgePointID: "understood-review", FoundationPriority: foundationPriority("MATH", "MATH-EQ-FIXED-COST"), ReviewDueAt: &due, Practiced: true, SkillScore: 75}),
+		juniorCandidate(Candidate{SubjectCode: "MATH", KnowledgePointID: "parentheses", FoundationPriority: foundationPriority("MATH", "MATH-JUN-REMOVE-PARENTHESES")}),
+	}})
+	if len(plan.Blocks) != 1 || plan.Blocks[0].KnowledgePointID != "understood-review" {
+		t.Fatalf("understood review lost the math card: %+v", plan.Blocks)
+	}
+}
+
 func TestBuildEmitsOneBlockPerSubject(t *testing.T) {
 	now := time.Date(2026, 8, 29, 9, 0, 0, 0, time.UTC)
 	plan := (Engine{}).Build(Input{Date: now, Preferences: Preferences{DailyMinutes: 30}, Candidates: []Candidate{

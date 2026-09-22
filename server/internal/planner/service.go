@@ -94,7 +94,11 @@ func (service *Service) EnsureWithStatus(ctx context.Context, studentID uuid.UUI
 
 func (service *Service) ensureWithLocked(ctx context.Context, tx pgx.Tx, studentID uuid.UUID, date, asOf time.Time, basedOnSessionID uuid.UUID) (PersistedPlan, bool, error) {
 	if existing, err := loadWith(ctx, tx, studentID, date); err == nil {
-		return existing, false, nil
+		refreshed, err := service.refreshUnusedBlocksWithLocked(ctx, tx, studentID, date, asOf, existing)
+		if err != nil {
+			return PersistedPlan{}, false, err
+		}
+		return refreshed, false, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return PersistedPlan{}, false, err
 	}
@@ -153,6 +157,104 @@ DO UPDATE SET due_at=LEAST(review_queue.due_at,EXCLUDED.due_at),priority=GREATES
 		persisted.Blocks = append(persisted.Blocks, PersistedBlock{ID: blockID, Sequence: block.Sequence, SubjectID: item.subjectID, SubjectCode: block.SubjectCode, KnowledgePointID: &knowledgePointID, Focus: item.focus, Minutes: block.Minutes, Mode: block.Mode, Reason: block.Reason, OriginalTaskID: originalTaskID, Status: "AVAILABLE"})
 	}
 	return persisted, true, nil
+}
+
+// refreshUnusedBlocksWithLocked may replace AVAILABLE cards that are not in
+// an ACTIVE or PAUSED classroom. Completed work and an in-progress or paused
+// card stay as the child last saw them.
+func (service *Service) refreshUnusedBlocksWithLocked(ctx context.Context, tx pgx.Tx, studentID uuid.UUID, date, asOf time.Time, existing PersistedPlan) (PersistedPlan, error) {
+	newPlan, metadata, err := service.buildPlanWithLocked(ctx, tx, studentID, asOf)
+	if err != nil {
+		return existing, err
+	}
+	lockedSubjects := map[string]bool{}
+	existingSubjects := map[string]bool{}
+	nextSequence := 0
+	for _, block := range existing.Blocks {
+		existingSubjects[block.SubjectCode] = true
+		if block.Sequence > nextSequence {
+			nextSequence = block.Sequence
+		}
+		if sessionLocksTodayCard(block.SessionStatus) {
+			lockedSubjects[block.SubjectCode] = true
+		}
+	}
+	changed := false
+	for _, block := range existing.Blocks {
+		if lockedSubjects[block.SubjectCode] {
+			continue
+		}
+		replacement, ok := blockForSubject(newPlan.Blocks, block.SubjectCode)
+		if !ok {
+			continue
+		}
+		item, ok := metadata[replacement.KnowledgePointID]
+		if !ok {
+			return existing, fmt.Errorf("planner metadata missing for %s", replacement.KnowledgePointID)
+		}
+		if block.KnowledgePointID != nil && block.KnowledgePointID.String() == replacement.KnowledgePointID {
+			continue
+		}
+		var original any
+		if replacement.OriginalTaskID != "" {
+			parsed, err := uuid.Parse(replacement.OriginalTaskID)
+			if err != nil {
+				return existing, err
+			}
+			original = parsed
+		}
+		var reviewQueueID any
+		if replacement.Mode == ModeReview && item.reviewQueueID != nil {
+			reviewQueueID = *item.reviewQueueID
+		}
+		command, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET knowledge_point_id=$2,minutes=$3,mode=$4,reason=$5,original_task_id=$6,review_queue_id=$7 WHERE id=$1 AND status='AVAILABLE'`, block.ID, item.knowledgePointID, replacement.Minutes, replacement.Mode, replacement.Reason, original, reviewQueueID)
+		if err != nil {
+			return existing, err
+		}
+		if command.RowsAffected() == 0 {
+			continue
+		}
+		changed = true
+	}
+	for _, replacement := range newPlan.Blocks {
+		if existingSubjects[replacement.SubjectCode] || lockedSubjects[replacement.SubjectCode] {
+			continue
+		}
+		item, ok := metadata[replacement.KnowledgePointID]
+		if !ok {
+			return existing, fmt.Errorf("planner metadata missing for %s", replacement.KnowledgePointID)
+		}
+		var original any
+		if replacement.OriginalTaskID != "" {
+			parsed, err := uuid.Parse(replacement.OriginalTaskID)
+			if err != nil {
+				return existing, err
+			}
+			original = parsed
+		}
+		var reviewQueueID any
+		if replacement.Mode == ModeReview && item.reviewQueueID != nil {
+			reviewQueueID = *item.reviewQueueID
+		}
+		nextSequence++
+		if _, err := tx.Exec(ctx, `INSERT INTO learning_plan_blocks(id,plan_id,sequence,subject_id,knowledge_point_id,minutes,mode,reason,original_task_id,review_queue_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.New(), existing.ID, nextSequence, item.subjectID, item.knowledgePointID, replacement.Minutes, replacement.Mode, replacement.Reason, original, reviewQueueID); err != nil {
+			return existing, err
+		}
+		changed = true
+	}
+	if !changed {
+		return existing, nil
+	}
+	return loadWith(ctx, tx, studentID, date)
+}
+
+func blockForSubject(blocks []Block, subjectCode string) (Block, bool) {
+	for _, block := range blocks {
+		if block.SubjectCode == subjectCode {
+			return block, true
+		}
+	}
+	return Block{}, false
 }
 
 func (service *Service) buildPlanWithLocked(ctx context.Context, tx pgx.Tx, studentID uuid.UUID, asOf time.Time) (Plan, map[string]candidateMetadata, error) {
@@ -255,6 +357,18 @@ func shouldPreserveToday(openTodaySessions int, todayStarted bool) bool {
 	return openTodaySessions > 0 || todayStarted
 }
 
+func sessionLocksTodayCard(sessionStatus *string) bool {
+	if sessionStatus == nil {
+		return false
+	}
+	switch *sessionStatus {
+	case "ACTIVE", "PAUSED":
+		return true
+	default:
+		return false
+	}
+}
+
 type candidateMetadata struct {
 	subjectID, knowledgePointID uuid.UUID
 	focus                       string
@@ -281,7 +395,8 @@ func (service *Service) candidates(ctx context.Context, db queryer, studentID uu
 		SELECT s.id,s.code,kp.id,kp.code,kp.name,st.grade_level,grade_band.min_grade,grade_band.max_grade,
 			   COALESCE(ss.score_internal,0)::float8,due_review.id,due_review.due_at,
 	       EXISTS(SELECT 1 FROM student_misconceptions sm WHERE sm.student_id=$1 AND sm.knowledge_point_id=kp.id AND sm.status='ACTIVE'),
-		   COALESCE(s.code=ANY($3::text[]),false)
+		   COALESCE(s.code=ANY($3::text[]),false),
+		   ss.student_id IS NOT NULL
 	FROM knowledge_points kp
 	JOIN subjects s ON s.id=kp.subject_id
 	JOIN students st ON st.id=$1
@@ -314,13 +429,13 @@ ORDER BY s.sort_order,kp.code`, studentID, date, priorities, enabledSubjects)
 		var studentGrade, gradeBandMin, gradeBandMax int
 		var score float64
 		var due *time.Time
-		var misconception, priority bool
-		if err := rows.Scan(&subjectID, &subjectCode, &kpID, &knowledgePointCode, &focus, &studentGrade, &gradeBandMin, &gradeBandMax, &score, &reviewQueueID, &due, &misconception, &priority); err != nil {
+		var misconception, priority, practiced bool
+		if err := rows.Scan(&subjectID, &subjectCode, &kpID, &knowledgePointCode, &focus, &studentGrade, &gradeBandMin, &gradeBandMax, &score, &reviewQueueID, &due, &misconception, &priority, &practiced); err != nil {
 			return nil, nil, err
 		}
 		key := kpID.String()
 		indexes[key] = len(candidates)
-		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, StudentGrade: studentGrade, GradeBandMin: gradeBandMin, GradeBandMax: gradeBandMax, SkillScore: score, FoundationPriority: foundationPriority(subjectCode, knowledgePointCode), ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority})
+		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, StudentGrade: studentGrade, GradeBandMin: gradeBandMin, GradeBandMax: gradeBandMax, SkillScore: score, FoundationPriority: foundationPriority(subjectCode, knowledgePointCode), ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority, Practiced: practiced})
 		metadata[key] = candidateMetadata{subjectID: subjectID, knowledgePointID: kpID, focus: focus, reviewQueueID: reviewQueueID}
 	}
 	if err := rows.Err(); err != nil {

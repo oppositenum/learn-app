@@ -35,6 +35,7 @@ type Candidate struct {
 	ParentPriority      bool
 	CrossSubjectGap     bool
 	OriginalTaskID      string
+	Practiced           bool
 }
 
 type Preferences struct {
@@ -181,12 +182,18 @@ func candidateRank(candidate Candidate, now time.Time, reviewOnly bool) int {
 	}
 	if candidate.ReviewDueAt != nil && !candidate.ReviewDueAt.After(now) {
 		score += 60
+		if candidate.Practiced && candidate.SkillScore >= 75 {
+			score += 80
+		}
 	}
 	if candidate.ParentPriority {
 		score += 30
 	}
 	if candidate.FoundationPriority > 0 {
 		score += candidate.FoundationPriority
+		if !candidate.Practiced {
+			score += 70
+		}
 	}
 	if reviewOnly && isReview(candidate, now) {
 		score += 200
@@ -196,14 +203,17 @@ func candidateRank(candidate Candidate, now time.Time, reviewOnly bool) int {
 
 // foundationPriority ranks life-context weak-point work above later-year
 // skeleton points when both have a released question. English vocabulary is
-// this child's first gap; junior math modeling sits behind later algebra.
+// this child's first gap; unpracticed remove-parentheses sits ahead of the
+// ticket-equation review.
 func foundationPriority(subjectCode, knowledgePointCode string) int {
 	switch knowledgePointCode {
 	case "ENGLISH-JUN-VOCABULARY", "ENGLISH-PRI-COMMON-VOCABULARY":
 		return 50
 	case "ENGLISH-THERE-IS-ARE", "ENGLISH-SIMPLE-PRESENT":
 		return 40
-	case "MATH-LINEAR-EQUATION", "MATH-JUN-REMOVE-PARENTHESES", "MATH-JUN-ALGEBRAIC-EXPRESSION":
+	case "MATH-JUN-REMOVE-PARENTHESES", "MATH-JUN-ALGEBRAIC-EXPRESSION":
+		return 45
+	case "MATH-LINEAR-EQUATION":
 		return 35
 	case "MATH-FRACTION-COMMON-DENOMINATOR", "MATH-PERCENT-DISCOUNT":
 		return 30
