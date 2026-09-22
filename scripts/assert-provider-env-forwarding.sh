@@ -137,9 +137,38 @@ else
 fi
 
 # Read a variable's compose fallback, i.e. the DEFAULT in ${VAR:-DEFAULT}.
+# Brace depth is counted so a JSON object such as
+# {"thinking":{"type":"disabled"}} is not truncated at the first `}`.
 compose_default_of() {
-	grep -E "^[[:space:]]*${2}:" "$1" | head -n 1 |
-		sed -n "s/.*\${${2}:-\([^}]*\)}.*/\1/p"
+	local file="$1" var="$2" line prefix rest i c depth out
+	line="$(grep -E "^[[:space:]]*${var}:" "$file" | head -n 1)"
+	[ -n "$line" ] || return 0
+	prefix='${'"${var}"':-'
+	case "$line" in
+	*"${prefix}"*) ;;
+	*) return 0 ;;
+	esac
+	rest="${line#*"${prefix}"}"
+	depth=1
+	out=''
+	i=0
+	while [ "$i" -lt "${#rest}" ]; do
+		c="${rest:$i:1}"
+		if [ "$c" = '{' ]; then
+			depth=$((depth + 1))
+			out="${out}${c}"
+		elif [ "$c" = '}' ]; then
+			depth=$((depth - 1))
+			if [ "$depth" -eq 0 ]; then
+				printf '%s' "$out"
+				return 0
+			fi
+			out="${out}${c}"
+		else
+			out="${out}${c}"
+		fi
+		i=$((i + 1))
+	done
 }
 
 # Every channel variable is forwarded, using compose interpolation rather than a
@@ -230,6 +259,25 @@ check_one_compose() {
 	check_no_committed_keys "$file"
 	check_defaults_match_reference "$file"
 }
+
+# A nested JSON default must survive extraction. The previous [^}]* cut at
+# the first brace, so compose.prod.yaml and .env.example looked inconsistent
+# while Compose itself interpolated the object correctly.
+check_nested_json_default_extraction() {
+	local fixture expected actual
+	fixture="$(mktemp "${TMPDIR:-/tmp}/overlay-default.XXXXXX")"
+	expected='{"thinking":{"type":"disabled"}}'
+	printf '      TUTOR_GENERATOR_REQUEST_OVERLAY: ${TUTOR_GENERATOR_REQUEST_OVERLAY:-%s}\n' "$expected" >"$fixture"
+	actual="$(compose_default_of "$fixture" TUTOR_GENERATOR_REQUEST_OVERLAY)"
+	rm -f "$fixture"
+	if [ "$actual" != "$expected" ]; then
+		fail "nested JSON compose default was truncated (got '$actual')"
+	else
+		pass "nested JSON compose default is extracted in full"
+	fi
+}
+
+check_nested_json_default_extraction
 
 if [ -n "$single_compose" ]; then
 	if [ ! -f "$single_compose" ]; then

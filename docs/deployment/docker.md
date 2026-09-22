@@ -132,7 +132,9 @@ Each text channel takes `_PROVIDER`, `_BASE_URL`, `_API_KEY`, `_MODEL`, and
 optionally `_API_SHAPE` (`responses` or `chat_completions`) and
 `_REQUEST_OVERLAY`. `_BASE_URL` is required for any provider other than
 `openai`. `_API_SHAPE` defaults to `chat_completions` for Tutor and the content
-pipeline. Tutor also requires `_REQUEST_OVERLAY` so reasoning mode stays off.
+pipeline. Tutor requires `_REQUEST_OVERLAY` set to the actual provider's
+syntax so reasoning mode stays off. Compose does not fill Doubao or Qwen
+overlay JSON; an empty overlay fails startup when Tutor is enabled.
 
 Owner AI question generation additionally requires:
 

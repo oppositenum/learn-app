@@ -121,13 +121,13 @@ func loadTutorProviderConfig(getenv environmentLookup) (tutorProviderConfig, err
 	if err := validateProviderChannel("Tutor generator", config.Generator); err != nil {
 		return tutorProviderConfig{}, err
 	}
-	if err := requireTutorOverlay("Tutor generator", config.Generator); err != nil {
+	if err := requireTutorOverlay("Tutor generator", tutorGeneratorOverlayEnv, config.Generator); err != nil {
 		return tutorProviderConfig{}, err
 	}
 	if err := validateProviderChannel("Tutor reviewer", config.Reviewer); err != nil {
 		return tutorProviderConfig{}, err
 	}
-	if err := requireTutorOverlay("Tutor reviewer", config.Reviewer); err != nil {
+	if err := requireTutorOverlay("Tutor reviewer", tutorReviewerOverlayEnv, config.Reviewer); err != nil {
 		return tutorProviderConfig{}, err
 	}
 	if config.Generator.identity() == config.Reviewer.identity() {
@@ -192,9 +192,9 @@ func validateProviderChannel(name string, config providerChannelConfig) error {
 	return nil
 }
 
-func requireTutorOverlay(name string, config providerChannelConfig) error {
+func requireTutorOverlay(name, envName string, config providerChannelConfig) error {
 	if len(config.RequestOverlay) == 0 {
-		return fmt.Errorf("%s request overlay is required so reasoning mode stays off the 75s submit budget", name)
+		return fmt.Errorf("%s request overlay is required (%s) so reasoning mode stays off the 75s submit budget", name, envName)
 	}
 	return nil
 }

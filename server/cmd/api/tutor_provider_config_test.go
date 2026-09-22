@@ -197,7 +197,15 @@ func TestTutorProviderConfigShapeAndOverlay(t *testing.T) {
 		_, err := loadTutorProviderConfig(with(map[string]string{
 			"TUTOR_GENERATOR_REQUEST_OVERLAY": "",
 		}))
-		if err == nil || !strings.Contains(err.Error(), "request overlay is required") {
+		if err == nil || !strings.Contains(err.Error(), "request overlay is required") || !strings.Contains(err.Error(), "TUTOR_GENERATOR_REQUEST_OVERLAY") {
+			t.Fatalf("empty overlay error=%v", err)
+		}
+	})
+	t.Run("missing reviewer overlay names the variable", func(t *testing.T) {
+		_, err := loadTutorProviderConfig(with(map[string]string{
+			"TUTOR_REVIEWER_REQUEST_OVERLAY": "",
+		}))
+		if err == nil || !strings.Contains(err.Error(), "TUTOR_REVIEWER_REQUEST_OVERLAY") {
 			t.Fatalf("empty overlay error=%v", err)
 		}
 	})
