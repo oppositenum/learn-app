@@ -36,6 +36,26 @@ var tutorChannelEnvNames = []string{
 	tutorReviewerModelEnv,
 }
 
+// retiredTutorEnvNames configured Tutor through the OpenAI-only fallback.
+// They are refused rather than ignored: a deployment that still carries them
+// would otherwise look configured while the TUTOR_* channels are the only
+// path that can actually start.
+var retiredTutorEnvNames = []string{
+	"OPENAI_TUTOR_MODEL",
+	"OPENAI_TUTOR_OUTPUT_REVIEW_MODEL",
+}
+
+func retiredTutorReplacement(name string) string {
+	switch name {
+	case "OPENAI_TUTOR_MODEL":
+		return tutorGeneratorModelEnv
+	case "OPENAI_TUTOR_OUTPUT_REVIEW_MODEL":
+		return tutorReviewerModelEnv
+	default:
+		return tutorGeneratorProviderEnv
+	}
+}
+
 // providerChannelConfig is one configured AI channel. Tutor and the content
 // pipeline both use it so the two never drift into different configuration
 // semantics for the same underlying client.
@@ -75,19 +95,28 @@ func loadTutorProviderConfig(getenv environmentLookup) (tutorProviderConfig, err
 	if err := requireContextCacheDisabled(tutorReviewerCacheEnv, getenv(tutorReviewerCacheEnv)); err != nil {
 		return tutorProviderConfig{}, err
 	}
-	explicit := false
+	configured := false
 	for _, name := range tutorChannelEnvNames {
 		if strings.TrimSpace(getenv(name)) != "" {
-			explicit = true
+			configured = true
 			break
 		}
 	}
-
-	legacyKey := strings.TrimSpace(getenv("OPENAI_API_KEY"))
-	legacyBaseURL := strings.TrimSpace(getenv("OPENAI_BASE_URL"))
-	legacyGeneratorModel := strings.TrimSpace(getenv("OPENAI_TUTOR_MODEL"))
-	legacyReviewerModel := strings.TrimSpace(getenv("OPENAI_TUTOR_OUTPUT_REVIEW_MODEL"))
-	if !explicit && (legacyKey == "" || legacyGeneratorModel == "") {
+	for _, retired := range retiredTutorEnvNames {
+		if strings.TrimSpace(getenv(retired)) == "" {
+			continue
+		}
+		replacement := retiredTutorReplacement(retired)
+		if !configured {
+			return tutorProviderConfig{}, fmt.Errorf(
+				"%s is retired; configure %s and the %s / %s channels instead",
+				retired, replacement, tutorGeneratorProviderEnv, tutorReviewerProviderEnv)
+		}
+		return tutorProviderConfig{}, fmt.Errorf(
+			"%s is retired and must be removed; configure %s and the %s / %s channels instead",
+			retired, replacement, tutorGeneratorProviderEnv, tutorReviewerProviderEnv)
+	}
+	if !configured {
 		return tutorProviderConfig{}, nil
 	}
 
@@ -103,17 +132,17 @@ func loadTutorProviderConfig(getenv environmentLookup) (tutorProviderConfig, err
 		Enabled: true,
 		Generator: tutorChannelConfig{
 			Provider:       valueOrDefault(getenv(tutorGeneratorProviderEnv), "openai"),
-			BaseURL:        valueOrDefault(getenv(tutorGeneratorBaseURLEnv), legacyBaseURL),
-			APIKey:         valueOrDefault(getenv(tutorGeneratorAPIKeyEnv), legacyKey),
-			Model:          valueOrDefault(getenv(tutorGeneratorModelEnv), legacyGeneratorModel),
+			BaseURL:        strings.TrimSpace(getenv(tutorGeneratorBaseURLEnv)),
+			APIKey:         strings.TrimSpace(getenv(tutorGeneratorAPIKeyEnv)),
+			Model:          strings.TrimSpace(getenv(tutorGeneratorModelEnv)),
 			Shape:          valueOrDefault(getenv(tutorGeneratorShapeEnv), ai.ShapeChatCompletions),
 			RequestOverlay: generatorOverlay,
 		},
 		Reviewer: tutorChannelConfig{
 			Provider:       valueOrDefault(getenv(tutorReviewerProviderEnv), "openai"),
-			BaseURL:        valueOrDefault(getenv(tutorReviewerBaseURLEnv), legacyBaseURL),
-			APIKey:         valueOrDefault(getenv(tutorReviewerAPIKeyEnv), legacyKey),
-			Model:          valueOrDefault(getenv(tutorReviewerModelEnv), legacyReviewerModel),
+			BaseURL:        strings.TrimSpace(getenv(tutorReviewerBaseURLEnv)),
+			APIKey:         strings.TrimSpace(getenv(tutorReviewerAPIKeyEnv)),
+			Model:          strings.TrimSpace(getenv(tutorReviewerModelEnv)),
 			Shape:          valueOrDefault(getenv(tutorReviewerShapeEnv), ai.ShapeChatCompletions),
 			RequestOverlay: reviewerOverlay,
 		},

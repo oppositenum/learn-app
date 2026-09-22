@@ -7,28 +7,58 @@ import (
 	"testing"
 )
 
-func TestTutorProviderConfigPreservesLegacyOpenAIBehavior(t *testing.T) {
-	values := map[string]string{
-		"OPENAI_API_KEY":                   "legacy-key",
-		"OPENAI_BASE_URL":                  "https://legacy.example/v1",
-		"OPENAI_TUTOR_MODEL":               "legacy-generator",
-		"OPENAI_TUTOR_OUTPUT_REVIEW_MODEL": "legacy-reviewer",
-		tutorGeneratorOverlayEnv:           `{"reasoning":{"effort":"low"}}`,
-		tutorReviewerOverlayEnv:            `{"reasoning":{"effort":"low"}}`,
+func TestRetiredOpenAITutorConfigFailsClosedInsteadOfFallingBack(t *testing.T) {
+	for _, retired := range retiredTutorEnvNames {
+		replacement := retiredTutorReplacement(retired)
+		t.Run(retired+" without Tutor channels", func(t *testing.T) {
+			_, err := loadTutorProviderConfig(mapLookup(map[string]string{
+				"OPENAI_API_KEY": "used-by-speech-only",
+				retired:          "legacy-model",
+			}))
+			if err == nil || !strings.Contains(err.Error(), retired) || !strings.Contains(err.Error(), replacement) {
+				t.Fatalf("retired %s error=%v", retired, err)
+			}
+		})
+		t.Run(retired+" alongside Tutor channels", func(t *testing.T) {
+			_, err := loadTutorProviderConfig(mapLookup(map[string]string{
+				tutorGeneratorProviderEnv: "doubao",
+				tutorGeneratorBaseURLEnv:  "https://ark.example/api/v3",
+				tutorGeneratorAPIKeyEnv:   "gk",
+				tutorGeneratorModelEnv:    "doubao-pro",
+				tutorReviewerProviderEnv:  "qwen",
+				tutorReviewerBaseURLEnv:   "https://dashscope.example/v1",
+				tutorReviewerAPIKeyEnv:    "rk",
+				tutorReviewerModelEnv:     "qwen-plus",
+				tutorGeneratorOverlayEnv:  `{"thinking":{"type":"disabled"}}`,
+				tutorReviewerOverlayEnv:   `{"enable_thinking":false}`,
+				retired:                   "legacy-model",
+			}))
+			if err == nil || !strings.Contains(err.Error(), retired) || !strings.Contains(err.Error(), replacement) {
+				t.Fatalf("retired %s alongside channels error=%v", retired, err)
+			}
+		})
 	}
-	config, err := loadTutorProviderConfig(mapLookup(values))
+}
+
+func TestTutorProviderConfigEnablesFromTutorChannelsOnly(t *testing.T) {
+	config, err := loadTutorProviderConfig(mapLookup(map[string]string{
+		tutorGeneratorProviderEnv: "openai",
+		tutorGeneratorAPIKeyEnv:   "gk",
+		tutorGeneratorModelEnv:    "gpt-tutor",
+		tutorReviewerProviderEnv:  "openai",
+		tutorReviewerAPIKeyEnv:    "rk",
+		tutorReviewerModelEnv:     "gpt-review",
+		tutorGeneratorOverlayEnv:  `{"reasoning":{"effort":"low"}}`,
+		tutorReviewerOverlayEnv:   `{"reasoning":{"effort":"low"}}`,
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !config.Enabled {
-		t.Fatal("legacy Tutor configuration was not enabled")
+		t.Fatal("Tutor channels did not enable Tutor")
 	}
-	if config.Generator.identity() != "openai:legacy-generator" || config.Reviewer.identity() != "openai:legacy-reviewer" {
-		t.Fatalf("legacy identities generator=%q reviewer=%q", config.Generator.identity(), config.Reviewer.identity())
-	}
-	if config.Generator.APIKey != "legacy-key" || config.Reviewer.APIKey != "legacy-key" ||
-		config.Generator.BaseURL != "https://legacy.example/v1" || config.Reviewer.BaseURL != "https://legacy.example/v1" {
-		t.Fatalf("legacy fallback mismatch: %+v", config)
+	if config.Generator.identity() != "openai:gpt-tutor" || config.Reviewer.identity() != "openai:gpt-review" {
+		t.Fatalf("channel identities generator=%q reviewer=%q", config.Generator.identity(), config.Reviewer.identity())
 	}
 }
 
@@ -85,15 +115,16 @@ func TestTutorProviderConfigRequiresCompleteExplicitChannels(t *testing.T) {
 	}
 }
 
-func TestTutorProviderConfigKeepsLegacyDisabledBehavior(t *testing.T) {
+func TestTutorProviderConfigStaysDisabledWhenUnconfigured(t *testing.T) {
 	config, err := loadTutorProviderConfig(mapLookup(map[string]string{
-		"OPENAI_API_KEY": "used-by-speech-only",
+		"OPENAI_API_KEY":  "used-by-speech-only",
+		"OPENAI_BASE_URL": "https://api.openai.com/v1",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if config.Enabled {
-		t.Fatalf("legacy configuration without OPENAI_TUTOR_MODEL enabled Tutor: %+v", config)
+		t.Fatalf("speech-only OpenAI variables enabled Tutor: %+v", config)
 	}
 }
 

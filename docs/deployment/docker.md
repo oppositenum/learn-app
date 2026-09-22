@@ -143,13 +143,14 @@ Owner AI question generation additionally requires:
 - A currently effective `ai_price_catalog` row for each configured identity,
   matching its provider and exact model.
 
-> **Retired variables block startup.** `OPENAI_CONTENT_GENERATION_MODEL` and
+> **Retired variables block startup.** `OPENAI_TUTOR_MODEL`,
+> `OPENAI_TUTOR_OUTPUT_REVIEW_MODEL`, `OPENAI_CONTENT_GENERATION_MODEL`, and
 > `OPENAI_CONTENT_REVIEW_MODEL` no longer configure anything, and the API
-> container **exits on start** while either is present. Remove both from
+> container **exits on start** while any of them is present. Remove them from
 > `.env.production` before deploying, or the release will fail at container
-> start rather than degrade silently. `OPENAI_TUTOR_MODEL` and
-> `OPENAI_TUTOR_OUTPUT_REVIEW_MODEL` are different: they still work as an
-> OpenAI-only fallback, but prefer the `TUTOR_*` channels.
+> start rather than degrade silently. OpenAI Tutor still works by setting
+> `TUTOR_GENERATOR_PROVIDER=openai` and the matching `TUTOR_REVIEWER_*`
+> channel.
 
 Also keep every `*_CONTEXT_CACHE` variable unset or false; enabling one is
 refused at startup because `ai_price_catalog` has no cache-write price field.

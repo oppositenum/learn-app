@@ -116,10 +116,12 @@ channel_variables="$(
 		tr -d '"' | sort -u
 )"
 
-# Retired variables, straight from retiredContentEnvNames.
+# Retired variables, straight from retiredContentEnvNames and retiredTutorEnvNames.
 retired_variables="$(
-	sed -n '/^var retiredContentEnvNames = \[\]string{/,/^}/p' "$content_config" |
-		grep -o '"[A-Z_]*"' | tr -d '"' | sort -u
+	{
+		sed -n '/^var retiredContentEnvNames = \[\]string{/,/^}/p' "$content_config"
+		sed -n '/^var retiredTutorEnvNames = \[\]string{/,/^}/p' "$tutor_config"
+	} | grep -o '"[A-Z_]*"' | tr -d '"' | sort -u
 )"
 
 channel_count="$(printf '%s\n' "$channel_variables" | grep -c .)"
@@ -130,8 +132,8 @@ if [ "$channel_count" -lt 28 ]; then
 else
 	pass "derived $channel_count channel variables from the Go config"
 fi
-if [ "$retired_count" -ne 2 ]; then
-	fail "derived $retired_count retired variables; expected 2"
+if [ "$retired_count" -ne 4 ]; then
+	fail "derived $retired_count retired variables; expected 4"
 else
 	pass "derived $retired_count retired variables from the Go config"
 fi

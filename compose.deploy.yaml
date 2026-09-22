@@ -51,12 +51,10 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env.production}
       TZ: ${TZ:-Asia/Shanghai}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
-      # Speech (STT/TTS), and the OpenAI-only fallback the Tutor channels below
-      # still accept for their key, base URL and model.
+      # Speech (STT/TTS) still uses the OpenAI variables below. Tutor model
+      # fields no longer fall back to OPENAI_TUTOR_*; those names are retired.
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_TUTOR_MODEL: ${OPENAI_TUTOR_MODEL:-}
-      OPENAI_TUTOR_OUTPUT_REVIEW_MODEL: ${OPENAI_TUTOR_OUTPUT_REVIEW_MODEL:-}
       OPENAI_STT_MODEL: ${OPENAI_STT_MODEL:-}
       OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-}
       OPENAI_TTS_VOICE: ${OPENAI_TTS_VOICE:-}

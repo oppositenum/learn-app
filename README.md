@@ -96,9 +96,9 @@ Every AI/STT/TTS provider must declare its provider/model billing identity. Add 
 | Generation | `TUTOR_GENERATOR_` |
 | Independent output review | `TUTOR_REVIEWER_` |
 
-`_API_SHAPE` is `responses` or `chat_completions` and defaults to `responses` for Tutor. `_BASE_URL` is required for any provider other than `openai`. The two channels' `provider:model` identities must differ; a missing or non-independent reviewer fails closed before student-visible output is persisted, published, or sent to TTS. Both identities require effective `ai_price_catalog` rows, and the independent review call is metered under `TUTOR_OUTPUT_REVIEW` even when its structured result is later rejected. Reviewer HTTP 429 and 5xx responses use a bounded reviewer-only retry policy; exhaustion remains fail closed and returns a stable child-safe error without discarding typed Student input.
+`_API_SHAPE` is `responses` or `chat_completions` and defaults to `chat_completions` for Tutor. `_BASE_URL` is required for any provider other than `openai`. The two channels' `provider:model` identities must differ; a missing or non-independent reviewer fails closed before student-visible output is persisted, published, or sent to TTS. Both identities require effective `ai_price_catalog` rows, and the independent review call is metered under `TUTOR_OUTPUT_REVIEW` even when its structured result is later rejected. Reviewer HTTP 429 and 5xx responses use a bounded reviewer-only retry policy; exhaustion remains fail closed and returns a stable child-safe error without discarding typed Student input.
 
-`OPENAI_TUTOR_MODEL` and `OPENAI_TUTOR_OUTPUT_REVIEW_MODEL` still work as a fallback for the model fields, using `OPENAI_API_KEY` and `OPENAI_BASE_URL` and defaulting the provider to `openai`. New deployments should set the channel variables instead, because the fallback cannot express a non-OpenAI provider or wire shape.
+OpenAI still works by setting `TUTOR_GENERATOR_PROVIDER=openai` (and the matching `TUTOR_REVIEWER_*` channel), plus `_API_KEY`, `_MODEL`, and `_REQUEST_OVERLAY`. There is no OpenAI-only fallback for the model fields.
 
 Cost-accounting limitation for B6: the test gateway was observed to inject about 4,390 reviewer input tokens, including 3,840 cached tokens, and the observed review cost was about 4.8 times the Tutor generation cost for that sample. The catalog has no cache-write price field, so GPT-5.6+ cache-write cost can be understated; current cost totals must not be described as fully exact, and Terra's $2.50/1M cache-write reference price must not be stored in an audio price field.
 
@@ -113,7 +113,7 @@ Cost-accounting limitation for B6: the test gateway was observed to inject about
 
 Generation accepts only released, source-linked curriculum knowledge points and licensed content sources, creates server-owned `DRAFT` assets, and never skips deterministic validation, independent review, or Owner release. The Owner UI filters the catalog by subject, grade band, domain, unit metadata, name, and stable code.
 
-> **Retired — remove these before upgrading.** `OPENAI_CONTENT_GENERATION_MODEL` and `OPENAI_CONTENT_REVIEW_MODEL` no longer configure anything, and the server **refuses to start** while either is set. This is deliberate: ignoring them would silently drop AI content generation at the next restart, and a failed start is easier to diagnose than a silent downgrade. Unlike the Tutor variables above, there is no fallback path for these.
+> **Retired — remove these before upgrading.** `OPENAI_TUTOR_MODEL`, `OPENAI_TUTOR_OUTPUT_REVIEW_MODEL`, `OPENAI_CONTENT_GENERATION_MODEL`, and `OPENAI_CONTENT_REVIEW_MODEL` no longer configure anything, and the server **refuses to start** while any of them is set. This is deliberate: ignoring them would silently drop or misroute AI features at the next restart, and a failed start is easier to diagnose than a silent downgrade. There is no fallback path for these.
 
 `*_CONTEXT_CACHE` exists on all four channels and must stay unset or false. Enabling it is refused at startup because `ai_price_catalog` has no cache-write price field, so cached calls could not be costed correctly.
 
