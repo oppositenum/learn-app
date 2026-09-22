@@ -34,8 +34,8 @@ func TestEveryCuratedSeedAssetPassesDeterministicValidation(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if len(questionIDs) != 15 {
-		t.Fatalf("curated seed count=%d want=15", len(questionIDs))
+	if len(questionIDs) != 16 {
+		t.Fatalf("curated seed count=%d want=16", len(questionIDs))
 	}
 	for _, questionID := range questionIDs {
 		asset, generation, err := repository.LoadAsset(ctx, questionID)

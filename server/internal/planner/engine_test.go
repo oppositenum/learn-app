@@ -32,6 +32,29 @@ func TestBuildReviewOnlyExcludesNewContent(t *testing.T) {
 	}
 }
 
+func TestBuildPrefersFoundationWeakPointsOverLaterCatalog(t *testing.T) {
+	now := time.Date(2026, 9, 22, 9, 0, 0, 0, time.UTC)
+	plan := (Engine{}).Build(Input{Date: now, Preferences: Preferences{DailyMinutes: 30}, Candidates: []Candidate{
+		juniorCandidate(Candidate{SubjectCode: "ENGLISH", KnowledgePointID: "later-reading", FoundationPriority: foundationPriority("ENGLISH", "ENGLISH-JUN-READING-COMPREHENSION")}),
+		juniorCandidate(Candidate{SubjectCode: "ENGLISH", KnowledgePointID: "vocab", FoundationPriority: foundationPriority("ENGLISH", "ENGLISH-JUN-VOCABULARY")}),
+		juniorCandidate(Candidate{SubjectCode: "MATH", KnowledgePointID: "later-systems", FoundationPriority: foundationPriority("MATH", "MATH-JUN-LINEAR-SYSTEMS")}),
+		juniorCandidate(Candidate{SubjectCode: "MATH", KnowledgePointID: "linear", FoundationPriority: foundationPriority("MATH", "MATH-LINEAR-EQUATION")}),
+	}})
+	if len(plan.Blocks) != 2 {
+		t.Fatalf("expected one English and one Math block, got %+v", plan.Blocks)
+	}
+	bySubject := map[string]string{}
+	for _, block := range plan.Blocks {
+		bySubject[block.SubjectCode] = block.KnowledgePointID
+	}
+	if bySubject["ENGLISH"] != "vocab" {
+		t.Fatalf("english block=%s want vocab: %+v", bySubject["ENGLISH"], plan.Blocks)
+	}
+	if bySubject["MATH"] != "linear" {
+		t.Fatalf("math block=%s want linear: %+v", bySubject["MATH"], plan.Blocks)
+	}
+}
+
 func TestBuildEmitsOneBlockPerSubject(t *testing.T) {
 	now := time.Date(2026, 8, 29, 9, 0, 0, 0, time.UTC)
 	plan := (Engine{}).Build(Input{Date: now, Preferences: Preferences{DailyMinutes: 30}, Candidates: []Candidate{

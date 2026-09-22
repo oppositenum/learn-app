@@ -93,6 +93,24 @@ func TestSessionTimingDoesNotCapLongActiveStudy(t *testing.T) {
 	}
 }
 
+func TestAbandonPausedSessionInTxSQLKeepsPlanCardAvailable(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("could not locate lifecycle test source")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(sourceFile), "lifecycle.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(source)
+	if !strings.Contains(body, "func abandonPausedSessionInTx") {
+		t.Fatal("starting a new card from a paused classroom needs abandonPausedSessionInTx")
+	}
+	if !strings.Contains(body, `UPDATE learning_plan_blocks SET status='AVAILABLE' WHERE id=$1 AND status='ACTIVE'`) {
+		t.Fatal("pause and abandon must return today's plan card to AVAILABLE")
+	}
+}
+
 func TestLatestTimeDoesNotMoveActivityBackwards(t *testing.T) {
 	floor := time.Date(2030, 1, 1, 8, 0, 1, 0, time.UTC)
 	if got := latestTime(floor.Add(-time.Second), floor); !got.Equal(floor) {

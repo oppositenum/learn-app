@@ -106,7 +106,7 @@ func loadTutorProviderConfig(getenv environmentLookup) (tutorProviderConfig, err
 			BaseURL:        valueOrDefault(getenv(tutorGeneratorBaseURLEnv), legacyBaseURL),
 			APIKey:         valueOrDefault(getenv(tutorGeneratorAPIKeyEnv), legacyKey),
 			Model:          valueOrDefault(getenv(tutorGeneratorModelEnv), legacyGeneratorModel),
-			Shape:          valueOrDefault(getenv(tutorGeneratorShapeEnv), ai.ShapeResponses),
+			Shape:          valueOrDefault(getenv(tutorGeneratorShapeEnv), ai.ShapeChatCompletions),
 			RequestOverlay: generatorOverlay,
 		},
 		Reviewer: tutorChannelConfig{
@@ -114,14 +114,20 @@ func loadTutorProviderConfig(getenv environmentLookup) (tutorProviderConfig, err
 			BaseURL:        valueOrDefault(getenv(tutorReviewerBaseURLEnv), legacyBaseURL),
 			APIKey:         valueOrDefault(getenv(tutorReviewerAPIKeyEnv), legacyKey),
 			Model:          valueOrDefault(getenv(tutorReviewerModelEnv), legacyReviewerModel),
-			Shape:          valueOrDefault(getenv(tutorReviewerShapeEnv), ai.ShapeResponses),
+			Shape:          valueOrDefault(getenv(tutorReviewerShapeEnv), ai.ShapeChatCompletions),
 			RequestOverlay: reviewerOverlay,
 		},
 	}
 	if err := validateProviderChannel("Tutor generator", config.Generator); err != nil {
 		return tutorProviderConfig{}, err
 	}
+	if err := requireTutorOverlay("Tutor generator", config.Generator); err != nil {
+		return tutorProviderConfig{}, err
+	}
 	if err := validateProviderChannel("Tutor reviewer", config.Reviewer); err != nil {
+		return tutorProviderConfig{}, err
+	}
+	if err := requireTutorOverlay("Tutor reviewer", config.Reviewer); err != nil {
 		return tutorProviderConfig{}, err
 	}
 	if config.Generator.identity() == config.Reviewer.identity() {
@@ -182,6 +188,13 @@ func validateProviderChannel(name string, config providerChannelConfig) error {
 	case ai.ShapeResponses, ai.ShapeChatCompletions:
 	default:
 		return fmt.Errorf("%s API shape %q must be %q or %q", name, config.Shape, ai.ShapeResponses, ai.ShapeChatCompletions)
+	}
+	return nil
+}
+
+func requireTutorOverlay(name string, config providerChannelConfig) error {
+	if len(config.RequestOverlay) == 0 {
+		return fmt.Errorf("%s request overlay is required so reasoning mode stays off the 75s submit budget", name)
 	}
 	return nil
 }

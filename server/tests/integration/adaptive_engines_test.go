@@ -481,7 +481,7 @@ GROUP BY s.code ORDER BY s.code`)
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM questions q JOIN content_versions cv ON cv.question_id=q.id AND cv.version=q.content_version JOIN content_validations v ON v.question_id=q.id AND v.content_version=q.content_version AND v.status='PASS' JOIN content_reviews r ON r.question_id=q.id AND r.content_version=q.content_version AND r.schema_version=v.schema_version AND r.result='PASS' WHERE q.id::text LIKE '40000000-%' AND q.status='RELEASED'`).Scan(&releasedWithGate); err != nil {
 		t.Fatal(err)
 	}
-	if releasedWithGate != 15 {
+	if releasedWithGate != 16 {
 		t.Fatalf("released demo questions with full gate = %d", releasedWithGate)
 	}
 

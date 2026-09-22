@@ -88,6 +88,7 @@ test('keeps paused answer controls in the DOM and waits for an explicit resume',
   expect(wrapper.get('[data-testid="resume-session"]').text()).toContain('继续探索')
 	const guidance = wrapper.get('[data-testid="paused-support-guidance"]')
 	expect(guidance.text()).toContain('请先继续这次探索')
+	expect(wrapper.get('[data-testid="end-today-session"]').text()).toContain('今天先到这里')
 	const hint = wrapper.get('[data-testid="hint-support"]')
 	expect(hint.attributes('disabled')).toBe('')
 	await hint.trigger('click')

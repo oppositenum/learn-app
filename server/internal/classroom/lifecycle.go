@@ -72,6 +72,51 @@ func (service *Service) ResumeSession(ctx context.Context, userID, sessionID uui
 	return service.transitionSession(ctx, userID, sessionID, "RESUME")
 }
 
+func abandonPausedSessionInTx(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, now time.Time) error {
+	row, err := loadLifecycleRowByID(ctx, tx, sessionID)
+	if err != nil {
+		return err
+	}
+	if row.status != "PAUSED" {
+		return ErrAnotherSessionOpen
+	}
+	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET status='ABANDONED',ended_at=$2,accumulated_seconds=$3,actual_seconds=$3,last_resumed_at=NULL,last_activity_at=$2,processing_token=NULL,processing_until=NULL,version=version+1,timing_version=timing_version+1 WHERE id=$1`, sessionID, now, row.accumulatedSeconds); err != nil {
+		return err
+	}
+	row.version++
+	row.timingVersion++
+	if _, err := resolveFailedReviewOnAbandon(ctx, tx, row, now); err != nil {
+		return err
+	}
+	if row.planBlockID != nil {
+		if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status='AVAILABLE' WHERE id=$1 AND status='ACTIVE'`, *row.planBlockID); err != nil {
+			return err
+		}
+	}
+	row.status, row.lastResumedAt, row.lastActivityAt = "ABANDONED", nil, now
+	_, err = lifecycleEvent(ctx, tx, row, realtime.EventSessionAbandoned, "ABANDONED", row.accumulatedSeconds, now)
+	return err
+}
+
+func loadLifecycleRowByID(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID) (lifecycleRow, error) {
+	var row lifecycleRow
+	err := tx.QueryRow(ctx, `
+	SELECT ls.id,ls.student_id,ls.plan_block_id,ls.review_queue_id,ls.review_attempt_failed_at,
+	       ls.status,ls.started_at,ls.accumulated_seconds,
+	       ls.last_resumed_at,ls.last_activity_at,ls.version,ls.timing_version,ls.processing_until
+FROM learning_sessions ls
+WHERE ls.id=$1
+FOR UPDATE OF ls`, sessionID).Scan(
+		&row.sessionID, &row.studentID, &row.planBlockID, &row.reviewQueueID,
+		&row.reviewAttemptFailedAt, &row.status, &row.startedAt,
+		&row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.version, &row.timingVersion, &row.processingUntil,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return row, ErrSessionNotFound
+	}
+	return row, err
+}
+
 func (service *Service) AbandonSession(ctx context.Context, userID, sessionID uuid.UUID) (SessionTiming, error) {
 	if err := service.RecoverStaleSessions(ctx, userID); err != nil {
 		return SessionTiming{}, err
@@ -113,6 +158,11 @@ func (service *Service) transitionSession(ctx context.Context, userID, sessionID
 			}
 			row.timingVersion++
 			row.status, row.accumulatedSeconds, row.lastResumedAt, row.lastActivityAt = "PAUSED", total, nil, now
+			if row.planBlockID != nil {
+				if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status='AVAILABLE' WHERE id=$1 AND status='ACTIVE'`, *row.planBlockID); err != nil {
+					return err
+				}
+			}
 			event, err := lifecycleEvent(ctx, tx, row, realtime.EventSessionPaused, "PAUSED", total, now)
 			if err != nil {
 				return err
@@ -134,6 +184,11 @@ func (service *Service) transitionSession(ctx context.Context, userID, sessionID
 			}
 			row.timingVersion++
 			row.status, row.lastResumedAt, row.lastActivityAt = "ACTIVE", &now, now
+			if row.planBlockID != nil {
+				if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status='ACTIVE' WHERE id=$1 AND status='AVAILABLE'`, *row.planBlockID); err != nil {
+					return err
+				}
+			}
 			event, err := lifecycleEvent(ctx, tx, row, realtime.EventSessionResumed, "ACTIVE", row.accumulatedSeconds, now)
 			if err != nil {
 				return err

@@ -25,16 +25,27 @@ var ErrTutorOutputAuditorUnavailable = errors.New("independent Tutor output audi
 // provider without its subject and knowledge point.
 var ErrTutorTeachingContextMissing = errors.New("teaching context is required for a Tutor request")
 
+// ErrTutorSubjectUnsupported keeps a teaching request from reaching a provider
+// with a subject the five-subject classroom does not teach. An empty default
+// would let an unknown code inherit no rules and then invent its own.
+var ErrTutorSubjectUnsupported = errors.New("teaching subject is not supported")
+
 // subjectInstructions adds the rules that differ by subject. The subject comes
 // from released curriculum data, never from reading the question text.
-func subjectInstructions(teaching content.TeachingContext) string {
+func subjectInstructions(teaching content.TeachingContext) (string, error) {
 	switch teaching.SubjectCode {
-	case "ENGLISH", "CHINESE":
-		return " " + languageReadingInstructions
-	case "MATH", "PHYSICS", "CHEMISTRY":
-		return " " + mathGoalInstructions
+	case "ENGLISH":
+		return " " + languageReadingInstructions, nil
+	case "CHINESE":
+		return " " + chineseInstructions, nil
+	case "MATH":
+		return " " + mathGoalInstructions, nil
+	case "PHYSICS":
+		return " " + physicsInstructions, nil
+	case "CHEMISTRY":
+		return " " + chemistryInstructions, nil
 	default:
-		return ""
+		return "", fmt.Errorf("%w: %s", ErrTutorSubjectUnsupported, teaching.SubjectCode)
 	}
 }
 
@@ -135,8 +146,12 @@ func (provider *CodexProvider) analyzeAnswerWithRetry(ctx context.Context, reque
 	// the payload was not enough: a reading answer could still be judged as
 	// arithmetic here, and by the time generation applied the rules the wrong
 	// reading had already been fixed.
+	subjectRule, err := subjectInstructions(request.Question.Teaching)
+	if err != nil {
+		return err
+	}
 	instructions := analyzeAnswerInstructions + " " + teachingContextInstructions +
-		subjectInstructions(request.Question.Teaching) + " " + outputShapeInstructions
+		subjectRule + " " + outputShapeInstructions
 	for attempt := 1; attempt <= provider.generationRetry.maxAttempts; attempt++ {
 		requestID := uuid.NewString()
 		lastRequestID = requestID
@@ -222,9 +237,13 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	if !request.Teaching.Complete() {
 		return TutorTurn{}, ErrTutorTeachingContextMissing
 	}
+	subjectRule, err := subjectInstructions(request.Teaching)
+	if err != nil {
+		return TutorTurn{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, tutorOutputOperationTimeout)
 	defer cancel()
-	instructions = instructions + " " + teachingContextInstructions + subjectInstructions(request.Teaching) +
+	instructions = instructions + " " + teachingContextInstructions + subjectRule +
 		" " + turnStyleInstructions + " " + outputShapeInstructions
 	requiredAction := string(request.TutorDecision.NextState)
 	if request.TutorDecision.NextState == tutor.StateHint {

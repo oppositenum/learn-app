@@ -841,8 +841,17 @@ func TestTutorRequestCarriesSubjectAndKnowledgePoint(t *testing.T) {
 				SubjectCode: "ENGLISH", SubjectName: "英语",
 				KnowledgePointCode: "ENG-READ-DETAIL", KnowledgePointName: "英语阅读细节",
 			},
-			wantInstruction:   "language reading task",
+			wantInstruction:   "English language task",
 			rejectInstruction: "mathematics task",
+		},
+		{
+			name: "chinese poetry is not turned into reading-locate arithmetic",
+			teaching: content.TeachingContext{
+				SubjectCode: "CHINESE", SubjectName: "语文",
+				KnowledgePointCode: "CHINESE-POETRY-IMAGERY", KnowledgePointName: "古诗意象理解",
+			},
+			wantInstruction:   "Chinese language task",
+			rejectInstruction: "English language task",
 		},
 		{
 			name: "mathematics states the whole goal",
@@ -851,7 +860,25 @@ func TestTutorRequestCarriesSubjectAndKnowledgePoint(t *testing.T) {
 				KnowledgePointCode: "MATH-JUN-LINEAR-EQUATION", KnowledgePointName: "一元一次方程",
 			},
 			wantInstruction:   "mathematics task",
-			rejectInstruction: "language reading task",
+			rejectInstruction: "English language task",
+		},
+		{
+			name: "physics uses household motion rather than algebra",
+			teaching: content.TeachingContext{
+				SubjectCode: "PHYSICS", SubjectName: "物理",
+				KnowledgePointCode: "PHYSICS-SPEED", KnowledgePointName: "速度",
+			},
+			wantInstruction:   "physics task",
+			rejectInstruction: "mathematics task",
+		},
+		{
+			name: "chemistry uses kitchen observation rather than equations",
+			teaching: content.TeachingContext{
+				SubjectCode: "CHEMISTRY", SubjectName: "化学",
+				KnowledgePointCode: "CHEMISTRY-CHANGE-TYPES", KnowledgePointName: "物理变化与化学变化",
+			},
+			wantInstruction:   "chemistry task",
+			rejectInstruction: "mathematics task",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -892,6 +919,31 @@ func TestTutorRequestCarriesSubjectAndKnowledgePoint(t *testing.T) {
 				t.Fatalf("instructions carried the other subject's rule %q", test.rejectInstruction)
 			}
 		})
+	}
+}
+
+func TestTutorRequestFailsClosedOnUnknownSubject(t *testing.T) {
+	teaching := content.TeachingContext{
+		SubjectCode: "HISTORY", SubjectName: "历史",
+		KnowledgePointCode: "HIST-ANY", KnowledgePointName: "任意知识点",
+	}
+	client := &structuredClientStub{result: StructuredResult{OutputJSON: json.RawMessage(`{"message":"x","action":"PROBE","answer_revealed":false,"segments":[]}`)}}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+		Teaching: teaching, TutorDecision: tutor.Decision{NextState: tutor.StateProbe},
+	}); !errors.Is(err, ErrTutorSubjectUnsupported) {
+		t.Fatalf("generation error=%v", err)
+	}
+	if _, err := provider.AnalyzeAnswer(context.Background(), AnalyzeAnswerRequest{
+		Question: content.QuestionForTeaching{Teaching: teaching},
+	}); !errors.Is(err, ErrTutorSubjectUnsupported) {
+		t.Fatalf("analysis error=%v", err)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("provider received %d request(s) for an unknown subject", len(client.requests))
 	}
 }
 
@@ -966,7 +1018,7 @@ func TestAnswerAnalysisCarriesTheTeachingRules(t *testing.T) {
 				SubjectCode: "ENGLISH", SubjectName: "英语",
 				KnowledgePointCode: "ENG-READ-DETAIL", KnowledgePointName: "英语阅读细节",
 			},
-			wantInstruction:   "language reading task",
+			wantInstruction:   "English language task",
 			rejectInstruction: "mathematics task",
 		},
 		{
@@ -976,7 +1028,7 @@ func TestAnswerAnalysisCarriesTheTeachingRules(t *testing.T) {
 				KnowledgePointCode: "MATH-JUN-LINEAR-EQUATION", KnowledgePointName: "一元一次方程",
 			},
 			wantInstruction:   "mathematics task",
-			rejectInstruction: "language reading task",
+			rejectInstruction: "English language task",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

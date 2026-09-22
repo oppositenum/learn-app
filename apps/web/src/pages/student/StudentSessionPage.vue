@@ -331,7 +331,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
             这次探索已暂停
           </p>
           <p class="mt-1 text-sm text-zinc-600">
-            要使用「一点提示」或「我不会」，请先继续这次探索。
+            要使用「一点提示」或「我不会」，请先继续这次探索。今天先停在这里，也可以回到今日计划换另一张卡片。
           </p>
           <button
             type="button"
@@ -341,6 +341,15 @@ onBeforeUnmount(() => window.clearInterval(timer))
             @click="learning.resumeSession()"
           >
             <RefreshCw :size="17" />{{ learning.loading ? '正在继续' : '继续探索' }}
+          </button>
+          <button
+            type="button"
+            data-testid="end-today-session"
+            class="secondary-button ml-3 mt-3"
+            :disabled="learning.loading"
+            @click="abandon"
+          >
+            今天先到这里
           </button>
         </div>
 

@@ -29,6 +29,7 @@ type Candidate struct {
 	GradeBandMin        int
 	GradeBandMax        int
 	SkillScore          float64
+	FoundationPriority  int
 	ReviewDueAt         *time.Time
 	ActiveMisconception bool
 	ParentPriority      bool
@@ -82,6 +83,9 @@ func (Engine) Build(input Input) Plan {
 		left, right := candidateRank(candidates[i], now, input.Preferences.ReviewOnly), candidateRank(candidates[j], now, input.Preferences.ReviewOnly)
 		if left != right {
 			return left > right
+		}
+		if candidates[i].FoundationPriority != candidates[j].FoundationPriority {
+			return candidates[i].FoundationPriority > candidates[j].FoundationPriority
 		}
 		if candidates[i].SkillScore != candidates[j].SkillScore {
 			return candidates[i].SkillScore < candidates[j].SkillScore
@@ -181,10 +185,41 @@ func candidateRank(candidate Candidate, now time.Time, reviewOnly bool) int {
 	if candidate.ParentPriority {
 		score += 30
 	}
+	if candidate.FoundationPriority > 0 {
+		score += candidate.FoundationPriority
+	}
 	if reviewOnly && isReview(candidate, now) {
 		score += 200
 	}
 	return score
+}
+
+// foundationPriority ranks life-context weak-point work above later-year
+// skeleton points when both have a released question. English vocabulary is
+// this child's first gap; junior math modeling sits behind later algebra.
+func foundationPriority(subjectCode, knowledgePointCode string) int {
+	switch knowledgePointCode {
+	case "ENGLISH-JUN-VOCABULARY", "ENGLISH-PRI-COMMON-VOCABULARY":
+		return 50
+	case "ENGLISH-THERE-IS-ARE", "ENGLISH-SIMPLE-PRESENT":
+		return 40
+	case "MATH-LINEAR-EQUATION", "MATH-JUN-REMOVE-PARENTHESES", "MATH-JUN-ALGEBRAIC-EXPRESSION":
+		return 35
+	case "MATH-FRACTION-COMMON-DENOMINATOR", "MATH-PERCENT-DISCOUNT":
+		return 30
+	case "CHINESE-INFORMATION-EXTRACTION", "CHINESE-EVIDENCE-LOCATION":
+		return 25
+	case "PHYSICS-SPEED", "PHYSICS-FORCE", "CHEMISTRY-CHANGE-TYPES", "CHEMISTRY-ELEMENT-SYMBOL":
+		return 20
+	}
+	switch subjectCode {
+	case "ENGLISH":
+		return 15
+	case "MATH":
+		return 10
+	default:
+		return 0
+	}
 }
 
 func isReview(candidate Candidate, now time.Time) bool {

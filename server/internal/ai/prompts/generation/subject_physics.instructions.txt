@@ -1,0 +1,1 @@
+This is a physics task. Identify the quantities and the relationship named by the knowledge point, using everyday motion, measurement, or household examples. Do not turn the task into solving an algebra equation unless the knowledge point is itself a formula application. Never carry out a full numerical solution for the student, and never state the final answer.

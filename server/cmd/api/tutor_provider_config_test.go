@@ -13,6 +13,8 @@ func TestTutorProviderConfigPreservesLegacyOpenAIBehavior(t *testing.T) {
 		"OPENAI_BASE_URL":                  "https://legacy.example/v1",
 		"OPENAI_TUTOR_MODEL":               "legacy-generator",
 		"OPENAI_TUTOR_OUTPUT_REVIEW_MODEL": "legacy-reviewer",
+		tutorGeneratorOverlayEnv:           `{"reasoning":{"effort":"low"}}`,
+		tutorReviewerOverlayEnv:            `{"reasoning":{"effort":"low"}}`,
 	}
 	config, err := loadTutorProviderConfig(mapLookup(values))
 	if err != nil {
@@ -40,6 +42,8 @@ func TestTutorProviderConfigSupportsIndependentChannels(t *testing.T) {
 		tutorReviewerBaseURLEnv:   "https://reviewer.example/v1",
 		tutorReviewerAPIKeyEnv:    "reviewer-key",
 		tutorReviewerModelEnv:     "reviewer-model",
+		tutorGeneratorOverlayEnv:  `{"thinking":{"type":"disabled"}}`,
+		tutorReviewerOverlayEnv:   `{"enable_thinking":false}`,
 	}
 	config, err := loadTutorProviderConfig(mapLookup(values))
 	if err != nil {
@@ -63,6 +67,8 @@ func TestTutorProviderConfigRejectsSameIdentityAtStartup(t *testing.T) {
 		tutorReviewerBaseURLEnv:   "https://reviewer.example/v1",
 		tutorReviewerAPIKeyEnv:    "reviewer-key",
 		tutorReviewerModelEnv:     "same-model",
+		tutorGeneratorOverlayEnv:  `{"thinking":{"type":"disabled"}}`,
+		tutorReviewerOverlayEnv:   `{"enable_thinking":false}`,
 	}
 	_, err := loadTutorProviderConfig(mapLookup(values))
 	if err == nil || !strings.Contains(err.Error(), "different provider:model identities") || !strings.Contains(err.Error(), "provider-a:same-model") {
@@ -148,6 +154,8 @@ func TestTutorProviderConfigShapeAndOverlay(t *testing.T) {
 		"TUTOR_GENERATOR_API_KEY": "gk", "TUTOR_GENERATOR_MODEL": "doubao-pro",
 		"TUTOR_REVIEWER_PROVIDER": "qwen", "TUTOR_REVIEWER_BASE_URL": "https://dashscope.example/v1",
 		"TUTOR_REVIEWER_API_KEY": "rk", "TUTOR_REVIEWER_MODEL": "qwen-plus",
+		"TUTOR_GENERATOR_REQUEST_OVERLAY": `{"thinking":{"type":"disabled"}}`,
+		"TUTOR_REVIEWER_REQUEST_OVERLAY":  `{"enable_thinking":false}`,
 	}
 	with := func(extra map[string]string) func(string) string {
 		return func(name string) string {
@@ -176,13 +184,21 @@ func TestTutorProviderConfigShapeAndOverlay(t *testing.T) {
 		}
 	})
 
-	t.Run("default shape stays responses for existing deployments", func(t *testing.T) {
+	t.Run("default shape is chat_completions so schema is enforced", func(t *testing.T) {
 		config, err := loadTutorProviderConfig(with(nil))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if config.Generator.Shape != "responses" || config.Reviewer.Shape != "responses" {
+		if config.Generator.Shape != "chat_completions" || config.Reviewer.Shape != "chat_completions" {
 			t.Fatalf("default shapes=%s/%s", config.Generator.Shape, config.Reviewer.Shape)
+		}
+	})
+	t.Run("empty overlay is refused", func(t *testing.T) {
+		_, err := loadTutorProviderConfig(with(map[string]string{
+			"TUTOR_GENERATOR_REQUEST_OVERLAY": "",
+		}))
+		if err == nil || !strings.Contains(err.Error(), "request overlay is required") {
+			t.Fatalf("empty overlay error=%v", err)
 		}
 	})
 

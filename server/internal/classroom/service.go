@@ -138,6 +138,7 @@ type sessionRow struct {
 	state                                              tutor.State
 	fails                                              int
 	answer                                             string
+	scoringKey                                         json.RawMessage
 	misconceptions                                     json.RawMessage
 	version                                            int64
 	timingVersion                                      int64
@@ -156,10 +157,11 @@ type sessionRow struct {
 }
 
 type preparedAgent struct {
-	version  int64
-	analysis ai.AnalyzeAnswerResult
-	decision tutor.Decision
-	turn     ai.TutorTurn
+	version            int64
+	analysis           ai.AnalyzeAnswerResult
+	decision           tutor.Decision
+	turn               ai.TutorTurn
+	deterministicMatch bool
 }
 
 type preparedVoice struct {
@@ -236,18 +238,14 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 		// AI/provider wait is not learning time. The operation start is the
 		// authoritative activity checkpoint for this submission.
 		now = latestTime(operationStartedAt, row.lastActivityAt)
-		deterministicCorrect := normalized(answer) == normalized(row.answer)
-		correct := deterministicCorrect
-		if prepared != nil && prepared.analysis.AnswerCorrect && prepared.analysis.Confidence >= 0.9 {
-			correct = true
-		}
+		evaluation := evaluateSubmittedAnswer(answer, row.answer, row.scoringKey, prepared)
 		answerID := uuid.New()
 		evaluationProvenanceID := uuid.New()
 		var rawAnalysis *ai.AnalyzeAnswerResult
-		if prepared != nil {
+		if prepared != nil && !prepared.deterministicMatch {
 			rawAnalysis = &prepared.analysis
 		}
-		provenance := legacyAnswerEvaluationProvenance(deterministicCorrect, rawAnalysis, correct)
+		provenance := legacyAnswerEvaluationProvenance(evaluation.deterministicCorrect, rawAnalysis, evaluation.correct)
 		turnSequence, eventSequence, err := nextSequences(ctx, tx, sessionID)
 		if err != nil {
 			return err
@@ -259,21 +257,21 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 			return err
 		}
 		errorType := "NONE"
-		reasoningQuality := reasoning(correct)
+		reasoningQuality := reasoning(evaluation.correct)
 		emotionSignal := "NEUTRAL"
 		engagement := "NORMAL"
 		analysisMisconceptions := row.misconceptions
 		recommended := string(tutor.StateVariant)
-		if !correct {
+		if !evaluation.correct {
 			errorType, recommended = firstMisconception(row.misconceptions), string(nextDecision(row).NextState)
 		}
 		confidence := 1.0
-		if prepared != nil {
+		if prepared != nil && !prepared.deterministicMatch {
 			reasoningQuality = prepared.analysis.ReasoningQuality
 			emotionSignal = prepared.analysis.EmotionSignal
 			engagement = prepared.analysis.Engagement
 			confidence = prepared.analysis.Confidence
-			if !correct {
+			if !evaluation.correct {
 				if prepared.analysis.ErrorType != "" {
 					errorType = prepared.analysis.ErrorType
 				}
@@ -283,7 +281,7 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 				recommended = string(prepared.decision.NextState)
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO answer_analyses (id,student_answer_id,answer_correct,reasoning_quality,confidence,error_type,misconceptions_private_json,emotion_signal,engagement,recommended_action) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.New(), answerID, correct, reasoningQuality, confidence, errorType, misconceptionPayload(correct, analysisMisconceptions), emotionSignal, engagement, recommended); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO answer_analyses (id,student_answer_id,answer_correct,reasoning_quality,confidence,error_type,misconceptions_private_json,emotion_signal,engagement,recommended_action) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.New(), answerID, evaluation.correct, reasoningQuality, confidence, errorType, misconceptionPayload(evaluation.correct, analysisMisconceptions), emotionSignal, engagement, recommended); err != nil {
 			return err
 		}
 		if err := insertAnswerEvaluationProvenance(ctx, tx, evaluationProvenanceID, answerID, provenance, now); err != nil {
@@ -298,14 +296,14 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 		}
 		published = append(published, submittedEvent)
 		analyzedStudent, _ := json.Marshal(map[string]any{"status": "ANALYZED"})
-		analyzedParent, _ := json.Marshal(map[string]any{"answer_visibility": "REFRESH_LIVE_ENDPOINT", "correct_answer": row.answer, "answer_correct": correct, "reasoning_quality": reasoningQuality, "confidence": confidence, "error_type": errorType, "misconception": misconceptionCode, "emotion_signal": emotionSignal, "engagement": engagement, "recommended_action": recommended})
+		analyzedParent, _ := json.Marshal(map[string]any{"answer_visibility": "REFRESH_LIVE_ENDPOINT", "correct_answer": row.answer, "answer_correct": evaluation.correct, "reasoning_quality": reasoningQuality, "confidence": confidence, "error_type": errorType, "misconception": misconceptionCode, "emotion_signal": emotionSignal, "engagement": engagement, "recommended_action": recommended})
 		analyzedEvent := makeEvent(row.studentID, sessionID, eventSequence+1, realtime.EventAnswerAnalyzed, analyzedStudent, analyzedParent, now)
 		if err := insertEvent(ctx, tx, analyzedEvent); err != nil {
 			return err
 		}
 		published = append(published, analyzedEvent)
 		eventSequence += 2
-		if prepared != nil {
+		if prepared != nil && !prepared.deterministicMatch {
 			aiStudent, _ := json.Marshal(map[string]any{"status": "COMPLETED"})
 			aiParent, _ := json.Marshal(map[string]any{"status": "COMPLETED", "purpose": "ANSWER_ANALYSIS"})
 			aiEvent := makeEvent(row.studentID, sessionID, eventSequence, realtime.EventAITurnCompleted, aiStudent, aiParent, now)
@@ -315,7 +313,7 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 			published = append(published, aiEvent)
 			eventSequence++
 		}
-		if !correct {
+		if !evaluation.correct {
 			if err := recordMisconceptions(ctx, tx, row, sessionID, now, misconceptionCodes(analysisMisconceptions)); err != nil {
 				return err
 			}
@@ -324,7 +322,7 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 			}
 		}
 
-		if correct {
+		if evaluation.correct {
 			var completedEvents []realtime.Event
 			result, completedEvents, err = service.complete(ctx, tx, row, sessionID, answerID, evaluationProvenanceID, provenance, turnSequence+1, eventSequence, now)
 			published = append(published, completedEvents...)
@@ -336,7 +334,7 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 		decision := nextDecision(row)
 		message := tutorMessage(decision.NextState)
 		responseID := ""
-		if prepared != nil {
+		if prepared != nil && !prepared.deterministicMatch {
 			decision = prepared.decision
 			message = prepared.turn.Message
 			responseID = prepared.turn.ResponseID
@@ -560,7 +558,7 @@ func (service *Service) currentState(ctx context.Context, studentUserID, session
 
 func (service *Service) prepareVoice(ctx context.Context, studentUserID, sessionID, operationToken uuid.UUID, answer string, prepared *preparedAgent, now time.Time) (*preparedVoice, error) {
 	var row sessionRow
-	err := service.pool.QueryRow(ctx, `SELECT ls.student_id,ls.current_state,ls.socratic_fail_count,a.teacher_reference_answer,ls.version,ls.status,ls.processing_token,ls.processing_until FROM learning_sessions ls JOIN students st ON st.id=ls.student_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED' JOIN question_private_answers a ON a.question_id=q.id WHERE ls.id=$1 AND st.user_id=$2`, sessionID, studentUserID).Scan(&row.studentID, &row.state, &row.fails, &row.answer, &row.version, &row.status, &row.processingToken, &row.processingUntil)
+	err := service.pool.QueryRow(ctx, `SELECT ls.student_id,ls.current_state,ls.socratic_fail_count,a.teacher_reference_answer,a.scoring_key_json,ls.version,ls.status,ls.processing_token,ls.processing_until FROM learning_sessions ls JOIN students st ON st.id=ls.student_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED' JOIN question_private_answers a ON a.question_id=q.id WHERE ls.id=$1 AND st.user_id=$2`, sessionID, studentUserID).Scan(&row.studentID, &row.state, &row.fails, &row.answer, &row.scoringKey, &row.version, &row.status, &row.processingToken, &row.processingUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
@@ -573,11 +571,7 @@ func (service *Service) prepareVoice(ctx context.Context, studentUserID, session
 	if !service.operationLeaseValid(row.processingToken, row.processingUntil, operationToken) {
 		return nil, ErrClassroomChanged
 	}
-	correct := normalized(answer) == normalized(row.answer)
-	if prepared != nil && prepared.analysis.AnswerCorrect && prepared.analysis.Confidence >= 0.9 {
-		correct = true
-	}
-	if correct {
+	if evaluateSubmittedAnswer(answer, row.answer, row.scoringKey, prepared).correct {
 		return nil, nil
 	}
 	decision := nextDecision(row)
@@ -810,7 +804,7 @@ func (service *Service) operationLeaseValid(token *uuid.UUID, until *time.Time, 
 
 func loadSessionRow(ctx context.Context, tx pgx.Tx, userID, sessionID uuid.UUID) (sessionRow, error) {
 	var row sessionRow
-	err := tx.QueryRow(ctx, `SELECT ls.student_id,ls.current_question_id,q.knowledge_point_id,ls.subject_id,ls.plan_block_id,ls.review_queue_id,ls.current_state,ls.socratic_fail_count,a.teacher_reference_answer,a.misconceptions_private_json,ls.version,ls.timing_version,COALESCE(ls.teaching_response_id,''),ls.evidence_form,ls.original_task_id,ls.active_task_id,ls.started_at,ls.accumulated_seconds,ls.last_resumed_at,ls.last_activity_at,ls.assistance_level,ls.status,ls.processing_token,ls.processing_until,ls.review_attempt_failed_at FROM learning_sessions ls JOIN students st ON st.id=ls.student_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED' JOIN question_private_answers a ON a.question_id=q.id WHERE ls.id=$1 AND st.user_id=$2 FOR UPDATE OF ls`, sessionID, userID).Scan(&row.studentID, &row.questionID, &row.knowledgePointID, &row.subjectID, &row.planBlockID, &row.reviewQueueID, &row.state, &row.fails, &row.answer, &row.misconceptions, &row.version, &row.timingVersion, &row.responseID, &row.evidenceForm, &row.originalTaskID, &row.activeTaskID, &row.startedAt, &row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.assistanceLevel, &row.status, &row.processingToken, &row.processingUntil, &row.reviewAttemptFailedAt)
+	err := tx.QueryRow(ctx, `SELECT ls.student_id,ls.current_question_id,q.knowledge_point_id,ls.subject_id,ls.plan_block_id,ls.review_queue_id,ls.current_state,ls.socratic_fail_count,a.teacher_reference_answer,a.scoring_key_json,a.misconceptions_private_json,ls.version,ls.timing_version,COALESCE(ls.teaching_response_id,''),ls.evidence_form,ls.original_task_id,ls.active_task_id,ls.started_at,ls.accumulated_seconds,ls.last_resumed_at,ls.last_activity_at,ls.assistance_level,ls.status,ls.processing_token,ls.processing_until,ls.review_attempt_failed_at FROM learning_sessions ls JOIN students st ON st.id=ls.student_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED' JOIN question_private_answers a ON a.question_id=q.id WHERE ls.id=$1 AND st.user_id=$2 FOR UPDATE OF ls`, sessionID, userID).Scan(&row.studentID, &row.questionID, &row.knowledgePointID, &row.subjectID, &row.planBlockID, &row.reviewQueueID, &row.state, &row.fails, &row.answer, &row.scoringKey, &row.misconceptions, &row.version, &row.timingVersion, &row.responseID, &row.evidenceForm, &row.originalTaskID, &row.activeTaskID, &row.startedAt, &row.accumulatedSeconds, &row.lastResumedAt, &row.lastActivityAt, &row.assistanceLevel, &row.status, &row.processingToken, &row.processingUntil, &row.reviewAttemptFailedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return row, ErrSessionNotFound
 	}
@@ -825,10 +819,11 @@ func (service *Service) prepareAgent(ctx context.Context, userID, sessionID, ope
 	var state tutor.State
 	var fails int
 	var version int64
-	var responseID, status string
+	var responseID, status, referenceAnswer string
+	var scoringKey json.RawMessage
 	var processingToken *uuid.UUID
 	var processingUntil *time.Time
-	err := service.pool.QueryRow(ctx, `SELECT ls.student_id,ls.current_question_id,ls.current_state,ls.socratic_fail_count,ls.version,COALESCE(ls.teaching_response_id,''),ls.status,ls.processing_token,ls.processing_until FROM learning_sessions ls JOIN students st ON st.id=ls.student_id WHERE ls.id=$1 AND st.user_id=$2`, sessionID, userID).Scan(&studentID, &questionID, &state, &fails, &version, &responseID, &status, &processingToken, &processingUntil)
+	err := service.pool.QueryRow(ctx, `SELECT ls.student_id,ls.current_question_id,ls.current_state,ls.socratic_fail_count,ls.version,COALESCE(ls.teaching_response_id,''),ls.status,ls.processing_token,ls.processing_until,a.teacher_reference_answer,a.scoring_key_json FROM learning_sessions ls JOIN students st ON st.id=ls.student_id JOIN questions q ON q.id=ls.current_question_id AND q.status='RELEASED' JOIN question_private_answers a ON a.question_id=q.id WHERE ls.id=$1 AND st.user_id=$2`, sessionID, userID).Scan(&studentID, &questionID, &state, &fails, &version, &responseID, &status, &processingToken, &processingUntil, &referenceAnswer, &scoringKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
@@ -841,6 +836,18 @@ func (service *Service) prepareAgent(ctx context.Context, userID, sessionID, ope
 	if !service.operationLeaseValid(processingToken, processingUntil, operationToken) {
 		return nil, ErrClassroomChanged
 	}
+	if answersMatch(answer, referenceAnswer, scoringKey) {
+		return &preparedAgent{
+			version: version,
+			analysis: ai.AnalyzeAnswerResult{
+				AnswerCorrect: true, ReasoningQuality: "STRONG", Confidence: 1,
+				ErrorType: "NONE", EmotionSignal: "NEUTRAL", Engagement: "NORMAL",
+				RecommendedAction: tutor.StateVariant,
+			},
+			decision:           tutor.Decision{NextState: tutor.StateVariant, Reason: "deterministic match; skip model analysis"},
+			deterministicMatch: true,
+		}, nil
+	}
 	question, err := content.NewRepository(service.pool).ReleasedQuestionForTeaching(ctx, questionID)
 	if err != nil {
 		return nil, err
@@ -849,11 +856,26 @@ func (service *Service) prepareAgent(ctx context.Context, userID, sessionID, ope
 	if err != nil {
 		return nil, err
 	}
-	analysis, err := service.agent.AnalyzeAnswer(ctx, ai.AnalyzeAnswerRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question, StudentAnswer: answer, PriorTurns: prior})
-	if err != nil {
-		return nil, err
+	helpRequested := unmatchedHelpRequest(answer, referenceAnswer, scoringKey)
+	var analysis ai.AnalyzeAnswerResult
+	if helpRequested {
+		analysis = ai.AnalyzeAnswerResult{
+			AnswerCorrect: false, ReasoningQuality: "WEAK", Confidence: 1,
+			ErrorType: "HELP_REQUEST", EmotionSignal: "NEUTRAL", Engagement: "NORMAL",
+			RecommendedAction: tutor.StateHint,
+		}
+	} else {
+		analysis, err = service.agent.AnalyzeAnswer(ctx, ai.AnalyzeAnswerRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question, StudentAnswer: answer, PriorTurns: prior})
+		if err != nil {
+			return nil, err
+		}
 	}
-	serverAnalysis := tutor.Analysis{AnswerCorrect: analysis.AnswerCorrect, ReasoningQuality: parseReasoning(analysis.ReasoningQuality), PrerequisiteGap: analysis.RecommendedAction == tutor.StateBacktrack, Emotion: parseEmotion(analysis.EmotionSignal), VoicePreferred: analysis.RecommendedAction == tutor.StateVoiceExplain}
+	serverAnalysis := tutor.Analysis{
+		AnswerCorrect: analysis.AnswerCorrect, ReasoningQuality: parseReasoning(analysis.ReasoningQuality),
+		PrerequisiteGap: analysis.RecommendedAction == tutor.StateBacktrack, Emotion: parseEmotion(analysis.EmotionSignal),
+		HintRequested: helpRequested || analysis.RecommendedAction == tutor.StateHint,
+		DontKnow:      helpRequested, VoicePreferred: analysis.RecommendedAction == tutor.StateVoiceExplain,
+	}
 	decision := tutor.NewEngine(3).Decide(tutor.Session{State: state, SocraticFailedRounds: fails, ActiveTaskID: questionID.String()}, serverAnalysis)
 	prepared := &preparedAgent{version: version, analysis: analysis, decision: decision}
 	if decision.NextState == tutor.StateVariant {
@@ -1174,6 +1196,92 @@ func (service *Service) recordEvent(ctx context.Context, studentID, sessionID uu
 	return event, err
 }
 func normalized(value string) string { return strings.Join(strings.Fields(strings.ToLower(value)), "") }
+
+func foldAnswer(value string) string {
+	folded := strings.ToLower(value)
+	replacer := strings.NewReplacer(
+		"＝", "=", "－", "-", "—", "-", "–", "-", "＋", "+", "×", "*", "÷", "/",
+		"（", "(", "）", ")", "，", ",", "。", "", "；", ";", "：", ":",
+		"元", "", "每张", "", "门票", "", "的价格", "", "价格", "",
+	)
+	folded = replacer.Replace(folded)
+	return strings.Join(strings.Fields(folded), "")
+}
+
+type submittedEvaluation struct {
+	deterministicCorrect bool
+	correct              bool
+}
+
+func evaluateSubmittedAnswer(answer, reference string, scoringKey json.RawMessage, prepared *preparedAgent) submittedEvaluation {
+	matched := answersMatch(answer, reference, scoringKey)
+	if prepared != nil && prepared.deterministicMatch {
+		matched = true
+	}
+	evaluation := submittedEvaluation{deterministicCorrect: matched, correct: matched}
+	if unmatchedHelpRequest(answer, reference, scoringKey) {
+		return evaluation
+	}
+	if prepared != nil && !prepared.deterministicMatch && prepared.analysis.AnswerCorrect && prepared.analysis.Confidence >= 0.9 {
+		evaluation.correct = true
+	}
+	return evaluation
+}
+
+func unmatchedHelpRequest(answer, reference string, scoringKey json.RawMessage) bool {
+	return !answersMatch(answer, reference, scoringKey) && isHelpRequest(answer)
+}
+
+func answersMatch(answer, reference string, scoringKey json.RawMessage) bool {
+	if foldAnswer(answer) != "" && foldAnswer(answer) == foldAnswer(reference) {
+		return true
+	}
+	if normalized(answer) != "" && normalized(answer) == normalized(reference) {
+		return true
+	}
+	for _, candidate := range acceptedAnswers(scoringKey) {
+		if foldAnswer(answer) == foldAnswer(candidate) || normalized(answer) == normalized(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func acceptedAnswers(scoringKey json.RawMessage) []string {
+	if len(scoringKey) == 0 {
+		return nil
+	}
+	var parsed struct {
+		Accepted []string `json:"accepted_answers"`
+	}
+	if err := json.Unmarshal(scoringKey, &parsed); err != nil {
+		return nil
+	}
+	return parsed.Accepted
+}
+
+func isHelpRequest(answer string) bool {
+	folded := strings.ToLower(strings.TrimSpace(answer))
+	if folded == "" {
+		return false
+	}
+	phrases := []string{
+		"看不懂", "我看不懂", "我不会", "我不知道", "我不懂", "什么意思", "是什么意思",
+		"求助", "帮我", "给我提示", "unknown word", "don't know", "dont know",
+		"i don't know", "i dont know", "cannot read", "can't read", "cant read",
+	}
+	for _, phrase := range phrases {
+		if strings.Contains(folded, phrase) {
+			return true
+		}
+	}
+	switch folded {
+	case "不会", "不懂", "不知道", "提示", "hint", "help":
+		return true
+	default:
+		return false
+	}
+}
 func reasoning(correct bool) string {
 	if correct {
 		return "STRONG"

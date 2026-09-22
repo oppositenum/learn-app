@@ -131,8 +131,8 @@ channels; speech still uses the OpenAI variables.
 Each text channel takes `_PROVIDER`, `_BASE_URL`, `_API_KEY`, `_MODEL`, and
 optionally `_API_SHAPE` (`responses` or `chat_completions`) and
 `_REQUEST_OVERLAY`. `_BASE_URL` is required for any provider other than
-`openai`. `_API_SHAPE` defaults to `responses` for Tutor and
-`chat_completions` for the content pipeline.
+`openai`. `_API_SHAPE` defaults to `chat_completions` for Tutor and the content
+pipeline. Tutor also requires `_REQUEST_OVERLAY` so reasoning mode stays off.
 
 Owner AI question generation additionally requires:
 

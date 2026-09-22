@@ -22,6 +22,21 @@ func TestSocraticLimitUsesThreeEffectiveAttemptsThenExplains(t *testing.T) {
 	}
 }
 
+func TestHelpRequestDoesNotConsumeAFailedRound(t *testing.T) {
+	session := Session{State: StateAnalyze, SocraticFailedRounds: 0}
+	decision := NewEngine(0).Decide(session, Analysis{DontKnow: true})
+	if decision.NextState != StateHint {
+		t.Fatalf("expected HINT, got %s", decision.NextState)
+	}
+	if decision.SocraticRound != 0 {
+		t.Fatalf("help request consumed a Socratic round: %d", decision.SocraticRound)
+	}
+	session = NewEngine(0).Apply(session, decision)
+	if session.SocraticFailedRounds != 0 {
+		t.Fatalf("applied help request advanced failed rounds: %d", session.SocraticFailedRounds)
+	}
+}
+
 func TestEmotionSignalShortCircuitsSocraticLoop(t *testing.T) {
 	decision := NewEngine(0).Decide(Session{}, Analysis{Emotion: EmotionFrustrated})
 	if decision.NextState != StateBreak {

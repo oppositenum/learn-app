@@ -114,11 +114,17 @@ func (handler *Handler) StartSession(writer http.ResponseWriter, request *http.R
 			return err
 		}
 		var openBlockID *uuid.UUID
-		if err := tx.QueryRow(request.Context(), `SELECT id,plan_block_id FROM learning_sessions WHERE student_id=$1 AND status IN ('ACTIVE','PAUSED') ORDER BY started_at DESC LIMIT 1`, studentID).Scan(&sessionID, &openBlockID); err == nil {
+		var openStatus string
+		if err := tx.QueryRow(request.Context(), `SELECT id,plan_block_id,status FROM learning_sessions WHERE student_id=$1 AND status IN ('ACTIVE','PAUSED') ORDER BY started_at DESC LIMIT 1`, studentID).Scan(&sessionID, &openBlockID, &openStatus); err == nil {
 			if openBlockID != nil && *openBlockID == body.PlanBlockID {
 				return nil
 			}
-			return ErrAnotherSessionOpen
+			if openStatus != "PAUSED" {
+				return ErrAnotherSessionOpen
+			}
+			if err := abandonPausedSessionInTx(request.Context(), tx, sessionID, now); err != nil {
+				return err
+			}
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}

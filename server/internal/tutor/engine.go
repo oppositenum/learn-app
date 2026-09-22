@@ -76,7 +76,7 @@ func (engine Engine) Decide(session Session, analysis Analysis) Decision {
 		}
 	}
 
-	if analysis.HintRequested {
+	if analysis.HintRequested || analysis.DontKnow {
 		return Decision{NextState: StateHint, Reason: "student requested a bounded hint"}
 	}
 

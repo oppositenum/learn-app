@@ -278,7 +278,7 @@ func (service *Service) candidates(ctx context.Context, db queryer, studentID uu
 		enabledSubjects = []string{}
 	}
 	rows, err := db.Query(ctx, `
-		SELECT s.id,s.code,kp.id,kp.name,st.grade_level,grade_band.min_grade,grade_band.max_grade,
+		SELECT s.id,s.code,kp.id,kp.code,kp.name,st.grade_level,grade_band.min_grade,grade_band.max_grade,
 			   COALESCE(ss.score_internal,0)::float8,due_review.id,due_review.due_at,
 	       EXISTS(SELECT 1 FROM student_misconceptions sm WHERE sm.student_id=$1 AND sm.knowledge_point_id=kp.id AND sm.status='ACTIVE'),
 		   COALESCE(s.code=ANY($3::text[]),false)
@@ -310,17 +310,17 @@ ORDER BY s.sort_order,kp.code`, studentID, date, priorities, enabledSubjects)
 	for rows.Next() {
 		var subjectID, kpID uuid.UUID
 		var reviewQueueID *uuid.UUID
-		var subjectCode, focus string
+		var subjectCode, knowledgePointCode, focus string
 		var studentGrade, gradeBandMin, gradeBandMax int
 		var score float64
 		var due *time.Time
 		var misconception, priority bool
-		if err := rows.Scan(&subjectID, &subjectCode, &kpID, &focus, &studentGrade, &gradeBandMin, &gradeBandMax, &score, &reviewQueueID, &due, &misconception, &priority); err != nil {
+		if err := rows.Scan(&subjectID, &subjectCode, &kpID, &knowledgePointCode, &focus, &studentGrade, &gradeBandMin, &gradeBandMax, &score, &reviewQueueID, &due, &misconception, &priority); err != nil {
 			return nil, nil, err
 		}
 		key := kpID.String()
 		indexes[key] = len(candidates)
-		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, StudentGrade: studentGrade, GradeBandMin: gradeBandMin, GradeBandMax: gradeBandMax, SkillScore: score, ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority})
+		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, StudentGrade: studentGrade, GradeBandMin: gradeBandMin, GradeBandMax: gradeBandMax, SkillScore: score, FoundationPriority: foundationPriority(subjectCode, knowledgePointCode), ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority})
 		metadata[key] = candidateMetadata{subjectID: subjectID, knowledgePointID: kpID, focus: focus, reviewQueueID: reviewQueueID}
 	}
 	if err := rows.Err(); err != nil {
