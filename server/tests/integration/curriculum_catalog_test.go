@@ -285,6 +285,139 @@ func TestPlannerSwapsUnusedTodayCardsPerOwnerFreeze(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture := seedSecurityFixture(t, ctx, pool)
+	prepareGradeNineMathPlan(t, ctx, pool, fixture)
+
+	plannerService := planner.NewService(pool)
+	plan, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("6 unpracticed foundation beats overdue ticket review", func(t *testing.T) {
+		assertMathCodeOnPlan(t, ctx, pool, plan.ID, "MATH-JUN-REMOVE-PARENTHESES")
+	})
+
+	t.Run("1 available without classroom swaps", func(t *testing.T) {
+		forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
+		refreshed, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if refreshed.ID != plan.ID {
+			t.Fatalf("unused today plan was replaced: %s -> %s", plan.ID, refreshed.ID)
+		}
+		assertMathCodeOnPlan(t, ctx, pool, refreshed.ID, "MATH-JUN-REMOVE-PARENTHESES")
+		assertPlanSubjectMatchesKnowledgePoint(t, ctx, pool, refreshed.ID)
+	})
+
+	t.Run("2 available with paused classroom holds", func(t *testing.T) {
+		blockID, subjectID := forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
+		insertMathClassroom(t, ctx, pool, fixture.studentID, blockID, subjectID, "PAUSED")
+		held, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if held.ID != plan.ID {
+			t.Fatalf("paused today plan was replaced: %s -> %s", plan.ID, held.ID)
+		}
+		assertMathCodeOnPlan(t, ctx, pool, held.ID, "MATH-LINEAR-EQUATION")
+		assertPlanSubjectMatchesKnowledgePoint(t, ctx, pool, held.ID)
+	})
+
+	t.Run("3 available with active classroom holds", func(t *testing.T) {
+		clearMathClassrooms(t, ctx, pool, plan.ID)
+		blockID, subjectID := forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
+		insertMathClassroom(t, ctx, pool, fixture.studentID, blockID, subjectID, "ACTIVE")
+		held, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if held.ID != plan.ID {
+			t.Fatalf("active today plan was replaced: %s -> %s", plan.ID, held.ID)
+		}
+		assertMathCodeOnPlan(t, ctx, pool, held.ID, "MATH-LINEAR-EQUATION")
+		assertPlanSubjectMatchesKnowledgePoint(t, ctx, pool, held.ID)
+	})
+
+	t.Run("4 completed card holds", func(t *testing.T) {
+		clearMathClassrooms(t, ctx, pool, plan.ID)
+		forceMathTicketCard(t, ctx, pool, plan.ID, "COMPLETED")
+		held, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if held.ID != plan.ID {
+			t.Fatalf("completed today plan was replaced: %s -> %s", plan.ID, held.ID)
+		}
+		assertMathCodeOnPlan(t, ctx, pool, held.ID, "MATH-LINEAR-EQUATION")
+		assertPlanSubjectMatchesKnowledgePoint(t, ctx, pool, held.ID)
+	})
+
+	t.Run("5 abandoned classroom on available card swaps", func(t *testing.T) {
+		clearMathClassrooms(t, ctx, pool, plan.ID)
+		blockID, subjectID := forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
+		insertMathClassroom(t, ctx, pool, fixture.studentID, blockID, subjectID, "ABANDONED")
+		refreshed, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if refreshed.ID != plan.ID {
+			t.Fatalf("abandoned today plan was replaced: %s -> %s", plan.ID, refreshed.ID)
+		}
+		assertMathCodeOnPlan(t, ctx, pool, refreshed.ID, "MATH-JUN-REMOVE-PARENTHESES")
+		assertPlanSubjectMatchesKnowledgePoint(t, ctx, pool, refreshed.ID)
+	})
+}
+
+func TestTicketMisconceptionYieldsToUnpracticedParentheses(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	prepareGradeNineMathPlan(t, ctx, pool, fixture)
+	plannerService := planner.NewService(pool)
+	plan, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO student_misconceptions(student_id,knowledge_point_id,misconception_id,first_seen_at,last_seen_at,status)
+SELECT $1,kp.id,link.misconception_id,now(),now(),'ACTIVE'
+FROM knowledge_points kp
+JOIN knowledge_misconception_links link ON link.knowledge_point_id=kp.id
+WHERE kp.code='MATH-LINEAR-EQUATION'
+ORDER BY link.misconception_id
+LIMIT 1
+ON CONFLICT (student_id,knowledge_point_id,misconception_id) DO UPDATE SET status='ACTIVE'`, fixture.studentID); err != nil {
+		t.Fatal(err)
+	}
+	forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
+	refreshed, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMathCodeOnPlan(t, ctx, pool, refreshed.ID, "MATH-JUN-REMOVE-PARENTHESES")
+	assertPlanSubjectMatchesKnowledgePoint(t, ctx, pool, refreshed.ID)
+
+	if _, err := pool.Exec(ctx, `
+INSERT INTO student_skill_states(student_id,knowledge_point_id,state,score_internal)
+SELECT $1,id,'LEARNING',20 FROM knowledge_points WHERE code='MATH-JUN-REMOVE-PARENTHESES'
+ON CONFLICT (student_id,knowledge_point_id) DO UPDATE SET state='LEARNING',score_internal=20`, fixture.studentID); err != nil {
+		t.Fatal(err)
+	}
+	forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
+	returned, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMathCodeOnPlan(t, ctx, pool, returned.ID, "MATH-LINEAR-EQUATION")
+	assertPlanSubjectMatchesKnowledgePoint(t, ctx, pool, returned.ID)
+}
+
+func prepareGradeNineMathPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fixture securityFixture) {
+	t.Helper()
 	if _, err := pool.Exec(ctx, `UPDATE learning_sessions SET status='ABANDONED',ended_at=now() WHERE id=$1`, fixture.sessionID); err != nil {
 		t.Fatal(err)
 	}
@@ -307,82 +440,6 @@ SELECT $1,$2,id,'MISCONCEPTION',now()-interval '1 day',80,'PENDING'
 FROM knowledge_points WHERE code='MATH-LINEAR-EQUATION'`, uuid.New(), fixture.studentID); err != nil {
 		t.Fatal(err)
 	}
-
-	plannerService := planner.NewService(pool)
-	plan, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Run("6 unpracticed foundation beats overdue ticket review", func(t *testing.T) {
-		assertMathCodeOnPlan(t, ctx, pool, plan.ID, "MATH-JUN-REMOVE-PARENTHESES")
-	})
-
-	t.Run("1 available without classroom swaps", func(t *testing.T) {
-		forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
-		refreshed, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if refreshed.ID != plan.ID {
-			t.Fatalf("unused today plan was replaced: %s -> %s", plan.ID, refreshed.ID)
-		}
-		assertMathCodeOnPlan(t, ctx, pool, refreshed.ID, "MATH-JUN-REMOVE-PARENTHESES")
-	})
-
-	t.Run("2 available with paused classroom holds", func(t *testing.T) {
-		blockID, subjectID := forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
-		insertMathClassroom(t, ctx, pool, fixture.studentID, blockID, subjectID, "PAUSED")
-		held, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if held.ID != plan.ID {
-			t.Fatalf("paused today plan was replaced: %s -> %s", plan.ID, held.ID)
-		}
-		assertMathCodeOnPlan(t, ctx, pool, held.ID, "MATH-LINEAR-EQUATION")
-	})
-
-	t.Run("3 available with active classroom holds", func(t *testing.T) {
-		clearMathClassrooms(t, ctx, pool, plan.ID)
-		blockID, subjectID := forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
-		insertMathClassroom(t, ctx, pool, fixture.studentID, blockID, subjectID, "ACTIVE")
-		held, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if held.ID != plan.ID {
-			t.Fatalf("active today plan was replaced: %s -> %s", plan.ID, held.ID)
-		}
-		assertMathCodeOnPlan(t, ctx, pool, held.ID, "MATH-LINEAR-EQUATION")
-	})
-
-	t.Run("4 completed card holds", func(t *testing.T) {
-		clearMathClassrooms(t, ctx, pool, plan.ID)
-		forceMathTicketCard(t, ctx, pool, plan.ID, "COMPLETED")
-		held, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if held.ID != plan.ID {
-			t.Fatalf("completed today plan was replaced: %s -> %s", plan.ID, held.ID)
-		}
-		assertMathCodeOnPlan(t, ctx, pool, held.ID, "MATH-LINEAR-EQUATION")
-	})
-
-	t.Run("5 abandoned classroom on available card swaps", func(t *testing.T) {
-		clearMathClassrooms(t, ctx, pool, plan.ID)
-		blockID, subjectID := forceMathTicketCard(t, ctx, pool, plan.ID, "AVAILABLE")
-		insertMathClassroom(t, ctx, pool, fixture.studentID, blockID, subjectID, "ABANDONED")
-		refreshed, err := plannerService.Ensure(ctx, fixture.studentID, time.Now(), uuid.Nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if refreshed.ID != plan.ID {
-			t.Fatalf("abandoned today plan was replaced: %s -> %s", plan.ID, refreshed.ID)
-		}
-		assertMathCodeOnPlan(t, ctx, pool, refreshed.ID, "MATH-JUN-REMOVE-PARENTHESES")
-	})
 }
 
 func forceMathTicketCard(t *testing.T, ctx context.Context, pool *pgxpool.Pool, planID uuid.UUID, status string) (uuid.UUID, uuid.UUID) {
@@ -429,6 +486,21 @@ WHERE plan_block_id IN (
 	WHERE block.plan_id=$1 AND s.code='MATH'
 )`, planID); err != nil {
 		t.Fatalf("clear math classrooms: %v", err)
+	}
+}
+
+func assertPlanSubjectMatchesKnowledgePoint(t *testing.T, ctx context.Context, pool *pgxpool.Pool, planID uuid.UUID) {
+	t.Helper()
+	var mismatches int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*)
+FROM learning_plan_blocks block
+JOIN knowledge_points kp ON kp.id=block.knowledge_point_id
+WHERE block.plan_id=$1 AND block.subject_id<>kp.subject_id`, planID).Scan(&mismatches); err != nil {
+		t.Fatal(err)
+	}
+	if mismatches != 0 {
+		t.Fatalf("plan %s has %d blocks whose subject_id disagrees with the knowledge point", planID, mismatches)
 	}
 }
 

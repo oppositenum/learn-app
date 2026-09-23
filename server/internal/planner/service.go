@@ -435,7 +435,7 @@ ORDER BY s.sort_order,kp.code`, studentID, date, priorities, enabledSubjects)
 		}
 		key := kpID.String()
 		indexes[key] = len(candidates)
-		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, StudentGrade: studentGrade, GradeBandMin: gradeBandMin, GradeBandMax: gradeBandMax, SkillScore: score, FoundationPriority: foundationPriority(subjectCode, knowledgePointCode), ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority, Practiced: practiced})
+		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, StudentGrade: studentGrade, GradeBandMin: gradeBandMin, GradeBandMax: gradeBandMax, SkillScore: score, FoundationPriority: foundationPriority(subjectCode, knowledgePointCode), ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority, Practiced: practiced, RemoveParentheses: knowledgePointCode == "MATH-JUN-REMOVE-PARENTHESES"})
 		metadata[key] = candidateMetadata{subjectID: subjectID, knowledgePointID: kpID, focus: focus, reviewQueueID: reviewQueueID}
 	}
 	if err := rows.Err(); err != nil {

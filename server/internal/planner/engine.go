@@ -36,6 +36,10 @@ type Candidate struct {
 	CrossSubjectGap     bool
 	OriginalTaskID      string
 	Practiced           bool
+	// RemoveParentheses is MATH-JUN-REMOVE-PARENTHESES. While it is still
+	// unpracticed it outranks the ticket equation, including when that
+	// equation carries an active misconception or an overdue review.
+	RemoveParentheses bool
 }
 
 type Preferences struct {
@@ -118,6 +122,7 @@ func (Engine) Build(input Input) Plan {
 	if len(eligible) == 0 {
 		return Plan{Date: day(input.Date), TargetMinutes: target}
 	}
+	eligible = preferUnpracticedParentheses(eligible, now)
 
 	selected := diversify(eligible)
 	count := len(selected)
@@ -177,6 +182,10 @@ func candidateRank(candidate Candidate, now time.Time, reviewOnly bool) int {
 	if candidate.CrossSubjectGap {
 		score += 100
 	}
+	// Unpracticed remove-parentheses is the step before the ticket equation.
+	// An uncleared misconception or an overdue review on that equation must
+	// not outrank the unpracticed foundation card. Other subjects keep the
+	// misconception bonus.
 	if candidate.ActiveMisconception {
 		score += 80
 	}
@@ -230,6 +239,46 @@ func foundationPriority(subjectCode, knowledgePointCode string) int {
 	default:
 		return 0
 	}
+}
+
+// preferUnpracticedParentheses moves unpracticed remove-parentheses ahead of
+// the practiced ticket equation when that equation is present only because of
+// an active misconception or an overdue review. Other subjects, and a ticket
+// card that no longer has an unpracticed parentheses candidate, stay put.
+func preferUnpracticedParentheses(candidates []Candidate, now time.Time) []Candidate {
+	parentheses, ticket := -1, -1
+	for index, candidate := range candidates {
+		if candidate.SubjectCode != "MATH" {
+			continue
+		}
+		if candidate.RemoveParentheses && !candidate.Practiced && parentheses < 0 {
+			parentheses = index
+		}
+		if ticketEquationHeldByMisconceptionOrReview(candidate, now) && ticket < 0 {
+			ticket = index
+		}
+	}
+	if parentheses < 0 || ticket < 0 || parentheses < ticket {
+		return candidates
+	}
+	reordered := append([]Candidate(nil), candidates...)
+	item := reordered[parentheses]
+	copy(reordered[ticket+1:parentheses+1], reordered[ticket:parentheses])
+	reordered[ticket] = item
+	return reordered
+}
+
+func ticketEquationHeldByMisconceptionOrReview(candidate Candidate, now time.Time) bool {
+	if candidate.SubjectCode != "MATH" || candidate.RemoveParentheses || !candidate.Practiced {
+		return false
+	}
+	if candidate.FoundationPriority != foundationPriority("MATH", "MATH-LINEAR-EQUATION") {
+		return false
+	}
+	if candidate.ActiveMisconception {
+		return true
+	}
+	return candidate.ReviewDueAt != nil && !candidate.ReviewDueAt.After(now)
 }
 
 func isReview(candidate Candidate, now time.Time) bool {
