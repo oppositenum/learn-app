@@ -203,7 +203,7 @@ func TestVoiceExplanationDoesNotMutateClassroomWhenUsageCannotBePriced(t *testin
 type e2eTeachingAgent struct{}
 
 func (e2eTeachingAgent) AnalyzeAnswer(context.Context, ai.AnalyzeAnswerRequest) (ai.AnalyzeAnswerResult, error) {
-	return ai.AnalyzeAnswerResult{AnswerCorrect: false, ReasoningQuality: "WEAK", Confidence: .97, ErrorType: "FIXED_COMPONENT_OMITTED", Misconceptions: []string{"FIXED_COST_IGNORED"}, EmotionSignal: "NEUTRAL", Engagement: "NORMAL", RecommendedAction: tutor.StateVoiceExplain}, nil
+	return ai.AnalyzeAnswerResult{AnswerCorrect: false, ReasoningQuality: "WEAK", Confidence: .97, ErrorType: "FIXED_COMPONENT_OMITTED", Misconceptions: []string{"FIXED_COST_IGNORED"}, EmotionSignal: "NEUTRAL", Engagement: "NORMAL", RecommendedAction: tutor.StateVoiceExplain, WeaknessLayer: "L2"}, nil
 }
 func e2eTurn(request ai.GenerateTurnRequest) ai.TutorTurn {
 	return ai.TutorTurn{Message: "受限 TeachingAgent 教学动作：" + string(request.TutorDecision.NextState), Action: request.TutorDecision.NextState, ResponseID: uuid.NewString()}

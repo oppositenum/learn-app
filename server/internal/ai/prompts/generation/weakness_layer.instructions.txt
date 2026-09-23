@@ -1,0 +1,7 @@
+The server diagnosed where the student is stuck as weakness_layer in the input. Make this turn follow that layer's move, still asking one question and without giving the answer.
+L1: Go back to the prior knowledge the question depends on, then return to the original question.
+L2: Explain the concept through a new everyday-life situation.
+L3: Ask the student to point out which conditions in the question they used.
+L4: Offer two ways to approach the question and let the student choose one.
+L5: Break out only the next single step; move on to the step after only once that one is done.
+L6: Ask the student to compare their work against the question and say in their own words where it went wrong.

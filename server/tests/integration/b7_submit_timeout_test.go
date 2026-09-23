@@ -46,7 +46,7 @@ func (agent *slowSubmitAgent) AnalyzeAnswer(ctx context.Context, _ ai.AnalyzeAns
 			return ai.AnalyzeAnswerResult{}, err
 		}
 	}
-	return ai.AnalyzeAnswerResult{AnswerCorrect: false, ReasoningQuality: "WEAK", Confidence: .5, ErrorType: "UNKNOWN", EmotionSignal: "NEUTRAL", Engagement: "NORMAL", RecommendedAction: tutor.StateProbe}, nil
+	return ai.AnalyzeAnswerResult{AnswerCorrect: false, ReasoningQuality: "WEAK", Confidence: .5, ErrorType: "UNKNOWN", EmotionSignal: "NEUTRAL", Engagement: "NORMAL", RecommendedAction: tutor.StateProbe, WeaknessLayer: "L5"}, nil
 }
 
 func (agent *slowSubmitAgent) GenerateTurn(ctx context.Context, request ai.GenerateTurnRequest) (ai.TutorTurn, error) {

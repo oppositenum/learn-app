@@ -212,7 +212,7 @@ func TestClassroomPersistsEmotionDeescalationWithoutConsumingSocraticRound(t *te
 	if _, err := pool.Exec(ctx, `INSERT INTO ai_price_catalog(id,provider,model,effective_from,input_price_per_million_usd,cached_input_price_per_million_usd,output_price_per_million_usd) VALUES($1,'openai','mock-tutor',now()-interval '1 day',1,0.5,2)`, uuid.New()); err != nil {
 		t.Fatal(err)
 	}
-	analysis := `{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.96,"error_type":"FRUSTRATED_GUESS","misconceptions":["FIXED_COST_IGNORED"],"core_ability_signals":[],"emotion_signal":"BORED","engagement":"LOW","recommended_action":"BREAK","safe_to_increase_difficulty":false}`
+	analysis := `{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.96,"error_type":"FRUSTRATED_GUESS","misconceptions":["FIXED_COST_IGNORED"],"core_ability_signals":[],"emotion_signal":"BORED","engagement":"LOW","recommended_action":"BREAK","safe_to_increase_difficulty":false,"weakness_layer":"L2"}`
 	server := structuredResponseServer(t, []string{analysis, validTurnJSON("BREAK", false)})
 	defer server.Close()
 	recorder := usage.NewRecorder(pool)
@@ -287,7 +287,7 @@ func structuredResponseServer(t *testing.T, outputs []string) *httptest.Server {
 }
 
 func validAnalysisJSON() string {
-	return `{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.98,"error_type":"FIXED_COST_IGNORED","misconceptions":["FIXED_COST_IGNORED"],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"PROBE","safe_to_increase_difficulty":false}`
+	return `{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.98,"error_type":"FIXED_COST_IGNORED","misconceptions":["FIXED_COST_IGNORED"],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"PROBE","safe_to_increase_difficulty":false,"weakness_layer":"L2"}`
 }
 
 func validTurnJSON(action string, answerRevealed bool) string {

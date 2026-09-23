@@ -33,6 +33,9 @@ type responseQueueServer struct {
 	mu        sync.Mutex
 	responses map[string][]queuedResponse
 	calls     map[string]int
+	// requests keeps each decoded request body per model, so a test can
+	// check what context the provider was actually given.
+	requests map[string][]map[string]any
 }
 
 type queuedResponse struct {
@@ -55,22 +58,23 @@ func newResponseQueueServer(t *testing.T, outputs map[string][]string) *response
 
 func newScriptedResponseQueueServer(t *testing.T, responses map[string][]queuedResponse) *responseQueueServer {
 	t.Helper()
-	queue := &responseQueueServer{responses: responses, calls: map[string]int{}}
+	queue := &responseQueueServer{responses: responses, calls: map[string]int{}, requests: map[string][]map[string]any{}}
 	queue.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || request.URL.Path != "/responses" {
 			http.NotFound(writer, request)
 			return
 		}
-		var body struct {
-			Model string `json:"model"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		var decoded map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&decoded); err != nil {
 			http.Error(writer, "invalid request", http.StatusBadRequest)
 			return
 		}
+		var body struct{ Model string }
+		body.Model, _ = decoded["model"].(string)
 		queue.mu.Lock()
 		index := queue.calls[body.Model]
 		queue.calls[body.Model]++
+		queue.requests[body.Model] = append(queue.requests[body.Model], decoded)
 		modelResponses := queue.responses[body.Model]
 		queue.mu.Unlock()
 		if index >= len(modelResponses) {
@@ -102,6 +106,12 @@ func newScriptedResponseQueueServer(t *testing.T, responses map[string][]queuedR
 	}))
 	t.Cleanup(queue.server.Close)
 	return queue
+}
+
+func (queue *responseQueueServer) requestsFor(model string) []map[string]any {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	return append([]map[string]any(nil), queue.requests[model]...)
 }
 
 func (queue *responseQueueServer) callCount(model string) int {
@@ -269,7 +279,7 @@ func TestB3BTutorOutputReviewRejectsBeforeClassroomRealtimeAndVoiceMutation(t *t
 	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
 	queue := newResponseQueueServer(t, map[string][]string{
 		tutorModel: {
-			`{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.98,"error_type":"FIXED_COST_IGNORED","misconceptions":["FIXED_COST_IGNORED"],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"VOICE_EXPLAIN","safe_to_increase_difficulty":false}`,
+			`{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.98,"error_type":"FIXED_COST_IGNORED","misconceptions":["FIXED_COST_IGNORED"],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"VOICE_EXPLAIN","safe_to_increase_difficulty":false,"weakness_layer":"L2"}`,
 			`{"message":"先把固定费用和饮料费用分开。","action":"VOICE_EXPLAIN","answer_revealed":false,"segments":[{"id":"s1","text":"先分开两类费用。"}]}`,
 		},
 		reviewerModel: {`{"result":"REJECT","no_answer_leak":false,"reason_codes":["EQUIVALENT_ANSWER"],"violations":[{"violation_type":"EQUIVALENT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`},
@@ -754,7 +764,7 @@ func TestB3DSubmitGeneration429RetryExhaustionReturnsSameMinimal503(t *testing.T
 	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
 	queue := newScriptedResponseQueueServer(t, map[string][]queuedResponse{
 		tutorModel: {
-			{status: http.StatusOK, output: `{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.8,"error_type":"NEEDS_MORE_REASONING","misconceptions":[],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"PROBE","safe_to_increase_difficulty":false}`},
+			{status: http.StatusOK, output: `{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.8,"error_type":"NEEDS_MORE_REASONING","misconceptions":[],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"PROBE","safe_to_increase_difficulty":false,"weakness_layer":"L5"}`},
 			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
 			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
 			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
@@ -806,7 +816,7 @@ func TestB3EAnalysis429RetryRecoversWithSinglePricedUsageAndFullAudit(t *testing
 	queue := newScriptedResponseQueueServer(t, map[string][]queuedResponse{
 		tutorModel: {
 			{status: http.StatusTooManyRequests, body: `{"error":{"code":"gateway_concurrency_limit"}}`},
-			{status: http.StatusOK, output: `{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.8,"error_type":"NEEDS_MORE_REASONING","misconceptions":[],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"PROBE","safe_to_increase_difficulty":false}`},
+			{status: http.StatusOK, output: `{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.8,"error_type":"NEEDS_MORE_REASONING","misconceptions":[],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"PROBE","safe_to_increase_difficulty":false,"weakness_layer":"L5"}`},
 			{status: http.StatusOK, output: `{"message":"先检查题目中的条件。","action":"ANALOGY","answer_revealed":false,"segments":[]}`},
 		},
 		reviewerModel: {{status: http.StatusOK, output: `{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`}},

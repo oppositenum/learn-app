@@ -61,7 +61,11 @@ func (agent *blockingLifecycleAgent) AnalyzeAnswer(ctx context.Context, _ ai.Ana
 		return ai.AnalyzeAnswerResult{}, ctx.Err()
 	case <-agent.release:
 	}
-	return ai.AnalyzeAnswerResult{AnswerCorrect: agent.correct, ReasoningQuality: "STRONG", Confidence: .99, ErrorType: "NONE", EmotionSignal: "NEUTRAL", Engagement: "NORMAL", RecommendedAction: tutor.StateProbe}, nil
+	layer := "L5"
+	if agent.correct {
+		layer = ai.WeaknessLayerNone
+	}
+	return ai.AnalyzeAnswerResult{AnswerCorrect: agent.correct, ReasoningQuality: "STRONG", Confidence: .99, ErrorType: "NONE", EmotionSignal: "NEUTRAL", Engagement: "NORMAL", RecommendedAction: tutor.StateProbe, WeaknessLayer: layer}, nil
 }
 
 func lifecycleTurn(request ai.GenerateTurnRequest) ai.TutorTurn {

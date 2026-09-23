@@ -75,7 +75,8 @@ func validAnswerAnalysis() StructuredResult {
 		"emotion_signal":"NEUTRAL",
 		"engagement":"NORMAL",
 		"recommended_action":"PROBE",
-		"safe_to_increase_difficulty":false
+		"safe_to_increase_difficulty":false,
+		"weakness_layer":"L2"
 	}`)}
 }
 
@@ -691,7 +692,7 @@ func TestGenerationRetriesRejectedProviderOutputWithoutBackoff(t *testing.T) {
 		"error_type":"X","misconceptions":[],
 		"core_ability_signals":[{"ability_id":"a","signal":"PARTIAL"}],
 		"emotion_signal":"NEUTRAL","engagement":"NORMAL",
-		"recommended_action":"PROBE","safe_to_increase_difficulty":false}`)}
+		"recommended_action":"PROBE","safe_to_increase_difficulty":false,"weakness_layer":"L2"}`)}
 	client := &structuredClientStub{results: []StructuredResult{badEnum, validAnswerAnalysis()}}
 	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
 	if err != nil {
@@ -754,7 +755,7 @@ func TestRejectedSchemaPathsNameLocationsWithoutValues(t *testing.T) {
 		"error_type":"CANARY_ERROR_TYPE","misconceptions":[],
 		"core_ability_signals":[{"ability_id":"CANARY_ABILITY","signal":"PARTIAL"}],
 		"emotion_signal":"NEUTRAL","engagement":"NORMAL",
-		"recommended_action":"PROBE","safe_to_increase_difficulty":false}`)}
+		"recommended_action":"PROBE","safe_to_increase_difficulty":false,"weakness_layer":"L2"}`)}
 	client := &structuredClientStub{results: []StructuredResult{bad, bad, bad, bad}}
 	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
 	if err != nil {
@@ -784,7 +785,7 @@ func TestRetryTellsTheProviderWhichLocationWasRejected(t *testing.T) {
 		"error_type":"CANARY_ERROR","misconceptions":[],
 		"core_ability_signals":[{"ability_id":"CANARY_ABILITY","signal":"PARTIAL"}],
 		"emotion_signal":"NEUTRAL","engagement":"NORMAL",
-		"recommended_action":"PROBE","safe_to_increase_difficulty":false}`)}
+		"recommended_action":"PROBE","safe_to_increase_difficulty":false,"weakness_layer":"L2"}`)}
 	client := &structuredClientStub{results: []StructuredResult{bad, validAnswerAnalysis()}}
 	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
 	if err != nil {

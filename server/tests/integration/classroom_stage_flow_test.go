@@ -77,7 +77,7 @@ func TestFourStageClassroomCompletesRealStagesWithoutAIOrPrivateDisclosure(t *te
 		t.Fatal(err)
 	}
 	fixture := seedCompleteStageFixture(t, ctx, pool)
-	agent := &provenanceTeachingAgent{analysis: ai.AnalyzeAnswerResult{AnswerCorrect: true, Confidence: 0.99}}
+	agent := &provenanceTeachingAgent{analysis: ai.AnalyzeAnswerResult{AnswerCorrect: true, Confidence: 0.99, WeaknessLayer: ai.WeaknessLayerNone}}
 	service := classroom.NewService(pool, nil, nil, nil, planner.NewService(pool)).WithTeachingAgent(agent)
 	router := stageRouter(pool, service)
 

@@ -256,6 +256,9 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	case tutor.StateProbe, tutor.StateHint, tutor.StateScaffold, tutor.StateAnalogy:
 		instructions = instructions + " " + materialDisciplineInstructions
 	}
+	if layer := weaknessLayerInstructions(request.WeaknessLayer); layer != "" {
+		instructions = instructions + " " + layer
+	}
 	if requiredAction != "" {
 		instructions = fmt.Sprintf(`%s Set the "action" output field to exactly %q.`, instructions, requiredAction)
 	}
@@ -387,6 +390,14 @@ func (provider *CodexProvider) generateAttempt(ctx context.Context, purpose Purp
 	}
 	if turn, ok := target.(*TutorTurn); ok {
 		turn.ResponseID = result.ResponseID
+	}
+	// The schema allows NONE and L1 to L6 independently of answer_correct;
+	// agreement between the two is checked here so that a wrong answer
+	// without a layer is retried like any other rejected sample.
+	if analysis, ok := target.(*AnalyzeAnswerResult); ok {
+		if err := ValidateWeaknessLayer(*analysis); err != nil {
+			return err
+		}
 	}
 	return nil
 }

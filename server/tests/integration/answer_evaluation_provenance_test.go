@@ -58,7 +58,7 @@ func TestProvenanceMigrationRegistersPredicateCandidatesIdempotently(t *testing.
 		t.Fatal(err)
 	}
 	fixture := seedSecurityFixture(t, ctx, pool)
-	legacySchema := schemaSignature(t, ctx, pool, []string{})
+	legacySchema := schemaSignature(t, ctx, pool, []string{}, []string{})
 
 	if _, err := pool.Exec(ctx, `
 UPDATE learning_sessions
@@ -195,7 +195,7 @@ WHERE id=$1`, fixture.sessionID, now); err != nil {
 	agent := &provenanceTeachingAgent{analysis: ai.AnalyzeAnswerResult{
 		AnswerCorrect: true, ReasoningQuality: "STRONG", Confidence: 0.95,
 		ErrorType: "NONE", EmotionSignal: "NEUTRAL", Engagement: "NORMAL",
-		RecommendedAction: tutor.StateVariant,
+		RecommendedAction: tutor.StateVariant, WeaknessLayer: ai.WeaknessLayerNone,
 	}}
 	service := classroom.NewService(pool, nil, nil, nil).WithClock(func() time.Time { return now }).WithTeachingAgent(agent)
 	result, err := service.Submit(ctx, studentUserID, fixture.sessionID, "semantically accepted current response")
@@ -295,6 +295,7 @@ func TestProvenancePreservesReviewFailureBehavior(t *testing.T) {
 		AnswerCorrect: false, ReasoningQuality: "WEAK", Confidence: 0.97,
 		ErrorType: "FIXED_COST_IGNORED", Misconceptions: []string{"FIXED_COST_IGNORED"},
 		EmotionSignal: "NEUTRAL", Engagement: "NORMAL", RecommendedAction: tutor.StateProbe,
+		WeaknessLayer: "L2",
 	}}
 	service := classroom.NewService(pool, nil, nil, nil).WithClock(func() time.Time { return fixture.now }).WithTeachingAgent(agent)
 	result, err := service.Submit(ctx, fixture.studentUserID, fixture.sessionID, "review response not accepted")
@@ -391,7 +392,9 @@ WHERE table_schema=current_schema() AND table_name=$1 ORDER BY column_name`, tab
 	return columns
 }
 
-func schemaSignature(t *testing.T, ctx context.Context, pool *pgxpool.Pool, excluded []string) string {
+// schemaSignature lists every column outside the excluded tables and the
+// excluded table.column pairs.
+func schemaSignature(t *testing.T, ctx context.Context, pool *pgxpool.Pool, excluded, excludedColumns []string) string {
 	t.Helper()
 	var signature string
 	if err := pool.QueryRow(ctx, `
@@ -400,7 +403,8 @@ SELECT COALESCE(string_agg(
     E'\n' ORDER BY table_name,ordinal_position
 ),'')
 FROM information_schema.columns
-WHERE table_schema=current_schema() AND NOT (table_name=ANY($1::text[]))`, excluded).Scan(&signature); err != nil {
+WHERE table_schema=current_schema() AND NOT (table_name=ANY($1::text[]))
+  AND NOT (table_name || '.' || column_name=ANY($2::text[]))`, excluded, excludedColumns).Scan(&signature); err != nil {
 		t.Fatal(err)
 	}
 	return signature
@@ -422,6 +426,10 @@ func assertLegacySchemaUnchanged(t *testing.T, ctx context.Context, pool *pgxpoo
 		"classroom_stage_safety_operations",
 		"learning_effect_events",
 		"ai_request_outcomes",
+	}, []string{
+		// Added by 000037 as a nullable column; the rest of answer_analyses
+		// must still be exactly what it was before provenance.
+		"answer_analyses.weakness_layer",
 	})
 	if after != before {
 		t.Fatal("additive provenance migration changed a legacy table definition")

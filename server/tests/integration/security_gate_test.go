@@ -440,6 +440,7 @@ func assertStudentPayloadHasNoPrivateFields(t *testing.T, body []byte) {
 		"misconceptions":            true, "misconceptions_private_json": true,
 		"hint_policy": true, "hint_policy_private_json": true,
 		"reason_private": true,
+		"weakness_layer": true,
 	}
 	var walk func(any)
 	walk = func(value any) {

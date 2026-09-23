@@ -479,7 +479,7 @@ func applyReasoningControl(payload map[string]any, reasoning map[string]any) {
 func promptForSchema(schemaName string) string {
 	switch schemaName {
 	case "analyze_answer.schema.json":
-		return `Return an analysis with answer_correct=false, reasoning_quality="PARTIAL", confidence=0.5, error_type="PROBE", empty misconception and ability arrays, neutral emotion, normal engagement, recommended_action="PROBE", and no difficulty increase.`
+		return `Return an analysis with answer_correct=false, reasoning_quality="PARTIAL", confidence=0.5, error_type="PROBE", empty misconception and ability arrays, neutral emotion, normal engagement, recommended_action="PROBE", no difficulty increase, and weakness_layer="L5".`
 	case "tutor_output_review.schema.json":
 		return `Return a PASS review with no_answer_leak=true, reason_codes=["NONE"], and no violations.`
 	default:

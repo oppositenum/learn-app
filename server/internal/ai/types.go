@@ -48,6 +48,9 @@ type AnalyzeAnswerResult struct {
 	Engagement               string          `json:"engagement"`
 	RecommendedAction        tutor.State     `json:"recommended_action"`
 	SafeToIncreaseDifficulty bool            `json:"safe_to_increase_difficulty"`
+	// WeaknessLayer names the layer a wrong answer is stuck at, L1 to L6. A
+	// correct answer carries NONE. ValidateWeaknessLayer enforces both.
+	WeaknessLayer string `json:"weakness_layer"`
 }
 
 type GenerateTurnRequest struct {
@@ -63,6 +66,9 @@ type GenerateTurnRequest struct {
 	TutorDecision      tutor.Decision                `json:"tutor_decision"`
 	PriorTurns         []TutorTurn                   `json:"prior_turns"`
 	PreviousResponseID string                        `json:"previous_response_id,omitempty"`
+	// WeaknessLayer is set only for the turns that keep probing the same
+	// question. The generator reads it to pick that layer's teaching move.
+	WeaknessLayer string `json:"weakness_layer,omitempty"`
 }
 
 type AnalogyRequest GenerateTurnRequest

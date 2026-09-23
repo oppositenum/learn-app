@@ -266,6 +266,7 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 			errorType, recommended = firstMisconception(row.misconceptions), string(nextDecision(row).NextState)
 		}
 		confidence := 1.0
+		var weaknessLayer *string
 		if prepared != nil && !prepared.deterministicMatch {
 			reasoningQuality = prepared.analysis.ReasoningQuality
 			emotionSignal = prepared.analysis.EmotionSignal
@@ -279,9 +280,12 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 					analysisMisconceptions, _ = json.Marshal(prepared.analysis.Misconceptions)
 				}
 				recommended = string(prepared.decision.NextState)
+				if ai.ValidWeaknessLayer(prepared.analysis.WeaknessLayer) {
+					weaknessLayer = &prepared.analysis.WeaknessLayer
+				}
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO answer_analyses (id,student_answer_id,answer_correct,reasoning_quality,confidence,error_type,misconceptions_private_json,emotion_signal,engagement,recommended_action) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.New(), answerID, evaluation.correct, reasoningQuality, confidence, errorType, misconceptionPayload(evaluation.correct, analysisMisconceptions), emotionSignal, engagement, recommended); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO answer_analyses (id,student_answer_id,answer_correct,reasoning_quality,confidence,error_type,misconceptions_private_json,emotion_signal,engagement,recommended_action,weakness_layer) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, uuid.New(), answerID, evaluation.correct, reasoningQuality, confidence, errorType, misconceptionPayload(evaluation.correct, analysisMisconceptions), emotionSignal, engagement, recommended, weaknessLayer); err != nil {
 			return err
 		}
 		if err := insertAnswerEvaluationProvenance(ctx, tx, evaluationProvenanceID, answerID, provenance, now); err != nil {
@@ -296,7 +300,7 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 		}
 		published = append(published, submittedEvent)
 		analyzedStudent, _ := json.Marshal(map[string]any{"status": "ANALYZED"})
-		analyzedParent, _ := json.Marshal(map[string]any{"answer_visibility": "REFRESH_LIVE_ENDPOINT", "correct_answer": row.answer, "answer_correct": evaluation.correct, "reasoning_quality": reasoningQuality, "confidence": confidence, "error_type": errorType, "misconception": misconceptionCode, "emotion_signal": emotionSignal, "engagement": engagement, "recommended_action": recommended})
+		analyzedParent, _ := json.Marshal(map[string]any{"answer_visibility": "REFRESH_LIVE_ENDPOINT", "correct_answer": row.answer, "answer_correct": evaluation.correct, "reasoning_quality": reasoningQuality, "confidence": confidence, "error_type": errorType, "misconception": misconceptionCode, "emotion_signal": emotionSignal, "engagement": engagement, "recommended_action": recommended, "weakness_layer": weaknessLayer})
 		analyzedEvent := makeEvent(row.studentID, sessionID, eventSequence+1, realtime.EventAnswerAnalyzed, analyzedStudent, analyzedParent, now)
 		if err := insertEvent(ctx, tx, analyzedEvent); err != nil {
 			return err
@@ -869,6 +873,12 @@ func (service *Service) prepareAgent(ctx context.Context, userID, sessionID, ope
 		if err != nil {
 			return nil, err
 		}
+		// The provider already checks this; the classroom checks again because
+		// the agent is an interface, and a wrong answer without a layer must
+		// take the same busy path as any other rejected analysis.
+		if err := ai.ValidateWeaknessLayer(analysis); err != nil {
+			return nil, ai.NewTutorGenerationBusyFailure(ai.TutorReviewFailureInvalidSchema, 0, ai.TutorReviewDiagnosticUnavailable, "", err)
+		}
 	}
 	serverAnalysis := tutor.Analysis{
 		AnswerCorrect: analysis.AnswerCorrect, ReasoningQuality: parseReasoning(analysis.ReasoningQuality),
@@ -882,6 +892,15 @@ func (service *Service) prepareAgent(ctx context.Context, userID, sessionID, ope
 		return prepared, nil
 	}
 	request := ai.GenerateTurnRequest{StudentID: studentID.String(), SessionID: sessionID.String(), Question: question.Public, Teaching: question.Teaching, AuditPrivateAnswer: question.Private, StudentAnswer: answer, TutorDecision: decision, PriorTurns: prior, PreviousResponseID: responseID}
+	// Only the rounds that keep probing the same question follow the layer.
+	// Help, emotion, backtracking and the failed-round limit decide their own
+	// next step, so the layer never reaches them.
+	switch decision.NextState {
+	case tutor.StateProbe, tutor.StateScaffold, tutor.StateAnalogy:
+		if !analysis.AnswerCorrect {
+			request.WeaknessLayer = analysis.WeaknessLayer
+		}
+	}
 	var turn ai.TutorTurn
 	switch decision.NextState {
 	case tutor.StateAnalogy:

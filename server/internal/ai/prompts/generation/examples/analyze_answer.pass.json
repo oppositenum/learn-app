@@ -13,5 +13,6 @@
   "emotion_signal": "NEUTRAL",
   "engagement": "NORMAL",
   "recommended_action": "PROBE",
-  "safe_to_increase_difficulty": false
+  "safe_to_increase_difficulty": false,
+  "weakness_layer": "L2"
 }

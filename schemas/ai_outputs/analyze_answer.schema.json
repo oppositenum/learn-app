@@ -12,7 +12,8 @@
     "emotion_signal",
     "engagement",
     "recommended_action",
-    "safe_to_increase_difficulty"
+    "safe_to_increase_difficulty",
+    "weakness_layer"
   ],
   "properties": {
     "answer_correct": { "type": "boolean" },
@@ -37,6 +38,7 @@
     "recommended_action": {
       "enum": ["PROBE", "HINT", "SCAFFOLD", "ANALOGY", "BACKTRACK", "EXPLAIN", "VOICE_EXPLAIN", "VARIANT", "BREAK"]
     },
-    "safe_to_increase_difficulty": { "type": "boolean" }
+    "safe_to_increase_difficulty": { "type": "boolean" },
+    "weakness_layer": { "enum": ["NONE", "L1", "L2", "L3", "L4", "L5", "L6"] }
   }
 }

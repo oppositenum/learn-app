@@ -26,7 +26,7 @@ import (
 type prerequisiteGapAgent struct{}
 
 func (prerequisiteGapAgent) AnalyzeAnswer(context.Context, ai.AnalyzeAnswerRequest) (ai.AnalyzeAnswerResult, error) {
-	return ai.AnalyzeAnswerResult{AnswerCorrect: false, ReasoningQuality: "WEAK", Confidence: .95, ErrorType: "PREREQUISITE_GAP", Misconceptions: []string{"REASONING_GAP"}, EmotionSignal: "NEUTRAL", Engagement: "NORMAL", RecommendedAction: tutor.StateBacktrack}, nil
+	return ai.AnalyzeAnswerResult{AnswerCorrect: false, ReasoningQuality: "WEAK", Confidence: .95, ErrorType: "PREREQUISITE_GAP", Misconceptions: []string{"REASONING_GAP"}, EmotionSignal: "NEUTRAL", Engagement: "NORMAL", RecommendedAction: tutor.StateBacktrack, WeaknessLayer: "L1"}, nil
 }
 func (prerequisiteGapAgent) GenerateTurn(_ context.Context, request ai.GenerateTurnRequest) (ai.TutorTurn, error) {
 	return ai.TutorTurn{Action: request.TutorDecision.NextState, Message: "先检查底层知识。"}, nil

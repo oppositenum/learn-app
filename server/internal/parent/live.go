@@ -30,6 +30,7 @@ type LiveSessionDTO struct {
 	FullSolution         string          `json:"full_solution"`
 	AnswerCorrect        *bool           `json:"answer_correct"`
 	ErrorType            string          `json:"error_type"`
+	WeaknessLayer        *string         `json:"weakness_layer"`
 	Misconceptions       json.RawMessage `json:"misconceptions"`
 	TutorAction          string          `json:"tutor_action"`
 	TutorReason          string          `json:"tutor_reason"`
@@ -61,7 +62,7 @@ SELECT ls.id, ls.student_id, s.name_zh, kp.name, ls.started_at, ls.status,
        ls.current_state, ls.socratic_fail_count, ls.engagement_state,
        q.prompt_public, qa.correct_answer_json, qa.full_solution_private,
        COALESCE(sa.answer_text, ''), aa.answer_correct,
-       COALESCE(aa.error_type, ''), COALESCE(aa.misconceptions_private_json, '[]'::jsonb),
+       COALESCE(aa.error_type, ''), aa.weakness_layer, COALESCE(aa.misconceptions_private_json, '[]'::jsonb),
 		   COALESCE(tt.action, ''), COALESCE(tt.reason_private, ''),ls.target_minutes,
 			   ls.accumulated_seconds + CASE WHEN ls.status='ACTIVE' THEN GREATEST(0,EXTRACT(EPOCH FROM ((CASE WHEN ls.last_activity_at>=CURRENT_TIMESTAMP-interval '90 seconds' THEN CURRENT_TIMESTAMP ELSE ls.last_activity_at END)-COALESCE(ls.last_resumed_at,ls.started_at)))::integer) ELSE 0 END,
 	   COALESCE(ss.state,'UNKNOWN'),COALESCE(ss.score_internal,0)::float8
@@ -84,7 +85,7 @@ WHERE ls.id = $1 AND ls.student_id = $2`, sessionID, studentID).Scan(
 		&live.SessionID, &live.StudentID, &live.Subject, &live.KnowledgePoint,
 		&live.StartedAt, &live.Status, &live.CurrentState, &live.SocraticRound,
 		&live.Engagement, &live.QuestionPrompt, &live.CorrectAnswer, &live.FullSolution,
-		&studentAnswer, &answerCorrect, &live.ErrorType, &live.Misconceptions,
+		&studentAnswer, &answerCorrect, &live.ErrorType, &live.WeaknessLayer, &live.Misconceptions,
 		&live.TutorAction, &live.TutorReason, &live.TargetMinutes, &live.ActiveSeconds, &live.MasteryState, &live.MasteryScore,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
