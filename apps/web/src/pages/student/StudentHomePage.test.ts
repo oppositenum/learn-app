@@ -416,3 +416,66 @@ test('a plan card sharing a knowledge point id under another subject cannot be c
   expect(wrapper.get('[data-testid="plan-block-diverged"]').text()).toContain('英语')
   wrapper.unmount()
 })
+
+// Tailwind is not compiled in unit tests, so the size is read from the class:
+// text-base is 16px and every larger step is at least that.
+const readableSizes = ['text-base', 'text-lg', 'text-xl', 'text-2xl']
+
+function expectReadable(element: Element) {
+  const classes = Array.from(element.classList)
+  expect(classes.some((name) => readableSizes.includes(name)), `${element.outerHTML} has no 16px-or-larger size`).toBe(true)
+  expect(classes.some((name) => name === 'text-sm' || name === 'text-xs'), `${element.outerHTML} is below 16px`).toBe(false)
+}
+
+function elementWithText(wrapper: Awaited<ReturnType<typeof mountHome>>, selector: string, text: string) {
+  const found = wrapper.findAll(selector).find((node) => node.text().includes(text))
+  expect(found, `no ${selector} containing ${text}`).toBeDefined()
+  return found!.element
+}
+
+test('home text a child reads is at least 16px', async () => {
+  const wrapper = await mountWithCurrent(currentSession())
+
+  expectReadable(wrapper.get('h1').element)
+  expectReadable(elementWithText(wrapper, 'p', '正在进行'))
+  expectReadable(elementWithText(wrapper, 'a span', '语文 · 信息提取'))
+  expectReadable(elementWithText(wrapper, 'span', '20 分钟'))
+  expectReadable(elementWithText(wrapper, 'button strong', '语文'))
+  expectReadable(elementWithText(wrapper, 'button span span', '信息提取 ·'))
+  expectReadable(elementWithText(wrapper, 'button span', '继续'))
+  expectReadable(wrapper.get('[aria-label="连续学习 2 天"]').element)
+  expect(wrapper.html()).not.toMatch(/\btext-(xs|sm)\b/)
+  wrapper.unmount()
+})
+
+test('locked and diverged plan states stay at least 16px', async () => {
+  const locked = await mountWithCurrent(currentSession({ id: 'session-other', plan_block_id: 'block-other' }))
+  expectReadable(elementWithText(locked, 'button span', '完成当前探索后解锁'))
+  locked.unmount()
+
+  const diverged = await mountWithCurrent(currentSession({
+    subject_code: 'ENGLISH', subject_name: '英语',
+    knowledge_point: '英语阅读细节', knowledge_point_id: 'kp-reading-detail',
+  }))
+  expectReadable(diverged.get('[data-testid="plan-block-diverged"]').element)
+  diverged.unmount()
+})
+
+test('a failed plan shows a warm notice and a 48px retry, not a red error', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.endsWith('/student/today')) return response({ error: { message: '今日计划暂时不可用' } }, 503)
+    if (path.endsWith('/sessions/current')) return response(null, 204)
+    if (path.endsWith('/student/growth')) return response(growth('2026-08-26'))
+    throw new Error(`unexpected request: ${path}`)
+  }))
+  const wrapper = await mountHome()
+
+  const notice = wrapper.get('[data-testid="home-plan-error"]')
+  expect(notice.classes()).toContain('notice-warm')
+  expectReadable(notice.element)
+  for (const name of notice.classes()) expect(name).not.toMatch(/red|error|wrong|danger/)
+  const retry = wrapper.findAll('button').find((button) => button.text().includes('重试'))!
+  expect(retry.classes()).toContain('home-action')
+  wrapper.unmount()
+})

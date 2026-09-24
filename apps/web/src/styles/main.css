@@ -348,6 +348,13 @@ input:focus-visible {
   background: #e8efed;
 }
 
+/* Student home. The shared secondary button is 46px; on the home page every
+   action a child taps is at least 48px tall. */
+.home-action {
+  min-height: 3rem;
+  font-size: 1rem;
+}
+
 /* Classroom page. Children read and tap here, so the task, the tutor's latest
    sentence and the input each sit on their own layer, text stays at 16px or
    larger and every action is at least 48px tall. */

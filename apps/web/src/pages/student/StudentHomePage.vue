@@ -152,7 +152,7 @@ onBeforeUnmount(() => {
   <main class="page-wrap pb-28">
     <header class="flex items-start justify-between pt-7">
       <div>
-        <p class="text-sm text-zinc-500">
+        <p class="text-base text-zinc-500">
           {{ dateLabel }}
         </p>
         <h1 class="mt-1 text-2xl font-semibold">
@@ -160,7 +160,7 @@ onBeforeUnmount(() => {
         </h1>
       </div>
       <div
-        class="flex items-center gap-1.5 text-sm font-semibold text-amber-700"
+        class="flex items-center gap-1.5 text-base font-semibold text-amber-700"
         :aria-label="streak === undefined ? '连续学习天数正在同步' : `连续学习 ${streak} 天`"
       >
         <Flame
@@ -172,7 +172,8 @@ onBeforeUnmount(() => {
     </header>
     <p
       v-if="error"
-      class="mt-6 border-l-2 border-red-600 pl-3 text-sm text-red-700"
+      data-testid="home-plan-error"
+      class="notice-warm mt-6 px-4 py-3 text-base font-medium"
       role="alert"
     >
       {{ error }}
@@ -180,7 +181,7 @@ onBeforeUnmount(() => {
     <button
       v-if="error"
       type="button"
-      class="secondary-button mt-3"
+      class="secondary-button home-action mt-3"
       @click="load()"
     >
       <RefreshCw :size="17" />重试
@@ -191,7 +192,7 @@ onBeforeUnmount(() => {
       class="mt-8"
       aria-labelledby="continue-title"
     >
-      <p class="text-sm text-zinc-500">
+      <p class="text-base text-zinc-500">
         正在进行
       </p>
       <h2
@@ -205,7 +206,7 @@ onBeforeUnmount(() => {
         class="continue-card mt-4 flex min-h-36 flex-col justify-between p-5"
       >
         <div class="flex items-center justify-between">
-          <span class="text-sm text-zinc-300">{{ current.subject_name }} · {{ current.knowledge_point }}</span>
+          <span class="text-base text-zinc-300">{{ current.subject_name }} · {{ current.knowledge_point }}</span>
           <span class="grid size-10 place-items-center bg-teal-400 text-zinc-950"><Play
             :size="19"
             fill="currentColor"
@@ -228,11 +229,11 @@ onBeforeUnmount(() => {
         >
           今日计划
         </h2>
-        <span class="text-sm text-zinc-500">{{ totalMinutes }} 分钟</span>
+        <span class="text-base text-zinc-500">{{ totalMinutes }} 分钟</span>
       </div>
       <p
         v-if="loading"
-        class="mt-5 text-sm text-zinc-500"
+        class="mt-5 text-base text-zinc-500"
       >
         正在生成计划
       </p>
@@ -248,33 +249,33 @@ onBeforeUnmount(() => {
           :disabled="Boolean(starting) || block.status === 'COMPLETED' || blockDivergedFromCurrentSession(block, current) || Boolean(current && block.session_id !== current.id && block.id !== current.plan_block_id)"
           @click="begin(block)"
         >
-          <span class="min-w-0"><strong class="block font-medium">{{ subjectNames[block.subject] ?? block.subject }}</strong><span class="mt-1 block break-words text-sm text-zinc-500">{{ block.focus }} · {{ planModeLabels[block.mode] ?? '当前任务' }}</span></span>
+          <span class="min-w-0"><strong class="block text-base font-medium">{{ subjectNames[block.subject] ?? block.subject }}</strong><span class="mt-1 block break-words text-base text-zinc-500">{{ block.focus }} · {{ planModeLabels[block.mode] ?? '当前任务' }}</span></span>
           <span
             v-if="block.status === 'COMPLETED'"
-            class="flex shrink-0 items-center gap-1 text-sm font-semibold text-teal-800"
+            class="flex shrink-0 items-center gap-1 text-base font-semibold text-teal-800"
           ><Check :size="17" />已完成</span>
           <span
             v-else-if="blockMatchesCurrentSession(block, current)"
-            class="flex shrink-0 items-center gap-1 text-sm font-semibold text-teal-800"
+            class="flex shrink-0 items-center gap-1 text-base font-semibold text-teal-800"
           >{{ current!.status === 'PAUSED' ? '继续' : '进行中' }}<Play :size="17" /></span>
           <span
             v-else-if="blockDivergedFromCurrentSession(block, current)"
             data-testid="plan-block-diverged"
-            class="flex max-w-40 shrink-0 items-center gap-1 text-right text-xs font-medium text-zinc-500"
+            class="flex max-w-40 shrink-0 items-center gap-1 text-right text-base font-medium leading-6 text-zinc-500"
           ><Lock :size="15" />当前课堂已回到：{{ subjectNames[current!.subject_code] ?? current!.subject_code }} · {{ current!.knowledge_point }}</span>
           <span
             v-else-if="current"
-            class="flex max-w-28 shrink-0 items-center gap-1 text-right text-xs font-medium text-zinc-500"
+            class="flex max-w-36 shrink-0 items-center gap-1 text-right text-base font-medium leading-6 text-zinc-500"
           ><Lock :size="15" />完成当前探索后解锁</span>
           <span
             v-else
-            class="flex shrink-0 items-center gap-2 text-sm font-semibold text-teal-800"
+            class="flex shrink-0 items-center gap-2 text-base font-semibold text-teal-800"
           >{{ block.minutes }} 分钟<Play :size="17" /></span>
         </button>
       </div>
       <p
         v-else-if="!loading"
-        class="mt-5 text-sm text-zinc-500"
+        class="mt-5 text-base text-zinc-500"
       >
         今天没有待完成内容
       </p>
