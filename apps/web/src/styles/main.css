@@ -348,8 +348,8 @@ input:focus-visible {
   background: #e8efed;
 }
 
-/* Student home. The shared secondary button is 46px; on the home page every
-   action a child taps is at least 48px tall. */
+/* Student home and profile. The shared secondary button is 46px; on these
+   student pages every action a child taps is at least 48px tall. */
 .home-action {
   min-height: 3rem;
   font-size: 1rem;

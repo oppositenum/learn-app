@@ -45,7 +45,7 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
 
 <template>
   <main class="page-wrap pb-28 pt-7">
-    <div class="flex items-center gap-2 text-sm font-semibold text-amber-700">
+    <div class="flex items-center gap-2 text-base font-semibold text-amber-700">
       <Sparkles
         :size="18"
         aria-hidden="true"
@@ -57,21 +57,22 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
     </h1>
     <p
       v-if="growth.error"
-      class="mt-4 text-sm text-red-700"
+      data-testid="growth-error"
+      class="notice-warm mt-4 px-4 py-3 text-base font-medium"
       role="alert"
     >
       {{ growth.error }}
     </p>
     <div class="mt-7 flex items-end justify-between border-b border-zinc-300 pb-5">
       <div>
-        <p class="text-sm text-zinc-500">
+        <p class="text-base text-zinc-500">
           学习证据
         </p>
         <p class="mt-1 text-xl font-semibold">
           五种真实进步
         </p>
       </div>
-      <p class="text-sm font-medium text-teal-700">
+      <p class="text-base font-medium text-teal-700">
         {{ currentGrowth ? `连续 ${currentGrowth.streak_days} 天` : '等待同步' }}
       </p>
     </div>
@@ -106,7 +107,7 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
             <h3 class="font-semibold">
               {{ indicator.label }}
             </h3>
-            <p class="mt-1 text-sm leading-6 text-zinc-500">
+            <p class="mt-1 break-words text-base leading-6 text-zinc-500">
               {{ indicator.events[0] ? evidenceDetail(indicator.events[0]) : '等待新的学习证据' }}
             </p>
           </div>
@@ -144,11 +145,11 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
               aria-hidden="true"
             />
           </span>
-          <div>
+          <div class="min-w-0">
             <h3 class="font-semibold">
               {{ place.name }}
             </h3>
-            <p class="mt-1 text-sm text-zinc-500">
+            <p class="mt-1 break-words text-base leading-6 text-zinc-500">
               {{ place.detail }}
             </p>
           </div>
@@ -167,7 +168,7 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
       </div>
     </section>
 
-    <p class="mt-8 border-t border-zinc-300 pt-4 text-xs text-zinc-500">
+    <p class="mt-8 border-t border-zinc-300 pt-4 text-base text-zinc-500">
       兼容能量记录：{{ currentGrowth?.total_energy ?? '--' }}
     </p>
   </main>
