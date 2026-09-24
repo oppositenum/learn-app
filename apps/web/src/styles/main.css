@@ -114,6 +114,10 @@ input:focus-visible {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.student-shell .nav-item {
+  font-size: 1rem;
+}
+
 .icon-button {
   display: inline-grid;
   width: 2.75rem;

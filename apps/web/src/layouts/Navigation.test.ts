@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter, type RouteRecordRaw } from 'vue-router'
@@ -8,6 +11,14 @@ import ParentLayout from './ParentLayout.vue'
 import StudentLayout from './StudentLayout.vue'
 
 const page = { template: '<div>page</div>' }
+const mainCSS = readFileSync(resolve(process.cwd(), 'src/styles/main.css'), 'utf8')
+
+function declarationsFor(selector: string) {
+	const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+	const match = mainCSS.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`))
+	expect(match, `missing CSS rule for ${selector}`).not.toBeNull()
+	return match?.[1] ?? ''
+}
 
 async function mountNavigation(layout: object, initialPath: string, routes: RouteRecordRaw[]) {
 	const pinia = createPinia()
@@ -51,6 +62,20 @@ test('keeps student, parent, and owner navigation targets distinct and role-scop
 	])
 	expect(owner.wrapper.findAll('nav[aria-label="Owner 导航"] a')).toHaveLength(5)
 	owner.wrapper.unmount()
+})
+
+test('uses a 16px student navigation label while retaining the compact shared default', async () => {
+	const student = await mountNavigation(StudentLayout, '/student', [
+		{ path: '/student', component: page },
+		{ path: '/student/growth', component: page },
+		{ path: '/student/profile', component: page },
+	])
+	const studentLinks = student.wrapper.findAll('nav[aria-label="学生导航"] a.nav-item')
+	expect(studentLinks).toHaveLength(3)
+	expect(studentLinks.every((link) => link.find('span').exists())).toBe(true)
+	expect(declarationsFor('.student-shell .nav-item')).toMatch(/font-size:\s*1rem\s*;/)
+	expect(declarationsFor('.nav-item')).toMatch(/font-size:\s*0\.7rem\s*;/)
+	student.wrapper.unmount()
 })
 
 test('removes dead top-level student redirects while retaining classroom subroutes', () => {
