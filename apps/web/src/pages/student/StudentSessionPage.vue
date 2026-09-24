@@ -3,10 +3,12 @@ import { ArrowLeft, ArrowRight, CalendarCheck2, Lightbulb, Pause, RefreshCw, Sen
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import ClassroomStageTrack from '../../components/ClassroomStageTrack.vue'
 import VoiceCaptureButton from '../../components/VoiceCaptureButton.vue'
 import StudentInteractionRenderer from '../../components/StudentInteractionRenderer.vue'
+import type { TutorAction } from '../../api/student'
 import { difficultyLabels, tutorActionLabels } from '../../lib/learningLabels'
-import { classroomStageLabels, classroomStages, isStructuredInteraction, stageIdentity, stageTaskKey, structuredResponseComplete } from '../../lib/studentInteraction'
+import { isStructuredInteraction, stageIdentity, stageTaskKey, structuredResponseComplete } from '../../lib/studentInteraction'
 import { useLearningStore } from '../../stores/learning'
 
 const learning = useLearningStore()
@@ -26,6 +28,13 @@ const totalSeconds = computed(() => learning.activeSeconds + runningDelta.value)
 const currentSeconds = computed(() => learning.currentActiveSeconds + runningDelta.value)
 const currentTutorTurn = computed(() => learning.timeline.filter((item) => item.actor === 'TUTOR').at(-1))
 const showTutorTurn = computed(() => learning.tutorAction !== 'ASK' && currentTutorTurn.value?.meta !== 'ASK')
+// The tutor's next move already tells whether the child moved on or needs
+// another look. The page only picks a colour for it: green when the lesson
+// moves forward, a warm orange when the tutor is guiding, and never a verdict
+// of its own next to the tutor's words.
+const advancingActions = new Set<TutorAction>(['VARIANT', 'ABSTRACT', 'VERIFY', 'COMPLETE'])
+const guidingActions = new Set<TutorAction>(['PROBE', 'HINT', 'SCAFFOLD', 'ANALOGY', 'BACKTRACK', 'EXPLAIN', 'VOICE_EXPLAIN'])
+const tutorTone = computed(() => advancingActions.has(learning.tutorAction) ? 'advance' : guidingActions.has(learning.tutorAction) ? 'guide' : 'calm')
 const complete = computed(() => learning.tutorAction === 'COMPLETE' || learning.status === 'COMPLETED')
 const structured = computed(() => isStructuredInteraction(learning.interaction ?? undefined, learning.stageFlow ?? undefined))
 const activeStageIdentity = computed(() => stageIdentity(learning.sessionID, learning.questionID, learning.stageFlow ?? undefined))
@@ -37,7 +46,6 @@ const structuredDraft = computed({
   },
 })
 const structuredComplete = computed(() => Boolean(structured.value && learning.interaction && structuredResponseComplete(learning.interaction, structuredDraft.value)))
-const activeStageIndex = computed(() => classroomStages.indexOf(learning.stageFlow?.stage as (typeof classroomStages)[number]))
 const stageMaterialUnavailable = computed(() => Boolean(learning.stageFlow && learning.interaction?.fallback && !complete.value))
 const routeSessionID = computed(() => String(route.params.id || ''))
 const sessionMatchesRoute = computed(() => Boolean(learning.sessionID) && learning.sessionID === routeSessionID.value)
@@ -197,21 +205,11 @@ onBeforeUnmount(() => window.clearInterval(timer))
             :class="step <= learning.socraticRound ? 'bg-teal-600' : 'bg-zinc-200'"
           />
         </div>
-        <ol
+        <ClassroomStageTrack
           v-if="learning.stageFlow && !complete"
-          class="mt-3 grid grid-cols-4 gap-1"
-          aria-label="课堂阶段"
-        >
-          <li
-            v-for="(stage, index) in classroomStages"
-            :key="stage"
-            class="min-w-0 border-t-2 pt-1 text-center text-[0.7rem] font-semibold"
-            :class="index <= activeStageIndex ? 'border-teal-600 text-teal-800' : 'border-zinc-300 text-zinc-500'"
-            :aria-current="stage === learning.stageFlow.stage ? 'step' : undefined"
-          >
-            {{ classroomStageLabels[stage] }}
-          </li>
-        </ol>
+          class="mt-3"
+          :stage="learning.stageFlow.stage"
+        />
       </header>
 
       <section
@@ -222,16 +220,21 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <span class="agent-badge">AI</span>
           <span>{{ tutorActionLabels[learning.tutorAction] }}</span>
         </div>
-        <h1 class="mt-5 text-[1.65rem] font-semibold leading-10 sm:text-3xl">
-          {{ learning.prompt }}
-        </h1>
+        <div class="classroom-task card mt-4">
+          <h1 class="text-[1.4rem] font-semibold leading-9 sm:text-[1.65rem] sm:leading-10">
+            {{ learning.prompt }}
+          </h1>
+        </div>
 
         <div
           v-if="showTutorTurn"
+          :key="currentTutorTurn?.id"
           data-tutor-turn
-          class="tutor-turn mt-6"
+          :data-tone="tutorTone"
+          class="tutor-turn classroom-tutor-turn mt-5"
+          :class="`classroom-tutor-turn--${tutorTone}`"
         >
-          <p class="whitespace-pre-line leading-7">
+          <p class="whitespace-pre-line text-[1.0625rem] leading-8">
             {{ currentTutorTurn?.text }}
           </p>
         </div>
@@ -268,7 +271,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 
         <p
           v-if="learning.error"
-          class="mt-5 text-sm font-medium text-red-700"
+          class="notice-warm mt-5 px-4 py-3 text-base font-medium"
           role="alert"
         >
           {{ learning.error }}
@@ -330,13 +333,13 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <p class="font-medium">
             这次探索已暂停
           </p>
-          <p class="mt-1 text-sm text-zinc-600">
+          <p class="mt-1 text-base leading-7 text-zinc-600">
             要使用「一点提示」或「我不会」，请先继续这次探索。今天先停在这里，也可以回到今日计划换另一张卡片。
           </p>
           <button
             type="button"
             data-testid="resume-session"
-            class="primary-button mt-3"
+            class="primary-button classroom-action mt-3"
             :disabled="learning.loading"
             @click="learning.resumeSession()"
           >
@@ -345,7 +348,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <button
             type="button"
             data-testid="end-today-session"
-            class="secondary-button ml-3 mt-3"
+            class="secondary-button classroom-action ml-3 mt-3"
             :disabled="learning.loading"
             @click="abandon"
           >
@@ -394,7 +397,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
               <label
                 v-if="!structured"
                 for="student-answer"
-                class="text-sm font-semibold"
+                class="text-base font-semibold"
               >把你的想法写下来</label>
               <textarea
                 v-if="!structured"
@@ -411,14 +414,18 @@ onBeforeUnmount(() => window.clearInterval(timer))
                 :disabled="learning.loading"
               />
               <div class="mt-3 flex items-center justify-between gap-3">
-                <VoiceCaptureButton
+                <div
                   v-if="!structured"
-                  :session-id="String(route.params.id)"
-                  @transcript="answer = $event"
-                />
+                  class="classroom-voice"
+                >
+                  <VoiceCaptureButton
+                    :session-id="String(route.params.id)"
+                    @transcript="answer = $event"
+                  />
+                </div>
                 <button
                   type="submit"
-                  class="primary-button min-w-0 flex-1"
+                  class="primary-button classroom-action min-w-0 flex-1"
                   :disabled="structured ? !structuredComplete || learning.loading : !answer.trim() || learning.loading"
                 >
                   <Send
@@ -430,7 +437,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
               </div>
               <p
                 v-if="structured ? !structuredComplete : !answer.trim()"
-                class="mt-2 text-xs text-zinc-500"
+                class="mt-2 text-base text-zinc-500"
               >
                 {{ structured ? '请完成当前任务' : '先写下你的想法' }}
               </p>
@@ -438,7 +445,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
                 <button
                   type="button"
                   data-testid="hint-support"
-                  class="secondary-button"
+                  class="secondary-button classroom-action"
                   :disabled="controlsDisabled"
                   @click="support('HINT')"
                 >
@@ -450,7 +457,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
                 <button
                   type="button"
                   data-testid="explain-support"
-                  class="secondary-button"
+                  class="secondary-button classroom-action"
                   :disabled="controlsDisabled"
                   @click="support('EXPLAIN')"
                 >
@@ -463,7 +470,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
               <p
                 v-if="learning.loading"
                 data-testid="support-waiting"
-                class="mt-3 text-sm font-medium text-zinc-600"
+                class="mt-3 text-base font-medium text-zinc-600"
                 role="status"
                 aria-live="polite"
               >
@@ -487,21 +494,21 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <div class="mt-4 grid gap-3 sm:grid-cols-3">
             <button
               type="button"
-              class="primary-button"
+              class="primary-button classroom-action"
               @click="learning.reflect(String(route.params.id), 'CONTINUE_TOMORROW')"
             >
               <CalendarCheck2 :size="18" />明天继续
             </button>
             <button
               type="button"
-              class="secondary-button"
+              class="secondary-button classroom-action"
               @click="learning.reflect(String(route.params.id), 'PAUSE')"
             >
               <Pause :size="18" />先停一停
             </button>
             <button
               type="button"
-              class="secondary-button"
+              class="secondary-button classroom-action"
               @click="learning.reflect(String(route.params.id), 'STOP')"
             >
               <StopCircle :size="18" />不再继续
@@ -520,7 +527,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <RouterLink
             to="/student"
             data-testid="finish-to-plan"
-            class="primary-button mt-6 w-full sm:w-auto"
+            class="primary-button classroom-action mt-6 w-full sm:w-auto"
           >
             返回今日计划
             <ArrowRight

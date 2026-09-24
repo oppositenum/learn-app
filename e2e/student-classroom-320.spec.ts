@@ -207,9 +207,18 @@ test.describe('student classroom at 320px with a soft-keyboard viewport', () => 
 
     await assertNoPrivateStudentText(page, 'initial ASK state')
 
+    for (const control of [submit, hint, explain]) {
+      expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(48)
+    }
+
     await submit.click()
     await expect(page.getByText('继续说说你先找到的固定起点。')).toBeVisible()
     await assertNoPrivateStudentText(page, 'answer-response state')
+    // The submit button must leave its loading label once the tutor has
+    // answered, and a guiding turn is warm, never a red wrong-answer mark.
+    await expect(page.locator('form button[type="submit"]')).toHaveText('提交想法')
+    await expect(page.locator('[data-tutor-turn]')).toHaveAttribute('data-tone', 'guide')
+    expect(await page.locator('body').innerText()).not.toContain('错误')
 
     await hint.click()
     await expect(page.getByText('看看没有买练习册时要先付多少。')).toBeVisible()

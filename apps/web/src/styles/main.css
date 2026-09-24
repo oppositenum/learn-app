@@ -347,3 +347,119 @@ input:focus-visible {
 .continue-card .primary-button:hover:not(:disabled) {
   background: #e8efed;
 }
+
+/* Classroom page. Children read and tap here, so the task, the tutor's latest
+   sentence and the input each sit on their own layer, text stays at 16px or
+   larger and every action is at least 48px tall. */
+.classroom-task {
+  padding: 1.1rem 1.15rem;
+}
+
+.classroom-action {
+  min-height: 3rem;
+  font-size: 1rem;
+}
+
+/* The tutor's tone is colour only. Guidance uses a warm orange edge instead of
+   red, and the glow plays once when a new sentence arrives. */
+.classroom-tutor-turn {
+  border: 1px solid transparent;
+  animation: classroom-turn-in 320ms var(--ease);
+}
+
+.classroom-tutor-turn--advance {
+  border-color: #a7dcc0;
+  background: #e8f6ee;
+  box-shadow: inset 3px 0 0 #15803d;
+  color: #14532d;
+}
+
+.classroom-tutor-turn--guide {
+  border-color: #f3c98b;
+  background: var(--warm-tint);
+  box-shadow: inset 3px 0 0 #d97706, 0 0 0 4px rgb(245 158 11 / 12%);
+  color: #6b3c05;
+}
+
+@keyframes classroom-turn-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.stage-track {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+}
+
+.stage-track-node {
+  display: grid;
+  min-width: 0;
+  justify-items: center;
+  gap: 0.25rem;
+  font-size: 1rem;
+  font-weight: 650;
+  color: var(--ink-faint);
+}
+
+.stage-track-mark {
+  display: grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  border: 2px solid #c8c8c3;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  transition: background-color 220ms var(--ease), border-color 220ms var(--ease), box-shadow 220ms var(--ease);
+}
+
+.stage-track-node[data-stage-state="done"] {
+  color: var(--accent-strong);
+}
+
+.stage-track-node[data-stage-state="done"] .stage-track-mark {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: white;
+}
+
+.stage-track-node[data-stage-state="current"] {
+  color: var(--ink);
+}
+
+.stage-track-node[data-stage-state="current"] .stage-track-mark {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  box-shadow: 0 0 0 4px var(--accent-tint);
+}
+
+/* The voice button keeps its own behaviour; the classroom only makes it a
+   larger, tinted target so it reads as a first-class way to answer. */
+.classroom-voice > .grid {
+  grid-template-rows: 3rem auto;
+}
+
+.classroom-voice .icon-button {
+  width: 3rem;
+  height: 3rem;
+  border-color: var(--accent-edge);
+  border-radius: 999px;
+  background: var(--accent-tint);
+  color: var(--accent-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .classroom-tutor-turn {
+    animation: none;
+  }
+
+  .classroom-tutor-turn--guide {
+    box-shadow: inset 3px 0 0 #d97706;
+  }
+
+  .stage-track-node[data-stage-state="current"] .stage-track-mark {
+    box-shadow: none;
+  }
+}

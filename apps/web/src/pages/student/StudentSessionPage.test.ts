@@ -773,3 +773,75 @@ test('keeps a variable-height composer after the Tutor turn in normal document f
   expect(composer.get('[data-testid="answer-controls"]').attributes('disabled')).toBe('')
   wrapper.unmount()
 })
+
+test('draws the four server stages as done, current and upcoming nodes', async () => {
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({
+    status: 'ACTIVE', state: 'VARIANT',
+    stage_flow: { version: 'classroom-stage-flow-v1', stage: 'VARIANT', task_version: 'content-v1' },
+  }))))
+
+  const nodes = wrapper.get('[aria-label="课堂阶段"]').findAll('li')
+  expect(nodes.map((node) => node.text())).toEqual(['原题', '变式', '抽象', '验证'])
+  expect(nodes.map((node) => node.attributes('data-stage-state'))).toEqual(['done', 'current', 'upcoming', 'upcoming'])
+  expect(nodes[0].find('svg').exists()).toBe(true)
+  expect(nodes[2].find('svg').exists()).toBe(false)
+  expect(wrapper.get('[aria-current="step"]').text()).toBe('变式')
+  expect(wrapper.text()).not.toMatch(/\d+\s*%/)
+  wrapper.unmount()
+})
+
+test('draws no stage progress when the session carries no stage flow', async () => {
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({ status: 'ACTIVE' }))))
+
+  expect(wrapper.find('[aria-label="课堂阶段"]').exists()).toBe(false)
+  wrapper.unmount()
+})
+
+test('shows a guiding turn in warm colour with no wrong-answer verdict', async () => {
+  let answered = false
+  const { learning, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request) => {
+    if (String(input).endsWith('/answers')) {
+      answered = true
+      return response({
+        session_id: 'session-1', version: 2, timing_version: 1, action: 'PROBE',
+        message: '你用到了题目里的哪些条件？', socratic_round: 1, status: 'ACTIVE',
+        active_seconds: 20, current_active_seconds: 1, timing_observed_at: '2026-08-26T12:00:21Z',
+      })
+    }
+    return response(session({
+      version: answered ? 2 : 1, status: 'ACTIVE', state: answered ? 'PROBE' : 'ASK', socratic_round: answered ? 1 : 0,
+      timeline: answered ? [
+        { sequence: 1, actor: 'STUDENT', message: '一张12元', at: '2026-08-26T12:00:20Z' },
+        { sequence: 2, actor: 'TUTOR', action: 'PROBE', message: '你用到了题目里的哪些条件？', at: '2026-08-26T12:00:21Z' },
+      ] : [],
+    }))
+  }))
+
+  await wrapper.get('textarea').setValue('一张12元')
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  const turn = wrapper.get('[data-tutor-turn]')
+  expect(turn.text()).toBe('你用到了题目里的哪些条件？')
+  expect(turn.attributes('data-tone')).toBe('guide')
+  expect(learning.loading).toBe(false)
+  expect(wrapper.get('button[type="submit"]').text()).toBe('提交想法')
+  expect(wrapper.text()).not.toContain('错误')
+  expect(wrapper.text()).not.toMatch(/[×✗✘❌]/)
+  const classes = wrapper.findAll('*').flatMap((element) => element.classes())
+  expect(classes.filter((name) => /red|error|wrong|danger/.test(name))).toEqual([])
+  wrapper.unmount()
+})
+
+test('shows an advancing turn in green using only the tutor sentence', async () => {
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({
+    status: 'ACTIVE', state: 'VARIANT',
+    timeline: [{ sequence: 2, actor: 'TUTOR', action: 'VARIANT', message: '换一个数字再试试看。', at: '2026-08-26T12:00:21Z' }],
+  }))))
+
+  const turn = wrapper.get('[data-tutor-turn]')
+  expect(turn.attributes('data-tone')).toBe('advance')
+  expect(turn.text()).toBe('换一个数字再试试看。')
+  expect(wrapper.text()).not.toContain('正确')
+  wrapper.unmount()
+})
