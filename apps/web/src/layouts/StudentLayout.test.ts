@@ -177,6 +177,77 @@ test('defers pagehide pause until an in-flight submission closes', async () => {
 	wrapper.unmount()
 })
 
+test('clears the checking label once a submission hidden by pagehide writes the tutor turn', async () => {
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+	const answer = deferred<Response>()
+	const requests: string[] = []
+	let snapshot = session()
+	vi.stubGlobal('fetch', vi.fn((input: string | URL | Request) => {
+		const path = String(input)
+		requests.push(path)
+		if (path.endsWith('/answers')) return answer.promise
+		if (path.endsWith('/pause')) {
+			snapshot = { ...snapshot, version: 3, timing_version: 3, status: 'PAUSED', current_active_seconds: 0, timing_observed_at: '2026-08-26T12:02:00Z' }
+			return Promise.resolve(jsonResponse({
+				session_id: 'session-1', version: 3, timing_version: 3, status: 'PAUSED',
+				active_seconds: 10, current_active_seconds: 0, timing_observed_at: '2026-08-26T12:02:00Z',
+			}))
+		}
+		if (path.endsWith('/sessions/session-1')) return Promise.resolve(jsonResponse(snapshot))
+		throw new Error(`unexpected request: ${path}`)
+	}))
+	const pinia = createPinia()
+	setActivePinia(pinia)
+	const router = createRouter({
+		history: createMemoryHistory(),
+		routes: [
+			{ path: '/student', component: { template: '<div>首页</div>' } },
+			{ path: '/student/session/:id', component: StudentSessionPage, meta: { classroom: true, hideStudentNav: true } },
+		],
+	})
+	await router.push('/student/session/session-1')
+	await router.isReady()
+	useAuthSession().user.value = { user_id: 'user-1', role: 'STUDENT', display_name: '学生', student_id: 'student-1' }
+	const wrapper = mount(StudentLayout, { global: { plugins: [pinia, router] } })
+	await flushPromises()
+	const learning = useLearningStore()
+	const submitButton = () => wrapper.get('button[type="submit"]')
+
+	await wrapper.get('textarea').setValue('三张门票一共36元，一张12元')
+	await wrapper.get('form').trigger('submit')
+	await flushPromises()
+	expect(submitButton().text()).toBe('检查中')
+
+	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+	document.dispatchEvent(new Event('visibilitychange'))
+	window.dispatchEvent(new Event('pagehide'))
+	await flushPromises()
+	expect(requests.some((path) => path.endsWith('/pause'))).toBe(false)
+
+	snapshot = session({
+		version: 2, timing_version: 2, state: 'PROBE', socratic_round: 1, timing_observed_at: '2026-08-26T12:01:00Z',
+		timeline: [
+			{ sequence: 1, actor: 'STUDENT', at: '2026-08-26T12:00:50Z', message: '三张门票一共36元，一张12元' },
+			{ sequence: 2, actor: 'TUTOR', action: 'PROBE', at: '2026-08-26T12:01:00Z', message: '你用到了题目里的哪些条件？' },
+		],
+	})
+	answer.resolve(jsonResponse({
+		session_id: 'session-1', version: 2, timing_version: 2, status: 'ACTIVE', action: 'PROBE',
+		message: '你用到了题目里的哪些条件？', socratic_round: 1, active_seconds: 10, current_active_seconds: 10,
+		timing_observed_at: '2026-08-26T12:01:00Z',
+	}))
+	await flushPromises()
+
+	expect(wrapper.text()).toContain('你用到了题目里的哪些条件？')
+	expect(learning.status).toBe('PAUSED')
+	expect(learning.loading).toBe(false)
+	expect(learning.submissionInFlight).toBe(false)
+	expect(submitButton().text()).not.toContain('检查中')
+	expect(submitButton().text()).toBe('提交想法')
+	expect(requests.some((path) => path.endsWith('/resume'))).toBe(false)
+	wrapper.unmount()
+})
+
 test('explicit resume after a legal pause restores controls without losing the draft', async () => {
 	Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
 	const requests: string[] = []
