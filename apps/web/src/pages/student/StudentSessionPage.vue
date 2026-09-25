@@ -157,26 +157,26 @@ onBeforeUnmount(() => window.clearInterval(timer))
 
     <template v-else>
       <header class="sticky top-0 z-10 border-b border-[var(--hairline)] bg-[rgb(255_255_255/88%)] px-4 py-3 backdrop-blur sm:px-7">
-        <div class="grid grid-cols-[2.75rem_minmax(0,1fr)_2.75rem] items-center gap-2">
+        <div class="grid grid-cols-[3rem_minmax(0,1fr)_3rem] items-center gap-2">
           <RouterLink
             to="/student"
-            class="icon-button"
+            class="icon-button classroom-icon-action"
             aria-label="返回首页"
           >
             <ArrowLeft :size="20" />
           </RouterLink>
           <div class="min-w-0 text-center">
-            <p class="truncate text-sm font-semibold">
+            <p class="truncate text-base font-semibold">
               {{ learning.subject }} · {{ learning.knowledgePoint }}
             </p>
-            <p class="text-xs text-zinc-500">
+            <p class="text-base text-zinc-500">
               {{ difficultyLabels[learning.difficulty] ?? '适合当前进度' }}
             </p>
           </div>
           <button
             v-if="!complete && learning.status !== 'ABANDONED'"
             type="button"
-            class="icon-button"
+            class="icon-button classroom-icon-action"
             :disabled="learning.loading"
             aria-label="结束本次探索"
             title="结束本次探索"
@@ -189,7 +189,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
             class="text-right text-xs font-medium text-zinc-500"
           >{{ learning.status === 'PAUSED' ? '已暂停' : '' }}</span>
         </div>
-        <div class="mt-3 flex items-center justify-center gap-5 text-xs text-zinc-500">
+        <div class="mt-3 flex items-center justify-center gap-5 text-base text-zinc-500">
           <span data-testid="segment-timer">本段用时 <strong class="inline-block min-w-12 font-semibold tabular-nums text-zinc-700">{{ formatDuration(currentSeconds) }}</strong></span>
           <span data-testid="session-timer">本节累计 <strong class="inline-block min-w-12 font-semibold tabular-nums text-zinc-700">{{ formatDuration(totalSeconds) }}</strong></span>
         </div>
@@ -216,7 +216,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
         class="px-4 py-6 sm:px-7"
         aria-label="当前课堂"
       >
-        <div class="flex items-center gap-2 text-sm font-semibold text-teal-700">
+        <div class="flex items-center gap-2 text-base font-semibold text-teal-700">
           <span class="agent-badge">AI</span>
           <span>{{ tutorActionLabels[learning.tutorAction] }}</span>
         </div>
@@ -256,12 +256,12 @@ onBeforeUnmount(() => window.clearInterval(timer))
               <p class="font-semibold">
                 安全提醒
               </p>
-              <p class="mt-1 whitespace-pre-line text-sm leading-6">
+              <p class="mt-1 whitespace-pre-line text-base leading-7">
                 {{ learning.safetyNotice.message }}
               </p>
               <p
                 v-if="learning.safetyNotice.parent_notified"
-                class="mt-2 text-xs font-medium text-amber-800"
+                class="mt-2 text-base font-medium text-amber-800"
               >
                 已按安全规则通知家长，通知中不包含你刚才输入的原话。
               </p>
@@ -371,12 +371,12 @@ onBeforeUnmount(() => window.clearInterval(timer))
             <p class="font-medium">
               课堂内容已经更新
             </p>
-            <p class="mt-1 text-sm text-zinc-600">
+            <p class="mt-1 text-base text-zinc-600">
               重新加载后可以继续请求提示。
             </p>
             <button
               type="button"
-              class="secondary-button mt-3"
+              class="secondary-button classroom-action mt-3"
               :disabled="learning.preparing"
               @click="openSession(routeSessionID)"
             >

@@ -31,7 +31,7 @@ watch(() => route.params.id, async (value) => {
          must exist even while the supply is still being prepared. -->
     <RouterLink
       :to="classroomRoute"
-      class="icon-button"
+      class="icon-button classroom-icon-action"
       aria-label="返回原题"
     >
       <ArrowLeft :size="20" />
@@ -88,6 +88,14 @@ watch(() => route.params.id, async (value) => {
             {{ explanation }}
           </p>
         </div>
+        <p
+          v-if="learning.error"
+          data-testid="supply-error"
+          class="notice-warm mt-5 px-4 py-3 text-base font-medium"
+          role="alert"
+        >
+          {{ learning.error }}
+        </p>
         <button
           type="button"
           class="secondary-button home-action mt-5 w-full"

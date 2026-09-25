@@ -53,7 +53,7 @@ watch(() => route.params.id, async (value) => {
     <template v-else>
       <RouterLink
         :to="classroomRoute"
-        class="icon-button"
+        class="icon-button classroom-icon-action"
         aria-label="返回课堂"
       >
         <ArrowLeft :size="20" />

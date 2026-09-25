@@ -140,7 +140,7 @@ input:focus-visible {
   font-size: 0.95rem;
   font-weight: 650;
   transition: background-color 180ms var(--ease), color 180ms var(--ease),
-    border-color 180ms var(--ease), box-shadow 180ms var(--ease), transform 120ms var(--ease);
+    border-color 180ms var(--ease), box-shadow 180ms var(--ease), transform 150ms var(--ease);
 }
 
 .primary-button:active:not(:disabled),
@@ -265,6 +265,12 @@ input:focus-visible {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+
+  .primary-button:active:not(:disabled),
+  .secondary-button:active:not(:disabled),
+  .choice-button:active:not(:disabled) {
+    transform: none;
+  }
 }
 
 
@@ -325,7 +331,7 @@ input:focus-visible {
   border-radius: 999px;
   background: var(--accent-tint);
   color: var(--accent-strong);
-  font-size: 0.7rem;
+  font-size: 1rem;
   font-weight: 700;
 }
 
@@ -369,6 +375,13 @@ input:focus-visible {
 .classroom-action {
   min-height: 3rem;
   font-size: 1rem;
+}
+
+/* The back and end icons on the classroom, voice and supply pages are 48px
+   targets like every other student action; parent and owner keep 44px. */
+.classroom-icon-action {
+  width: 3rem;
+  height: 3rem;
 }
 
 /* The tutor's tone is colour only. Guidance uses a warm orange edge instead of
