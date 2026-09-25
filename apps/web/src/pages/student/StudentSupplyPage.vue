@@ -44,7 +44,7 @@ watch(() => route.params.id, async (value) => {
       <div class="h-5 w-32 animate-pulse bg-zinc-200" />
       <div class="mt-5 h-10 w-4/5 animate-pulse bg-zinc-200" />
       <div class="mt-8 h-36 animate-pulse bg-zinc-200" />
-      <p class="mt-4 text-sm text-zinc-500">
+      <p class="mt-4 text-base text-zinc-500">
         正在准备知识补给
       </p>
     </section>
@@ -60,12 +60,12 @@ watch(() => route.params.id, async (value) => {
           <p class="font-medium">
             课堂已暂停
           </p>
-          <p class="mt-1 text-sm text-zinc-600">
+          <p class="mt-1 text-base text-zinc-600">
             回到课堂并点击“继续探索”后，才能继续使用知识补给。
           </p>
           <RouterLink
             :to="classroomRoute"
-            class="primary-button mt-4"
+            class="primary-button home-action mt-4"
           >
             回到课堂继续探索
             <ArrowRight
@@ -74,14 +74,14 @@ watch(() => route.params.id, async (value) => {
             />
           </RouterLink>
         </div>
-        <p class="text-sm font-semibold text-sky-700">
+        <p class="text-base font-semibold text-sky-700">
           知识补给站
         </p>
         <h1 class="mt-3 text-3xl font-semibold leading-10">
           {{ learning.knowledgePoint || '回到当前知识点' }}
         </h1>
         <div class="mt-8 border-y border-zinc-300 py-7">
-          <p class="text-sm text-zinc-500">
+          <p class="text-base text-zinc-500">
             当前讲解
           </p>
           <p class="mt-3 whitespace-pre-line text-2xl font-semibold">
@@ -90,7 +90,7 @@ watch(() => route.params.id, async (value) => {
         </div>
         <button
           type="button"
-          class="secondary-button mt-5 w-full"
+          class="secondary-button home-action mt-5 w-full"
           :disabled="learning.status !== 'ACTIVE' || learning.loading || !learning.sessionID"
           @click="anotherExample"
         >
@@ -102,7 +102,7 @@ watch(() => route.params.id, async (value) => {
         </button>
         <RouterLink
           :to="classroomRoute"
-          class="primary-button mt-8 w-full"
+          class="primary-button home-action mt-8 w-full"
         >
           返回原题
           <ArrowRight

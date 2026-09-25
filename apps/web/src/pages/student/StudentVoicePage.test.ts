@@ -57,6 +57,17 @@ async function mountPage(fetch: ReturnType<typeof vi.fn>) {
 	return { router, wrapper }
 }
 
+function textElement(wrapper: Awaited<ReturnType<typeof mountPage>>['wrapper'], selector: string, text: string) {
+	const found = wrapper.findAll(selector).filter((node) => node.text().includes(text)).at(-1)
+	expect(found, `no ${selector} containing ${text}`).toBeDefined()
+	return found!
+}
+
+function expectBaseSize(classes: string[]) {
+	expect(classes).not.toContain('text-sm')
+	expect(classes).toContain('text-base')
+}
+
 afterEach(() => {
 	vi.unstubAllGlobals()
 	vi.restoreAllMocks()
@@ -89,5 +100,36 @@ test('redirects an active session whose Tutor action does not belong on the voic
 	}))))
 
 	expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+	wrapper.unmount()
+})
+
+test('shows the preparing line at 16px', async () => {
+	const { wrapper } = await mountPage(vi.fn(() => new Promise<Response>(() => {})))
+
+	expectBaseSize(textElement(wrapper, 'p', '正在准备语音讲解').classes())
+	wrapper.unmount()
+})
+
+test('keeps voice page text at 16px and main actions at 48px', async () => {
+	const { wrapper } = await mountPage(vi.fn(async () => response(session({ voice_audio: '' }))))
+
+	expectBaseSize(textElement(wrapper, 'p', '才能继续播放讲解').classes())
+	expectBaseSize(textElement(wrapper, 'div', 'AI 老师正在讲解').classes())
+	expectBaseSize(textElement(wrapper, 'div', '00:02').classes())
+	expectBaseSize(textElement(wrapper, 'p', '语音服务尚未连接').classes())
+	expect(textElement(wrapper, 'a', '回到课堂继续探索').classes()).toContain('home-action')
+	for (const label of ['播放', '再听一句', '我懂了，回原题']) {
+		expect(textElement(wrapper, 'button', label).classes()).toContain('home-action')
+	}
+	wrapper.unmount()
+})
+
+test('shows a failed voice load as a warm 16px notice, not a red error', async () => {
+	const { wrapper } = await mountPage(vi.fn(async () => response({ error: { message: '课堂暂时不可用' } }, 503)))
+
+	const notice = wrapper.get('[data-testid="voice-error"]')
+	expect(notice.classes()).toContain('notice-warm')
+	expectBaseSize(notice.classes())
+	for (const name of notice.classes()) expect(name).not.toMatch(/red|error|wrong|danger/)
 	wrapper.unmount()
 })

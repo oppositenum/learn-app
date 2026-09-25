@@ -55,6 +55,17 @@ async function mountPage(fetch: ReturnType<typeof vi.fn>) {
 	return { router, wrapper }
 }
 
+function textElement(wrapper: Awaited<ReturnType<typeof mountPage>>['wrapper'], selector: string, text: string) {
+	const found = wrapper.findAll(selector).filter((node) => node.text().includes(text)).at(-1)
+	expect(found, `no ${selector} containing ${text}`).toBeDefined()
+	return found!
+}
+
+function expectBaseSize(classes: string[]) {
+	expect(classes).not.toContain('text-sm')
+	expect(classes).toContain('text-base')
+}
+
 afterEach(() => {
 	vi.unstubAllGlobals()
 	vi.restoreAllMocks()
@@ -85,5 +96,24 @@ test('redirects an active session whose Tutor action does not belong on the supp
 	}))))
 
 	expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+	wrapper.unmount()
+})
+
+test('shows the preparing line at 16px', async () => {
+	const { wrapper } = await mountPage(vi.fn(() => new Promise<Response>(() => {})))
+
+	expectBaseSize(textElement(wrapper, 'p', '正在准备知识补给').classes())
+	wrapper.unmount()
+})
+
+test('keeps supply page text at 16px and main actions at 48px', async () => {
+	const { wrapper } = await mountPage(vi.fn(async () => response(session())))
+
+	expectBaseSize(textElement(wrapper, 'p', '才能继续使用知识补给').classes())
+	expectBaseSize(textElement(wrapper, 'p', '知识补给站').classes())
+	expectBaseSize(textElement(wrapper, 'p', '当前讲解').classes())
+	expect(textElement(wrapper, 'a', '回到课堂继续探索').classes()).toContain('home-action')
+	expect(textElement(wrapper, 'button', '换个例子').classes()).toContain('home-action')
+	expect(textElement(wrapper, 'a', '返回原题').classes()).toContain('home-action')
 	wrapper.unmount()
 })

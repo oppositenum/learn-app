@@ -46,7 +46,7 @@ watch(() => route.params.id, async (value) => {
       <div class="h-5 w-36 animate-pulse bg-zinc-200" />
       <div class="mt-5 h-10 w-3/4 animate-pulse bg-zinc-200" />
       <div class="mt-8 h-32 animate-pulse bg-zinc-200" />
-      <p class="mt-4 text-sm text-zinc-500">
+      <p class="mt-4 text-base text-zinc-500">
         正在准备语音讲解
       </p>
     </section>
@@ -69,12 +69,12 @@ watch(() => route.params.id, async (value) => {
           <p class="font-medium">
             课堂已暂停
           </p>
-          <p class="mt-1 text-sm text-zinc-600">
+          <p class="mt-1 text-base text-zinc-600">
             回到课堂并点击“继续探索”后，才能继续播放讲解。
           </p>
           <RouterLink
             :to="classroomRoute"
-            class="primary-button mt-4"
+            class="primary-button home-action mt-4"
           >
             回到课堂继续探索
             <ArrowLeft
@@ -83,7 +83,7 @@ watch(() => route.params.id, async (value) => {
             />
           </RouterLink>
         </div>
-        <div class="flex items-center gap-2 text-sm font-semibold text-teal-700">
+        <div class="flex items-center gap-2 text-base font-semibold text-teal-700">
           <Volume2
             :size="18"
             aria-hidden="true"
@@ -99,7 +99,7 @@ watch(() => route.params.id, async (value) => {
             :style="{ width: `${durationMS ? Math.min(100, positionMS / durationMS * 100) : 0}%` }"
           />
         </div>
-        <div class="mt-2 flex justify-between text-sm tabular-nums text-zinc-500">
+        <div class="mt-2 flex justify-between text-base tabular-nums text-zinc-500">
           <span>{{ formatTime(positionMS) }}</span>
           <span>{{ formatTime(durationMS) }}</span>
         </div>
@@ -126,7 +126,7 @@ watch(() => route.params.id, async (value) => {
         </div>
         <p
           v-if="!learning.voiceAudio"
-          class="mt-6 text-sm text-zinc-500"
+          class="mt-6 text-base text-zinc-500"
         >
           语音服务尚未连接，文字讲解仍可使用。
         </p>
@@ -134,7 +134,7 @@ watch(() => route.params.id, async (value) => {
         <div class="mt-10 grid grid-cols-2 gap-3">
           <button
             type="button"
-            class="primary-button"
+            class="primary-button home-action"
             :disabled="learning.status !== 'ACTIVE' || !learning.voiceAudio"
             @click="togglePlayback"
           >
@@ -147,7 +147,7 @@ watch(() => route.params.id, async (value) => {
           </button>
           <button
             type="button"
-            class="secondary-button"
+            class="secondary-button home-action"
             :disabled="learning.status !== 'ACTIVE' || !learning.voiceAudio"
             @click="replaySentence"
           >
@@ -160,14 +160,15 @@ watch(() => route.params.id, async (value) => {
         </div>
         <p
           v-if="learning.error"
-          class="mt-4 text-sm font-medium text-red-700"
+          data-testid="voice-error"
+          class="notice-warm mt-4 px-4 py-3 text-base font-medium"
           role="alert"
         >
           {{ learning.error }}
         </p>
         <button
           type="button"
-          class="secondary-button mt-3 w-full"
+          class="secondary-button home-action mt-3 w-full"
           :disabled="learning.status !== 'ACTIVE' || learning.loading || !learning.sessionID"
           @click="returnToQuestion"
         >
