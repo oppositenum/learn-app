@@ -1,17 +1,14 @@
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
-
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter, type RouteRecordRaw } from 'vue-router'
 
 import { router as applicationRouter } from '../routes'
+import mainCSS from '../styles/main.css?raw'
 import OwnerLayout from './OwnerLayout.vue'
 import ParentLayout from './ParentLayout.vue'
 import StudentLayout from './StudentLayout.vue'
 
 const page = { template: '<div>page</div>' }
-const mainCSS = readFileSync(resolve(process.cwd(), 'src/styles/main.css'), 'utf8')
 
 function declarationsFor(selector: string) {
 	const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
