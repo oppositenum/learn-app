@@ -44,19 +44,19 @@ const actorLabel = {
         <ArrowLeft :size="20" />
       </RouterLink>
       <div class="text-center">
-        <h1 class="text-sm font-semibold">
+        <h1 class="text-base font-semibold">
           实时课堂
         </h1>
-        <p class="text-xs text-emerald-700">
+        <p class="text-base text-emerald-700">
           {{ learning.connected ? '正在同步' : learning.reconnecting ? '正在重连' : '等待连接' }}
         </p>
       </div>
-      <span class="text-sm tabular-nums text-zinc-500">{{ learning.elapsed }}</span>
+      <span class="text-base tabular-nums text-zinc-500">{{ learning.elapsed }}</span>
     </header>
 
     <label
       v-if="learning.children.length > 1"
-      class="mx-4 mt-5 block text-sm font-semibold sm:mx-7"
+      class="mx-4 mt-5 block text-base font-semibold sm:mx-7"
     >监督孩子<select
       :value="learning.studentID"
       class="mt-2 h-11 w-full border border-zinc-300 bg-white px-3 font-normal"
@@ -78,12 +78,12 @@ const actorLabel = {
       >
         <p
           v-if="learning.connectionError"
-          class="mb-5 border-l-2 border-red-600 pl-3 text-sm text-red-700"
+          class="mb-5 border-l-2 border-red-600 pl-3 text-base text-red-700"
           role="alert"
         >
           {{ learning.connectionError }}
         </p>
-        <p class="text-sm text-zinc-500">
+        <p class="text-base text-zinc-500">
           {{ learning.subject }} · {{ learning.knowledgePoint }}
         </p>
         <h2
@@ -121,10 +121,10 @@ const actorLabel = {
             </span>
             <div class="min-w-0 border-b border-zinc-200 pb-6">
               <div class="flex flex-wrap items-center justify-between gap-2">
-                <p class="text-sm font-semibold">
+                <p class="text-base font-semibold">
                   {{ actorLabel[item.actor] }}
                 </p>
-                <span class="text-xs text-zinc-500">{{ item.meta }}</span>
+                <span class="text-base text-zinc-500">{{ item.meta }}</span>
               </div>
               <p class="mt-2 whitespace-pre-line leading-7 text-zinc-700">
                 {{ item.text }}
@@ -138,7 +138,7 @@ const actorLabel = {
         class="px-4 py-6 sm:px-7"
         aria-label="教学决策详情"
       >
-        <div class="flex items-center gap-2 text-sm font-semibold text-teal-800">
+        <div class="flex items-center gap-2 text-base font-semibold text-teal-800">
           <ShieldCheck
             :size="18"
             aria-hidden="true"
@@ -190,14 +190,14 @@ const actorLabel = {
         </dl>
 
         <div class="mt-7 border-t border-zinc-300 pt-5">
-          <div class="flex items-center gap-2 text-sm font-semibold">
+          <div class="flex items-center gap-2 text-base font-semibold">
             <Volume2
               :size="18"
               aria-hidden="true"
             />
             {{ supportStatus }}
           </div>
-          <p class="mt-2 text-sm leading-6 text-zinc-500">
+          <p class="mt-2 text-base leading-6 text-zinc-500">
             第 3 轮启发后仍卡住时，系统会切换平行例子讲解，再返回原题验证。
           </p>
         </div>
@@ -219,7 +219,7 @@ const actorLabel = {
           降低今天强度
         </button>
         <p
-          class="mt-3 min-h-5 text-center text-xs text-zinc-500"
+          class="mt-3 min-h-5 text-center text-base text-zinc-500"
           aria-live="polite"
         >
           {{ learning.interventionStatus }}
@@ -234,7 +234,7 @@ const actorLabel = {
       <h2 class="text-lg font-semibold">
         等待孩子开始课堂
       </h2>
-      <p class="mt-2 text-sm text-zinc-500">
+      <p class="mt-2 text-base text-zinc-500">
         WebSocket {{ learning.connected ? '已连接，课堂开始后会自动进入实时视图。' : '正在连接。' }}
       </p>
     </section>

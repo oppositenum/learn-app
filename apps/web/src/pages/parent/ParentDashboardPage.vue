@@ -21,14 +21,14 @@ function switchChild(event: Event) {
   <main class="page-wrap pb-28 pt-7">
     <header class="flex items-start justify-between gap-4">
       <div>
-        <p class="text-sm text-zinc-500">
+        <p class="text-base text-zinc-500">
           {{ learning.childName || '孩子' }}的学习
         </p>
         <h1 class="mt-1 text-2xl font-semibold">
           家长监督
         </h1>
       </div>
-      <span class="inline-flex items-center gap-2 bg-emerald-100 px-3 py-2 text-sm font-semibold text-emerald-800">
+      <span class="inline-flex items-center gap-2 bg-emerald-100 px-3 py-2 text-base font-semibold text-emerald-800">
         <span class="size-2 bg-emerald-500" />
         {{ connectionLabel }}
       </span>
@@ -36,7 +36,7 @@ function switchChild(event: Event) {
 
     <label
       v-if="learning.children.length > 1"
-      class="mt-6 block text-sm font-semibold"
+      class="mt-6 block text-base font-semibold"
     >监督孩子<select
       :value="learning.studentID"
       class="mt-2 h-11 w-full border border-zinc-300 bg-white px-3 font-normal"
@@ -55,7 +55,7 @@ function switchChild(event: Event) {
     >
       <div class="flex items-center justify-between gap-4">
         <div>
-          <p class="text-sm text-zinc-500">
+          <p class="text-base text-zinc-500">
             当前课堂
           </p>
           <h2
@@ -69,7 +69,7 @@ function switchChild(event: Event) {
           <p class="font-semibold tabular-nums">
             {{ learning.elapsed }}
           </p>
-          <p class="text-xs text-zinc-500">
+          <p class="text-base text-zinc-500">
             目标 {{ learning.target }}
           </p>
         </div>
@@ -79,14 +79,14 @@ function switchChild(event: Event) {
           :size="19"
           aria-hidden="true"
         />
-        <p class="text-sm font-semibold">
+        <p class="text-base font-semibold">
           正在第 {{ learning.socraticRound }} 轮启发 · {{ learning.tutorAction }}
         </p>
       </div>
 
       <dl class="mt-6 grid gap-5 sm:grid-cols-2">
         <div>
-          <dt class="text-xs font-semibold text-zinc-500">
+          <dt class="text-base font-semibold text-zinc-500">
             孩子刚才回答
           </dt>
           <dd class="mt-1 text-lg font-semibold">
@@ -94,7 +94,7 @@ function switchChild(event: Event) {
           </dd>
         </div>
         <div>
-          <dt class="text-xs font-semibold text-zinc-500">
+          <dt class="text-base font-semibold text-zinc-500">
             标准答案
           </dt>
           <dd class="mt-1 text-lg font-semibold text-teal-800">
@@ -102,7 +102,7 @@ function switchChild(event: Event) {
           </dd>
         </div>
         <div class="sm:col-span-2">
-          <dt class="text-xs font-semibold text-zinc-500">
+          <dt class="text-base font-semibold text-zinc-500">
             AI 判断
           </dt>
           <dd class="mt-1 leading-7">
@@ -134,7 +134,7 @@ function switchChild(event: Event) {
       <h2 class="mt-3 text-lg font-semibold">
         等待孩子开始课堂
       </h2>
-      <p class="mt-2 text-sm text-zinc-500">
+      <p class="mt-2 text-base text-zinc-500">
         {{ learning.connected ? '实时连接已建立，开始学习后会自动显示。' : '正在建立实时连接。' }}
       </p>
     </section>
@@ -158,7 +158,7 @@ function switchChild(event: Event) {
           <SlidersHorizontal :size="19" />
         </RouterLink>
       </div>
-      <p class="mt-4 text-sm leading-6 text-zinc-600">
+      <p class="mt-4 text-base leading-6 text-zinc-600">
         计划由系统根据当天表现生成。可调整学习时长、优先学科与复习强度。
       </p>
     </section>

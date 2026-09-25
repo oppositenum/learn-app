@@ -45,6 +45,7 @@ it('hydrates saved preferences including enabled subjects', async () => {
   expect(checked).toContain('ENGLISH')
   expect(checked).not.toContain('CHEMISTRY')
   expect((wrapper.get('select').element as HTMLSelectElement).value).toBe('ENGLISH')
+  expect(wrapper.html()).not.toMatch(/\btext-(xs|sm)\b/)
 })
 
 it('saves the checked subject codes and blocks an empty selection', async () => {

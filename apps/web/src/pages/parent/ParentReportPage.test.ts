@@ -48,6 +48,24 @@ function testRouter(path: string) {
 
 afterEach(() => vi.unstubAllGlobals())
 
+// Parents read these pages on a phone, so no parent template drops below 16px.
+const parentPages = import.meta.glob<string>('./*.vue', { query: '?raw', import: 'default', eager: true })
+
+it('keeps every parent page template at 16px or larger', () => {
+  expect(Object.keys(parentPages).sort()).toEqual([
+    './ParentAbilityPage.vue',
+    './ParentDashboardPage.vue',
+    './ParentLivePage.vue',
+    './ParentReportPage.vue',
+    './ParentSessionReportPage.vue',
+    './ParentSettingsPage.vue',
+  ])
+  for (const [file, source] of Object.entries(parentPages)) {
+    const template = source.slice(source.indexOf('<template>'))
+    expect(template, file).not.toMatch(/\btext-(xs|sm)\b/)
+  }
+})
+
 it('opens a recent classroom with the selected child context', async () => {
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
     const path = String(input)
@@ -61,9 +79,37 @@ it('opens a recent classroom with the selected child context', async () => {
 
   const link = wrapper.get('[aria-label="查看化学物理变化与化学变化课堂详情"]')
   expect(link.attributes('href')).toBe('/parent/report/session/session-1?student=student-1')
+  expect(wrapper.html()).not.toMatch(/\btext-(xs|sm)\b/)
   await link.trigger('click')
   await flushPromises()
   expect(router.currentRoute.value.fullPath).toBe('/parent/report/session/session-1?student=student-1')
+})
+
+it('lays out fourteen activity days four to a row on a phone at 16px', async () => {
+  const days = Array.from({ length: 14 }, (_, index) => ({
+    date: `2026-08-${String(index + 10)}`, completed_sessions: 1, active_seconds: 6000,
+  }))
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    const path = String(input)
+    if (path.includes('/parent/children')) return { ok: true, json: async () => ({ children }) } as Response
+    if (path.includes('/safety-events')) return { ok: true, json: async () => ({ events: [] }) } as Response
+    return { ok: true, json: async () => ({ ...report, activity_days: days }) } as Response
+  }))
+  const router = await testRouter('/parent/report?student=student-1')
+  const wrapper = mount(ParentReportPage, { global: { plugins: [router] } })
+  await flushPromises()
+
+  const grid = wrapper.get('[aria-label="最近十四日活动"]')
+  expect(grid.classes()).toEqual(expect.arrayContaining(['grid-cols-4', 'sm:grid-cols-7']))
+  expect(grid.classes()).not.toContain('grid-cols-7')
+  const cells = wrapper.findAll('[data-testid="activity-day"]')
+  expect(cells.map((cell) => cell.get('span').text())).toEqual(days.map((day) => day.date.slice(5)).reverse())
+  for (const cell of cells) {
+    expect(cell.classes()).toContain('text-base')
+    expect(cell.get('span').classes()).toContain('whitespace-nowrap')
+    expect(cell.get('strong').classes()).toContain('whitespace-nowrap')
+    expect(cell.get('strong').text()).toBe('100m')
+  }
 })
 
 it('renders report-safe analysis without a verbatim Student answer', async () => {
@@ -83,6 +129,7 @@ it('renders report-safe analysis without a verbatim Student answer', async () =>
   expect(wrapper.text()).not.toContain('孩子最后回答')
   expect(wrapper.text()).toContain('120 分钟')
   expect(wrapper.text()).toContain('规则引擎已核验独立证据与跨天复习证据。')
+  expect(wrapper.html()).not.toMatch(/\btext-(xs|sm)\b/)
 })
 
 it('distinguishes an unanswered current question from an incorrect answer', async () => {

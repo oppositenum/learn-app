@@ -25,7 +25,7 @@ onMounted(async () => {
 
 <template>
   <main class="page-wrap pb-28 pt-7">
-    <p class="text-sm text-zinc-500">
+    <p class="text-base text-zinc-500">
       {{ childName }}的学习证据
     </p>
     <h1 class="mt-1 text-2xl font-semibold">
@@ -33,14 +33,14 @@ onMounted(async () => {
     </h1>
     <p
       v-if="error"
-      class="mt-6 border-l-2 border-red-600 pl-3 text-sm text-red-700"
+      class="mt-6 border-l-2 border-red-600 pl-3 text-base text-red-700"
       role="alert"
     >
       {{ error }}
     </p>
     <p
       v-else-if="loading"
-      class="mt-6 text-sm text-zinc-500"
+      class="mt-6 text-base text-zinc-500"
     >
       正在汇总
     </p>
@@ -67,7 +67,7 @@ onMounted(async () => {
               <h3 class="font-semibold">
                 {{ subject.name }}
               </h3>
-              <p class="mt-1 text-sm text-zinc-500">
+              <p class="mt-1 text-base text-zinc-500">
                 已接触 {{ subject.started_knowledge_points }} · 已理解 {{ subject.understood_knowledge_points }} · 已掌握 {{ subject.mastered_knowledge_points }}
               </p>
             </div>
@@ -106,7 +106,7 @@ onMounted(async () => {
           <dt class="font-medium">
             {{ item.name }}
           </dt>
-          <dd class="mt-1 text-sm text-zinc-500">
+          <dd class="mt-1 text-base text-zinc-500">
             {{ item.evidence_count }} 条证据 · {{ item.score.toFixed(0) }} 分
           </dd>
         </div>
@@ -136,13 +136,13 @@ onMounted(async () => {
           <h3 class="font-medium">
             {{ item.name }}
           </h3>
-          <p class="mt-1 text-sm text-zinc-500">
+          <p class="mt-1 text-base text-zinc-500">
             {{ item.subject }} · {{ item.knowledge_point }} · 出现 {{ item.occurrences }} 次 · 已纠正 {{ item.successful_corrections }} 次
           </p>
         </article>
         <p
           v-if="ability.misconceptions.length === 0"
-          class="py-5 text-sm text-zinc-500"
+          class="py-5 text-base text-zinc-500"
         >
           暂无需要持续追踪的易错点
         </p>

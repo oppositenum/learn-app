@@ -64,7 +64,7 @@ onMounted(async () => {
   <main class="page-wrap pb-28 pt-7">
     <header class="flex items-start justify-between gap-4">
       <div>
-        <p class="text-sm text-zinc-500">
+        <p class="text-base text-zinc-500">
           学习计划
         </p>
         <h1 class="mt-1 text-2xl font-semibold">
@@ -83,16 +83,16 @@ onMounted(async () => {
       class="mt-8 space-y-7"
       @submit.prevent="save"
     >
-      <label class="block"><span class="text-sm font-semibold">每日总时长</span><input
+      <label class="block"><span class="text-base font-semibold">每日总时长</span><input
         v-model.number="minutes"
         type="range"
         min="15"
         max="60"
         step="5"
         class="mt-3 w-full accent-teal-700"
-      ><span class="mt-2 block text-sm tabular-nums text-zinc-600">{{ minutes }} 分钟</span></label>
+      ><span class="mt-2 block text-base tabular-nums text-zinc-600">{{ minutes }} 分钟</span></label>
       <fieldset class="block">
-        <legend class="text-sm font-semibold">
+        <legend class="text-base font-semibold">
           开放学科
         </legend>
         <small class="mt-1 block text-zinc-500">孩子的每日计划只包含勾选的学科,勾几科出几科</small>
@@ -106,19 +106,19 @@ onMounted(async () => {
             type="checkbox"
             :value="code"
             class="size-5 accent-teal-700"
-          ><span class="text-sm">{{ subjectNames[code] }}</span></label>
+          ><span class="text-base">{{ subjectNames[code] }}</span></label>
         </div>
       </fieldset>
-      <label class="block"><span class="text-sm font-semibold">优先学科</span><select
+      <label class="block"><span class="text-base font-semibold">优先学科</span><select
         v-model="priority"
         class="mt-2 min-h-11 w-full border border-zinc-300 bg-white px-3"
       ><option value="MATH">数学</option><option value="CHINESE">语文</option><option value="ENGLISH">英语</option><option value="PHYSICS">物理</option><option value="CHEMISTRY">化学</option></select></label>
-      <label class="flex items-center justify-between gap-4 border-y border-zinc-200 py-4"><span><strong class="block text-sm">只复习</strong><small class="text-zinc-500">今天不增加新知识</small></span><input
+      <label class="flex items-center justify-between gap-4 border-y border-zinc-200 py-4"><span><strong class="block text-base">只复习</strong><small class="text-zinc-500">今天不增加新知识</small></span><input
         v-model="reviewOnly"
         type="checkbox"
         class="size-5 accent-teal-700"
       ></label>
-      <label class="flex items-center justify-between gap-4 border-b border-zinc-200 pb-4"><span><strong class="block text-sm">降低强度</strong><small class="text-zinc-500">减少时长并优先巩固</small></span><input
+      <label class="flex items-center justify-between gap-4 border-b border-zinc-200 pb-4"><span><strong class="block text-base">降低强度</strong><small class="text-zinc-500">减少时长并优先巩固</small></span><input
         v-model="reduceIntensity"
         type="checkbox"
         class="size-5 accent-teal-700"
@@ -130,7 +130,7 @@ onMounted(async () => {
         <Save :size="18" />保存计划偏好
       </button>
       <p
-        class="min-h-6 text-center text-sm text-zinc-600"
+        class="min-h-6 text-center text-base text-zinc-600"
         aria-live="polite"
       >
         {{ status }}

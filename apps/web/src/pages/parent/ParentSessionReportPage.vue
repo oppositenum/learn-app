@@ -66,7 +66,7 @@ onMounted(async () => {
         <ArrowLeft :size="20" />
       </RouterLink>
       <div class="min-w-0">
-        <p class="text-sm text-zinc-500">
+        <p class="text-base text-zinc-500">
           {{ childName }}的课堂记录
         </p>
         <h1 class="truncate text-xl font-semibold">
@@ -77,7 +77,7 @@ onMounted(async () => {
 
     <p
       v-if="error"
-      class="mt-6 border-l-2 border-red-600 pl-3 text-sm text-red-700"
+      class="mt-6 border-l-2 border-red-600 pl-3 text-base text-red-700"
       role="alert"
     >
       {{ error }}
@@ -98,7 +98,7 @@ onMounted(async () => {
       >
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">
-            <p class="text-sm text-zinc-500">
+            <p class="text-base text-zinc-500">
               {{ session.subject }} · {{ session.knowledge_point }}
             </p>
             <h2
@@ -108,11 +108,11 @@ onMounted(async () => {
               {{ session.question_prompt }}
             </h2>
           </div>
-          <span class="shrink-0 pt-0.5 text-sm font-semibold text-teal-800">
+          <span class="shrink-0 pt-0.5 text-base font-semibold text-teal-800">
             {{ session.status === 'COMPLETED' ? '已完成' : '进行中' }}
           </span>
         </div>
-        <p class="mt-4 flex items-center gap-2 text-sm text-zinc-500">
+        <p class="mt-4 flex items-center gap-2 text-base text-zinc-500">
           <Clock3
             :size="16"
             aria-hidden="true"
@@ -130,7 +130,7 @@ onMounted(async () => {
             学习结果
           </p>
           <p
-            class="mt-3 flex items-center gap-2 text-sm font-semibold"
+            class="mt-3 flex items-center gap-2 text-base font-semibold"
             :class="session.answer_correct === null ? 'text-zinc-600' : session.answer_correct ? 'text-teal-700' : 'text-red-700'"
           >
             <CheckCircle2
@@ -160,7 +160,7 @@ onMounted(async () => {
           </p>
           <p
             v-if="session.full_solution"
-            class="mt-3 text-sm leading-6 text-zinc-600"
+            class="mt-3 text-base leading-6 text-zinc-600"
           >
             {{ session.full_solution }}
           </p>
@@ -250,10 +250,10 @@ onMounted(async () => {
             </span>
             <div class="min-w-0">
               <div class="flex flex-wrap items-center justify-between gap-2">
-                <p class="text-sm font-semibold">
+                <p class="text-base font-semibold">
                   {{ actorLabel[item.actor] ?? item.actor }}
                 </p>
-                <span class="text-xs text-zinc-500">{{ item.action || new Date(item.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }}</span>
+                <span class="text-base text-zinc-500">{{ item.action || new Date(item.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }}</span>
               </div>
               <p class="mt-2 leading-7 text-zinc-700">
                 {{ item.message }}
@@ -262,7 +262,7 @@ onMounted(async () => {
           </li>
           <li
             v-if="session.timeline.length === 0"
-            class="py-5 text-sm text-zinc-500"
+            class="py-5 text-base text-zinc-500"
           >
             暂无课堂过程记录
           </li>
