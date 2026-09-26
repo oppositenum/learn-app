@@ -233,6 +233,69 @@ it('shows the four why-it-matters items and the three scenes of a knowledge poin
   })
 })
 
+it('shows the five answers of each solution method only where a knowledge point has methods', async () => {
+  const methods = [
+    {
+      sequence: 1,
+      method_name: '假设法',
+      first_look: '先看一共有多少个头、一共有多少只脚。',
+      why_this_method: '先当成全是鸡，脚的差额就知道兔子有几只，不用一开始列两个未知数。',
+      method_path: '全假设，算差额，用每只多出来的脚数去除，再得到另一种。',
+      check_where: '用两种数量分别乘脚数，加起来是否等于总脚数。',
+      more_direct: '熟练以后可以直接列方程。',
+    },
+    {
+      sequence: 2,
+      method_name: '列方程法',
+      first_look: '先看哪个量不知道，哪个量和它按固定关系一起变。',
+      why_this_method: '关系已经是一次的，设未知数比反复试数更清楚。',
+      method_path: '设未知数，写固定量加每份变化量，让它等于总量，再解。',
+      check_where: '把求出的数代回原式，看等号两边是否相同。',
+      more_direct: '数字很小的时候也可以画图或列表。',
+    },
+  ]
+  const point = {
+    knowledge_point_code: 'MATH-LINEAR-EQUATION',
+    knowledge_point: '一元一次方程',
+    subject: 'MATH',
+    foundation: '四则运算熟练、负数概念、等式性质',
+    difficulty_points: '',
+    common_stuck_point: '',
+    release_records: [],
+  }
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    if (String(input) === '/api/v1/owner/content/generation-options') {
+      return { ok: true, status: 200, json: async () => generationOptions } as Response
+    }
+    return { ok: true, status: 200, json: async () => ({
+      records: [],
+      knowledge_points: [
+        { ...point, solution_methods: methods },
+        { ...point, knowledge_point_code: 'MATH-FRACTION-COMMON-DENOMINATOR', knowledge_point: '分数通分', solution_methods: [] },
+      ],
+    }) } as Response
+  }))
+
+  const wrapper = mount(AdminContentPage)
+  await flushPromises()
+
+  const [withMethods, withoutMethods] = wrapper.findAll('[data-testid="knowledge-point-breakdown"]')
+  const rendered = withMethods.findAll('[data-testid="knowledge-point-solution-method"]')
+  expect(rendered).toHaveLength(2)
+  rendered.forEach((method, index) => {
+    expect(method.get('p').text()).toBe(methods[index].method_name)
+    expect(method.findAll('ul > li').map((line) => line.text())).toEqual([
+      `第一眼看什么 ${methods[index].first_look}`,
+      `为什么用这个方法 ${methods[index].why_this_method}`,
+      `路径是什么 ${methods[index].method_path}`,
+      `在哪里检查 ${methods[index].check_where}`,
+      `有没有更直接的做法 ${methods[index].more_direct}`,
+    ])
+  })
+  expect(withoutMethods.find('[data-testid="knowledge-point-solution-method"]').exists()).toBe(false)
+  expect(withoutMethods.findAll('h3').some((heading) => heading.text() === '解法思路')).toBe(false)
+})
+
 it('shows no breakdown headings when no knowledge point has one', async () => {
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
     if (String(input) === '/api/v1/owner/content/generation-options') {
@@ -245,7 +308,7 @@ it('shows no breakdown headings when no knowledge point has one', async () => {
   await flushPromises()
 
   expect(wrapper.find('[data-testid="knowledge-point-breakdown"]').exists()).toBe(false)
-  for (const heading of ['基础', '难度点', '常见卡点', '为什么重要', '生活场景', '发布记录']) {
+  for (const heading of ['基础', '难度点', '常见卡点', '为什么重要', '生活场景', '解法思路', '发布记录']) {
     expect(wrapper.findAll('dt, h3').some((node) => node.text() === heading)).toBe(false)
   }
 })

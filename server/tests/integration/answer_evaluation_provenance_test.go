@@ -431,6 +431,7 @@ func assertLegacySchemaUnchanged(t *testing.T, ctx context.Context, pool *pgxpoo
 		"classroom_stage_safety_operations",
 		"learning_effect_events",
 		"ai_request_outcomes",
+		"knowledge_point_solution_methods",
 	}, []string{
 		// Added by 000037 as a nullable column; the rest of answer_analyses
 		// must still be exactly what it was before provenance.

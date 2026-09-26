@@ -443,6 +443,9 @@ func assertStudentPayloadHasNoPrivateFields(t *testing.T, body []byte) {
 		"weakness_layer": true,
 		// The §1.1 knowledge point breakdown is for the Owner only.
 		"foundation": true, "difficulty_points": true, "common_stuck_point": true,
+		// Solution methods of a knowledge point are prepared for the Owner only.
+		"solution_methods": true, "method_name": true, "first_look": true, "why_this_method": true,
+		"method_path": true, "check_where": true, "more_direct": true,
 	}
 	var walk func(any)
 	walk = func(value any) {

@@ -665,7 +665,8 @@ ORDER BY q.updated_at DESC,q.id LIMIT 200`)
 
 // ownerKnowledgePointBreakdowns returns the §1.1 breakdown of every knowledge
 // point that has one, with its four life-connection items, its world
-// connection scenes and the release history of its questions. Knowledge
+// connection scenes, its solution methods and the release history of its
+// questions. Knowledge
 // points without a written breakdown are left out.
 func ownerKnowledgePointBreakdowns(ctx context.Context, pool *pgxpool.Pool) ([]map[string]any, error) {
 	rows, err := pool.Query(ctx, `
@@ -693,7 +694,7 @@ ORDER BY kp.code`)
 			"knowledge_point_code": code, "knowledge_point": name, "subject": subject,
 			"foundation": foundation, "difficulty_points": difficultyPoints, "common_stuck_point": stuckPoint,
 			"why_it_matters":    map[string]string{"daily_life": dailyLife, "human_world": humanWorld, "future_learning": futureLearning, "career_or_science": careerOrScience},
-			"world_connections": []map[string]any{}, "release_records": []map[string]any{},
+			"world_connections": []map[string]any{}, "solution_methods": []map[string]any{}, "release_records": []map[string]any{},
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -722,6 +723,27 @@ ORDER BY CASE connection_type WHEN 'DAILY_LIFE' THEN 1 WHEN 'HUMAN_WORLD' THEN 2
 			return nil, err
 		}
 		breakdowns[index]["world_connections"] = scenes
+		methods, err := pool.Query(ctx, `
+SELECT sequence,method_name,first_look,why_this_method,method_path,check_where,more_direct
+FROM knowledge_point_solution_methods WHERE knowledge_point_id=$1 ORDER BY sequence`, id)
+		if err != nil {
+			return nil, err
+		}
+		solutionMethods := []map[string]any{}
+		for methods.Next() {
+			var sequence int
+			var methodName, firstLook, whyThisMethod, methodPath, checkWhere, moreDirect string
+			if err := methods.Scan(&sequence, &methodName, &firstLook, &whyThisMethod, &methodPath, &checkWhere, &moreDirect); err != nil {
+				methods.Close()
+				return nil, err
+			}
+			solutionMethods = append(solutionMethods, map[string]any{"sequence": sequence, "method_name": methodName, "first_look": firstLook, "why_this_method": whyThisMethod, "method_path": methodPath, "check_where": checkWhere, "more_direct": moreDirect})
+		}
+		methods.Close()
+		if err := methods.Err(); err != nil {
+			return nil, err
+		}
+		breakdowns[index]["solution_methods"] = solutionMethods
 		releases, err := pool.Query(ctx, `
 SELECT r.from_status,r.to_status,r.created_at
 FROM content_release_records r JOIN questions q ON q.id=r.question_id

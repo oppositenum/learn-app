@@ -24,6 +24,7 @@ import {
   type ContentGenerationOptions,
   type ContentKnowledgePointBreakdown,
   type ContentRecord,
+  type ContentSolutionMethod,
   type ContentWhyItMatters,
   type GenerateContentInput,
   type GeneratedContentDraft,
@@ -40,6 +41,14 @@ const whyItMattersItems: Array<{ key: keyof ContentWhyItMatters; label: string }
   { key: 'human_world', label: '人与世界' },
   { key: 'future_learning', label: '后续学习' },
   { key: 'career_or_science', label: '职业与科学' },
+]
+
+const solutionMethodQuestions: Array<{ key: keyof Omit<ContentSolutionMethod, 'sequence' | 'method_name'>; label: string }> = [
+  { key: 'first_look', label: '第一眼看什么' },
+  { key: 'why_this_method', label: '为什么用这个方法' },
+  { key: 'method_path', label: '路径是什么' },
+  { key: 'check_where', label: '在哪里检查' },
+  { key: 'more_direct', label: '有没有更直接的做法' },
 ]
 
 const records = ref<ContentRecord[]>([])
@@ -566,6 +575,34 @@ onMounted(load)
             <span class="block">{{ scene.explanation }}</span>
           </li>
         </ul>
+      </div>
+      <div
+        v-if="point.solution_methods?.length"
+        class="mt-4"
+      >
+        <h3 class="text-xs font-semibold text-zinc-500">
+          解法思路
+        </h3>
+        <ol class="mt-2 space-y-3 text-sm leading-6">
+          <li
+            v-for="method in point.solution_methods"
+            :key="method.sequence"
+            data-testid="knowledge-point-solution-method"
+          >
+            <p class="font-semibold">
+              {{ method.method_name }}
+            </p>
+            <ul class="mt-1 space-y-1">
+              <li
+                v-for="question in solutionMethodQuestions"
+                :key="question.key"
+              >
+                <span class="font-semibold text-zinc-500">{{ question.label }}</span>
+                {{ method[question.key] }}
+              </li>
+            </ul>
+          </li>
+        </ol>
       </div>
       <div
         v-if="point.release_records.length"
