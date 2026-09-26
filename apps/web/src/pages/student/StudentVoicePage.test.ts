@@ -4,6 +4,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import type { StudentSession } from '../../api/student'
+import { useLearningStore } from '../../stores/learning'
 import StudentVoicePage from './StudentVoicePage.vue'
 
 function response(body: unknown, status = 200): Response {
@@ -131,5 +132,31 @@ test('shows a failed voice load as a warm 16px notice, not a red error', async (
 	expect(notice.classes()).toContain('notice-warm')
 	expectBaseSize(notice.classes())
 	for (const name of notice.classes()) expect(name).not.toMatch(/red|error|wrong|danger/)
+	wrapper.unmount()
+})
+
+test('returns to the same question after 我懂了', async () => {
+	const requests: string[] = []
+	let returned = false
+	const { router, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const path = String(input)
+		requests.push(`${init?.method ?? 'GET'} ${path}`)
+		if (path.endsWith('/voice/complete')) {
+			returned = true
+			return response({ session_id: 'session-1', version: 2, timing_version: 2, action: 'RETURN', socratic_round: 3, message: '现在回到原题。', status: 'ACTIVE', timing_observed_at: '2026-08-26T12:00:30Z' })
+		}
+		return response(session({ status: 'ACTIVE', current_active_seconds: 20, socratic_round: 3, version: returned ? 2 : 1, state: returned ? 'RETURN' : 'VOICE_EXPLAIN' }))
+	}))
+	const learning = useLearningStore()
+	expect(router.currentRoute.value.path).toBe('/student/session/session-1/voice')
+	expect(learning.questionID).toBe('question-1')
+
+	await textElement(wrapper, 'button', '我懂了，回原题').trigger('click')
+	await flushPromises()
+
+	expect(requests.filter((request) => request === 'POST /api/v1/student/sessions/session-1/voice/complete')).toHaveLength(1)
+	expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+	expect(learning.tutorAction).toBe('RETURN')
+	expect(learning.questionID).toBe('question-1')
 	wrapper.unmount()
 })
