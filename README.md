@@ -1,6 +1,6 @@
 # AI Learning Tutor
 
-AI Learning Tutor is a mobile-first, five-subject Socratic learning prototype for primary and junior-secondary students. The V1.1 revision of [`docs/product/互动式学习_V1.md`](docs/product/%E4%BA%92%E5%8A%A8%E5%BC%8F%E5%AD%A6%E4%B9%A0_V1.md) is the sole current product and acceptance baseline; it supersedes the original V1 frozen baseline preserved at commit `a009be5d43c8edcfb6190a2c8a3967b04cf2758f`. Non-negotiable engineering rules are in [`AGENTS.md`](AGENTS.md).
+AI Learning Tutor is a mobile-first, five-subject Socratic learning prototype for primary and junior-secondary students. The V1.2 revision of [`docs/product/互动式学习_V1.md`](docs/product/%E4%BA%92%E5%8A%A8%E5%BC%8F%E5%AD%A6%E4%B9%A0_V1.md) is the sole current product and acceptance baseline; it supersedes the original V1 frozen baseline preserved at commit `a009be5d43c8edcfb6190a2c8a3967b04cf2758f`. Non-negotiable engineering rules are in [`AGENTS.md`](AGENTS.md).
 
 ## Implemented V1 Surface
 
@@ -17,8 +17,6 @@ AI Learning Tutor is a mobile-first, five-subject Socratic learning prototype fo
 - Recoverable TTS sessions and Student-only post-session willingness reflections for a real seven-day trial.
 
 The engineering acceptance matrix is [`docs/quality/v1-acceptance.md`](docs/quality/v1-acceptance.md). It deliberately leaves real seven-day child retention and real provider calls as external evidence, not simulated claims.
-
-Run the external retention trial according to [`docs/quality/seven-day-child-trial.md`](docs/quality/seven-day-child-trial.md). Owner reporting is available at `/admin/trial`; it cannot manufacture or submit a child's reflection.
 
 ## Prerequisites
 
