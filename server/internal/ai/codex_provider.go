@@ -256,7 +256,12 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	case tutor.StateProbe, tutor.StateHint, tutor.StateScaffold, tutor.StateAnalogy:
 		instructions = instructions + " " + materialDisciplineInstructions
 	}
-	if layer := weaknessLayerInstructions(request.WeaknessLayer); layer != "" {
+	// Solution methods belong to an L4 turn only; any other turn is sent
+	// without them even if a caller set them.
+	if request.WeaknessLayer != WeaknessLayerStrategyChoice {
+		request.SolutionMethods = nil
+	}
+	if layer := weaknessLayerInstructions(request.WeaknessLayer, len(request.SolutionMethods) > 0); layer != "" {
 		instructions = instructions + " " + layer
 	}
 	if requiredAction != "" {

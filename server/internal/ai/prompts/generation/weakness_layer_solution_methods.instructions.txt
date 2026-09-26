@@ -1,0 +1,1 @@
+Ask the student one question that lets them choose between the methods in solution_methods, naming them by method_name. Use only those methods and do not invent another one. Do not give the answer to this question.

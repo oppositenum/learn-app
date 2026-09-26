@@ -69,6 +69,21 @@ type GenerateTurnRequest struct {
 	// WeaknessLayer is set only for the turns that keep probing the same
 	// question. The generator reads it to pick that layer's teaching move.
 	WeaknessLayer string `json:"weakness_layer,omitempty"`
+	// SolutionMethods are the methods already prepared for the knowledge
+	// point. They are set only when WeaknessLayer is L4, so the turn asks the
+	// student to choose between them instead of inventing a method.
+	SolutionMethods []SolutionMethod `json:"solution_methods,omitempty"`
+}
+
+// SolutionMethod is one prepared method of a knowledge point, answered
+// through the same five questions.
+type SolutionMethod struct {
+	MethodName    string `json:"method_name"`
+	FirstLook     string `json:"first_look"`
+	WhyThisMethod string `json:"why_this_method"`
+	MethodPath    string `json:"method_path"`
+	CheckWhere    string `json:"check_where"`
+	MoreDirect    string `json:"more_direct"`
 }
 
 type AnalogyRequest GenerateTurnRequest

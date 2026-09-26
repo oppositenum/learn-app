@@ -901,6 +901,14 @@ func (service *Service) prepareAgent(ctx context.Context, userID, sessionID, ope
 			request.WeaknessLayer = analysis.WeaknessLayer
 		}
 	}
+	// A strategy-choice round offers the methods already prepared for the
+	// knowledge point. Without prepared methods it keeps the plain L4 move.
+	if request.WeaknessLayer == ai.WeaknessLayerStrategyChoice {
+		request.SolutionMethods, err = service.solutionMethods(ctx, questionID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	var turn ai.TutorTurn
 	switch decision.NextState {
 	case tutor.StateAnalogy:
@@ -918,6 +926,29 @@ func (service *Service) prepareAgent(ctx context.Context, userID, sessionID, ope
 	}
 	prepared.turn = turn
 	return prepared, nil
+}
+
+// solutionMethods returns the prepared solution methods of the knowledge point
+// the question belongs to, in order. It is read only for the Tutor's
+// generation request; no Student response carries it.
+func (service *Service) solutionMethods(ctx context.Context, questionID uuid.UUID) ([]ai.SolutionMethod, error) {
+	rows, err := service.pool.Query(ctx, `
+SELECT m.method_name,m.first_look,m.why_this_method,m.method_path,m.check_where,m.more_direct
+FROM knowledge_point_solution_methods m JOIN questions q ON q.knowledge_point_id=m.knowledge_point_id
+WHERE q.id=$1 ORDER BY m.sequence`, questionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var methods []ai.SolutionMethod
+	for rows.Next() {
+		var method ai.SolutionMethod
+		if err := rows.Scan(&method.MethodName, &method.FirstLook, &method.WhyThisMethod, &method.MethodPath, &method.CheckWhere, &method.MoreDirect); err != nil {
+			return nil, err
+		}
+		methods = append(methods, method)
+	}
+	return methods, rows.Err()
 }
 
 func (service *Service) priorTurns(ctx context.Context, sessionID uuid.UUID) ([]ai.TutorTurn, error) {

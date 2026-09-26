@@ -153,3 +153,69 @@ func TestTurnWithoutALayerCarriesNoLayerMove(t *testing.T) {
 		t.Fatal("a turn without a diagnosed layer still mentioned weakness_layer")
 	}
 }
+
+var preparedSolutionMethods = []SolutionMethod{
+	{MethodName: "假设法", FirstLook: "看一", WhyThisMethod: "为何一", MethodPath: "路径一", CheckWhere: "检查一", MoreDirect: "更直接一"},
+	{MethodName: "列方程法", FirstLook: "看二", WhyThisMethod: "为何二", MethodPath: "路径二", CheckWhere: "检查二", MoreDirect: "更直接二"},
+}
+
+func generateLayerTurn(t *testing.T, layer string, methods []SolutionMethod) (string, map[string]any) {
+	t.Helper()
+	client := &structuredClientStub{result: validGeneratedTurn(tutor.StateProbe)}
+	provider, err := NewCodexProvider(client, passingTutorOutputAuditor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{
+		Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateProbe}, WeaknessLayer: layer, SolutionMethods: methods,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(client.request.Input, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return client.request.Instructions, payload
+}
+
+func TestStrategyChoiceTurnOffersThePreparedSolutionMethods(t *testing.T) {
+	instructions, payload := generateLayerTurn(t, "L4", preparedSolutionMethods)
+	if !strings.Contains(instructions, "weakness_layer is L4: "+weaknessLayerSolutionMethodsMove) {
+		t.Fatalf("L4 turn with methods lacks the solution-methods move: %q", instructions)
+	}
+	if strings.Contains(instructions, weaknessLayerMoves["L4"]) {
+		t.Fatal("L4 turn with methods still carried the move that invents two ways")
+	}
+	methods, _ := payload["solution_methods"].([]any)
+	if len(methods) != len(preparedSolutionMethods) {
+		t.Fatalf("turn input solution_methods=%v", payload["solution_methods"])
+	}
+	for index, method := range methods {
+		fields, _ := method.(map[string]any)
+		if fields["method_name"] != preparedSolutionMethods[index].MethodName || fields["more_direct"] != preparedSolutionMethods[index].MoreDirect {
+			t.Fatalf("turn input method %d=%v", index, fields)
+		}
+	}
+}
+
+func TestStrategyChoiceTurnWithoutMethodsKeepsItsOwnMove(t *testing.T) {
+	instructions, payload := generateLayerTurn(t, "L4", nil)
+	if !strings.Contains(instructions, "weakness_layer is L4: "+weaknessLayerMoves["L4"]) || strings.Contains(instructions, weaknessLayerSolutionMethodsMove) {
+		t.Fatalf("L4 turn without methods did not keep its move: %q", instructions)
+	}
+	if _, present := payload["solution_methods"]; present {
+		t.Fatal("L4 turn without methods still sent solution_methods")
+	}
+}
+
+func TestSolutionMethodsNeverReachAnotherLayer(t *testing.T) {
+	for layer := range weaknessLayerMoves {
+		if layer == "L4" {
+			continue
+		}
+		instructions, payload := generateLayerTurn(t, layer, preparedSolutionMethods)
+		if _, present := payload["solution_methods"]; present || strings.Contains(instructions, weaknessLayerSolutionMethodsMove) {
+			t.Fatalf("%s turn carried the solution methods", layer)
+		}
+	}
+}

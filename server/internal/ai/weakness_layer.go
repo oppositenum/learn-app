@@ -10,6 +10,10 @@ import (
 // correct analysis persists a NULL layer.
 const WeaknessLayerNone = "NONE"
 
+// WeaknessLayerStrategyChoice is the layer whose turn may carry the prepared
+// solution methods of the knowledge point.
+const WeaknessLayerStrategyChoice = "L4"
+
 var weaknessLayers = map[string]struct{}{"L1": {}, "L2": {}, "L3": {}, "L4": {}, "L5": {}, "L6": {}}
 
 // ErrInvalidWeaknessLayer marks an analysis whose layer does not agree with
@@ -61,12 +65,21 @@ func parseWeaknessLayerInstructions(text string) (string, map[string]string) {
 	return lines[0], moves
 }
 
+// weaknessLayerSolutionMethodsMove replaces the L4 move when the knowledge
+// point has prepared solution methods, so the turn offers those methods
+// rather than two the model makes up.
+var weaknessLayerSolutionMethodsMove = generationPrompt("weakness_layer_solution_methods.instructions.txt")
+
 // weaknessLayerInstructions returns the instruction that makes a turn follow
-// the move for layer, or "" when no layer applies.
-func weaknessLayerInstructions(layer string) string {
+// the move for layer, or "" when no layer applies. An L4 turn that carries
+// prepared solution methods follows the move that uses them.
+func weaknessLayerInstructions(layer string, hasSolutionMethods bool) string {
 	move, ok := weaknessLayerMoves[layer]
 	if !ok {
 		return ""
+	}
+	if layer == WeaknessLayerStrategyChoice && hasSolutionMethods {
+		move = weaknessLayerSolutionMethodsMove
 	}
 	return fmt.Sprintf("%s weakness_layer is %s: %s", weaknessLayerPreamble, layer, move)
 }
