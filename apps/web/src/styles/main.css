@@ -384,6 +384,22 @@ input:focus-visible {
   height: 3rem;
 }
 
+/* Parent home. Parents read it on a phone, so its text is 16px or larger and
+   every action on it, the bottom navigation included, is at least 48px. */
+.parent-action {
+  min-height: 3rem;
+  font-size: 1rem;
+}
+
+.parent-icon-action {
+  width: 3rem;
+  height: 3rem;
+}
+
+.parent-shell .nav-item {
+  font-size: 1rem;
+}
+
 /* The tutor's tone is colour only. Guidance uses a warm orange edge instead of
    red, and the glow plays once when a new sentence arrives. */
 .classroom-tutor-turn {

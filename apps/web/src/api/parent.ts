@@ -93,3 +93,38 @@ export async function getParentLiveSession(studentID: string, sessionID: string)
   }
   return response.json() as Promise<ParentLiveSession>
 }
+
+// The parent home page: the open classroom and today's plan. It carries no
+// question text, answers or child words; those stay on the live page.
+export interface ParentOverviewSession {
+	session_id: string
+	status: 'ACTIVE' | 'PAUSED'
+	subject: string
+	knowledge_point: string
+	active_seconds: number
+	target_minutes: number
+	socratic_round: number
+	tutor_action: string
+	error_type: string
+	misconceptions: string[]
+}
+
+export type ParentPlanProgress = 'NOT_STARTED' | 'IN_PROGRESS' | 'PAUSED' | 'COMPLETED'
+
+export interface ParentOverview {
+	student_id: string
+	learning_date: string
+	session: ParentOverviewSession | null
+	today_plan: {
+		plan_id: string
+		date: string
+		target_minutes: number
+		blocks: Array<{ id: string; sequence: number; subject: string; knowledge_point: string; minutes: number; status: string; progress: ParentPlanProgress; session_id: string | null }>
+	} | null
+}
+
+export async function getParentOverview(studentID: string): Promise<ParentOverview> {
+	const response = await fetch(`/api/v1/parent/child/${encodeURIComponent(studentID)}/overview`, { credentials: 'same-origin' })
+	if (!response.ok) throw new Error(`首页数据暂时不可用（${response.status}）`)
+	return response.json() as Promise<ParentOverview>
+}

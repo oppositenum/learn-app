@@ -59,6 +59,8 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		live := parent.NewLiveHandler(dependencies.Parents)
 		parentSession := auth.RequireRole(auth.RoleParent, http.HandlerFunc(live.GetSession))
 		mux.Handle("GET /api/v1/parent/child/{student_id}/session/{session_id}", dependencies.Authenticate(parentSession))
+		parentOverview := auth.RequireRole(auth.RoleParent, http.HandlerFunc(live.GetOverview))
+		mux.Handle("GET /api/v1/parent/child/{student_id}/overview", dependencies.Authenticate(parentOverview))
 	}
 	if dependencies.Authenticate != nil && dependencies.Realtime != nil {
 		studentSocket := auth.RequireRole(auth.RoleStudent, dependencies.Realtime)
