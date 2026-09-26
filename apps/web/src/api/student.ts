@@ -74,6 +74,7 @@ export interface StudentSession {
   subject_name: string
   knowledge_point: string
   knowledge_point_id: string
+  why_it_matters?: string
   difficulty: string
   question_id: string
   prompt: string

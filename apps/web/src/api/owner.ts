@@ -15,6 +15,8 @@ export interface LearningEffectReport {
 }
 export interface ContentRecord { id: string; status: string; content_version: string; subject: string; knowledge_point: string; prompt: string; automatic_validation_passed: boolean; secondary_review_passed: boolean }
 export interface ContentReleaseRecord { from_status: string; to_status: string; at: string }
+export interface ContentWhyItMatters { daily_life: string; human_world: string; future_learning: string; career_or_science: string }
+export interface ContentWorldConnection { connection_type: 'DAILY_LIFE' | 'HUMAN_WORLD' | 'SCIENCE_OR_CAREER'; title: string; explanation: string }
 // The §1.1 breakdown of a knowledge point. The server only lists knowledge
 // points that have one written.
 export interface ContentKnowledgePointBreakdown {
@@ -24,6 +26,8 @@ export interface ContentKnowledgePointBreakdown {
 	foundation: string
 	difficulty_points: string
 	common_stuck_point: string
+	why_it_matters?: ContentWhyItMatters
+	world_connections?: ContentWorldConnection[]
 	release_records: ContentReleaseRecord[]
 }
 export interface OwnerContentReport { records: ContentRecord[]; knowledge_points: ContentKnowledgePointBreakdown[] }

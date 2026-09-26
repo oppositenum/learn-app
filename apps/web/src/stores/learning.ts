@@ -59,6 +59,7 @@ export const useLearningStore = defineStore('learning', {
     planBlockID: '',
     subject: '',
     knowledgePoint: '',
+    whyItMatters: '',
     difficulty: '',
     startedAt: '',
     targetMinutes: 0,
@@ -121,6 +122,7 @@ export const useLearningStore = defineStore('learning', {
       this.planBlockID = ''
       this.subject = ''
       this.knowledgePoint = ''
+      this.whyItMatters = ''
       this.difficulty = ''
       this.startedAt = ''
       this.targetMinutes = 0
@@ -157,6 +159,7 @@ export const useLearningStore = defineStore('learning', {
       this.planBlockID = session.plan_block_id ?? ''
       this.subject = session.subject_name
       this.knowledgePoint = session.knowledge_point
+      this.whyItMatters = session.why_it_matters ?? ''
       this.difficulty = session.difficulty
       this.startedAt = session.started_at
       this.targetMinutes = session.target_minutes

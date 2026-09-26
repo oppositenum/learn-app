@@ -845,3 +845,23 @@ test('shows an advancing turn in green using only the tutor sentence', async () 
   expect(wrapper.text()).not.toContain('正确')
   wrapper.unmount()
 })
+
+test('shows one why-it-matters line above the question and nothing when the session has none', async () => {
+  const dailyLife = '用来把固定费用和按数量增加的费用分开，比如门票加服务费、租车起步价加每公里费用。'
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({ why_it_matters: dailyLife }))))
+
+  const lines = wrapper.findAll('[data-testid="why-it-matters"]')
+  expect(lines).toHaveLength(1)
+  const line = lines[0]
+  expect(line.text()).toBe(`为什么重要 ${dailyLife}`)
+  expect(line.classes()).toContain('text-base')
+  expect(line.element.closest('[data-tutor-turn]')).toBeNull()
+  const question = wrapper.get('.classroom-task h1')
+  expect(question.text()).toBe('三分之一和四分之一的小格一样大吗？')
+  expect(line.element.compareDocumentPosition(question.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  wrapper.unmount()
+
+  const { wrapper: without } = await mountPage(vi.fn(async () => response(session())))
+  expect(without.find('[data-testid="why-it-matters"]').exists()).toBe(false)
+  without.unmount()
+})

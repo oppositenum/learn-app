@@ -664,11 +664,14 @@ ORDER BY q.updated_at DESC,q.id LIMIT 200`)
 }
 
 // ownerKnowledgePointBreakdowns returns the §1.1 breakdown of every knowledge
-// point that has one, with the release history of its questions. Knowledge
+// point that has one, with its four life-connection items, its world
+// connection scenes and the release history of its questions. Knowledge
 // points without a written breakdown are left out.
 func ownerKnowledgePointBreakdowns(ctx context.Context, pool *pgxpool.Pool) ([]map[string]any, error) {
 	rows, err := pool.Query(ctx, `
-SELECT kp.id,kp.code,kp.name,s.code,COALESCE(kp.foundation,''),COALESCE(kp.difficulty_points,''),COALESCE(kp.common_stuck_point,'')
+SELECT kp.id,kp.code,kp.name,s.code,COALESCE(kp.foundation,''),COALESCE(kp.difficulty_points,''),COALESCE(kp.common_stuck_point,''),
+       COALESCE(kp.why_it_matters_json->>'daily_life',''),COALESCE(kp.why_it_matters_json->>'human_world',''),
+       COALESCE(kp.why_it_matters_json->>'future_learning',''),COALESCE(kp.why_it_matters_json->>'career_or_science','')
 FROM knowledge_points kp JOIN subjects s ON s.id=kp.subject_id
 WHERE COALESCE(kp.foundation,'')<>'' OR COALESCE(kp.difficulty_points,'')<>'' OR COALESCE(kp.common_stuck_point,'')<>''
 ORDER BY kp.code`)
@@ -681,17 +684,44 @@ ORDER BY kp.code`)
 	for rows.Next() {
 		var id uuid.UUID
 		var code, name, subject, foundation, difficultyPoints, stuckPoint string
-		if err := rows.Scan(&id, &code, &name, &subject, &foundation, &difficultyPoints, &stuckPoint); err != nil {
+		var dailyLife, humanWorld, futureLearning, careerOrScience string
+		if err := rows.Scan(&id, &code, &name, &subject, &foundation, &difficultyPoints, &stuckPoint, &dailyLife, &humanWorld, &futureLearning, &careerOrScience); err != nil {
 			return nil, err
 		}
 		ids = append(ids, id)
-		breakdowns = append(breakdowns, map[string]any{"knowledge_point_code": code, "knowledge_point": name, "subject": subject, "foundation": foundation, "difficulty_points": difficultyPoints, "common_stuck_point": stuckPoint, "release_records": []map[string]any{}})
+		breakdowns = append(breakdowns, map[string]any{
+			"knowledge_point_code": code, "knowledge_point": name, "subject": subject,
+			"foundation": foundation, "difficulty_points": difficultyPoints, "common_stuck_point": stuckPoint,
+			"why_it_matters":    map[string]string{"daily_life": dailyLife, "human_world": humanWorld, "future_learning": futureLearning, "career_or_science": careerOrScience},
+			"world_connections": []map[string]any{}, "release_records": []map[string]any{},
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	rows.Close()
 	for index, id := range ids {
+		connections, err := pool.Query(ctx, `
+SELECT connection_type,title,explanation FROM world_connections
+WHERE knowledge_point_id=$1
+ORDER BY CASE connection_type WHEN 'DAILY_LIFE' THEN 1 WHEN 'HUMAN_WORLD' THEN 2 ELSE 3 END`, id)
+		if err != nil {
+			return nil, err
+		}
+		scenes := []map[string]any{}
+		for connections.Next() {
+			var connectionType, title, explanation string
+			if err := connections.Scan(&connectionType, &title, &explanation); err != nil {
+				connections.Close()
+				return nil, err
+			}
+			scenes = append(scenes, map[string]any{"connection_type": connectionType, "title": title, "explanation": explanation})
+		}
+		connections.Close()
+		if err := connections.Err(); err != nil {
+			return nil, err
+		}
+		breakdowns[index]["world_connections"] = scenes
 		releases, err := pool.Query(ctx, `
 SELECT r.from_status,r.to_status,r.created_at
 FROM content_release_records r JOIN questions q ON q.id=r.question_id

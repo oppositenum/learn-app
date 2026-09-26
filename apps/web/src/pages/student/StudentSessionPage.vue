@@ -221,6 +221,14 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <span>{{ tutorActionLabels[learning.tutorAction] }}</span>
         </div>
         <div class="classroom-task card mt-4">
+          <p
+            v-if="learning.whyItMatters"
+            data-testid="why-it-matters"
+            class="mb-2 text-base leading-7 text-zinc-700"
+          >
+            <span class="font-semibold text-teal-700">为什么重要</span>
+            {{ learning.whyItMatters }}
+          </p>
           <h1 class="text-[1.4rem] font-semibold leading-9 sm:text-[1.65rem] sm:leading-10">
             {{ learning.prompt }}
           </h1>

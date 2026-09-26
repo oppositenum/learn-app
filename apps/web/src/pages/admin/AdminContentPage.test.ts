@@ -183,6 +183,56 @@ it('shows the §1.1 breakdown and release history only for knowledge points that
   expect(wrapper.text()).not.toContain('findings')
 })
 
+it('shows the four why-it-matters items and the three scenes of a knowledge point', async () => {
+  const whyItMatters = {
+    daily_life: '用来把固定费用和按数量增加的费用分开，比如门票加服务费、租车起步价加每公里费用。',
+    human_world: '用来比较两种计费哪个更合适，比如两家打印店、两种租车方案。',
+    future_learning: '后面学习一次函数时，会用这里的固定起点和每增加 1 份的变化。',
+    career_or_science: '工程、财务和实验记录里，常用这种固定量加相同变化量来估算。',
+  }
+  const scenes = [
+    { connection_type: 'DAILY_LIFE', title: '门票加服务费、租车起步价加每公里费用', explanation: whyItMatters.daily_life },
+    { connection_type: 'HUMAN_WORLD', title: '两家打印店、两种租车方案', explanation: whyItMatters.human_world },
+    { connection_type: 'SCIENCE_OR_CAREER', title: '工程、财务和实验记录', explanation: whyItMatters.career_or_science },
+  ]
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    if (String(input) === '/api/v1/owner/content/generation-options') {
+      return { ok: true, status: 200, json: async () => generationOptions } as Response
+    }
+    return { ok: true, status: 200, json: async () => ({
+      records: [],
+      knowledge_points: [{
+        knowledge_point_code: 'MATH-LINEAR-EQUATION',
+        knowledge_point: '一元一次方程',
+        subject: 'MATH',
+        foundation: '四则运算熟练、负数概念、等式性质',
+        difficulty_points: '把文字问题翻译成方程；等式两边同时运算；检验答案',
+        common_stuck_point: '不会算不是主要问题，而是看不到题目里的等量关系，所以不知道为什么要列方程',
+        why_it_matters: whyItMatters,
+        world_connections: scenes,
+        release_records: [],
+      }],
+    }) } as Response
+  }))
+
+  const wrapper = mount(AdminContentPage)
+  await flushPromises()
+
+  const items = wrapper.get('[data-testid="knowledge-point-why-it-matters"]').findAll('li')
+  expect(items.map((item) => item.text())).toEqual([
+    `日常生活 ${whyItMatters.daily_life}`,
+    `人与世界 ${whyItMatters.human_world}`,
+    `后续学习 ${whyItMatters.future_learning}`,
+    `职业与科学 ${whyItMatters.career_or_science}`,
+  ])
+  const rendered = wrapper.findAll('[data-testid="knowledge-point-world-connection"]')
+  expect(rendered.map((scene) => scene.attributes('data-connection-type'))).toEqual(['DAILY_LIFE', 'HUMAN_WORLD', 'SCIENCE_OR_CAREER'])
+  rendered.forEach((scene, index) => {
+    expect(scene.text()).toContain(scenes[index].title)
+    expect(scene.text()).toContain(scenes[index].explanation)
+  })
+})
+
 it('shows no breakdown headings when no knowledge point has one', async () => {
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
     if (String(input) === '/api/v1/owner/content/generation-options') {
@@ -195,7 +245,7 @@ it('shows no breakdown headings when no knowledge point has one', async () => {
   await flushPromises()
 
   expect(wrapper.find('[data-testid="knowledge-point-breakdown"]').exists()).toBe(false)
-  for (const heading of ['基础', '难度点', '常见卡点', '发布记录']) {
+  for (const heading of ['基础', '难度点', '常见卡点', '为什么重要', '生活场景', '发布记录']) {
     expect(wrapper.findAll('dt, h3').some((node) => node.text() === heading)).toBe(false)
   }
 })

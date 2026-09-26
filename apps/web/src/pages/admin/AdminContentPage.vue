@@ -24,6 +24,7 @@ import {
   type ContentGenerationOptions,
   type ContentKnowledgePointBreakdown,
   type ContentRecord,
+  type ContentWhyItMatters,
   type GenerateContentInput,
   type GeneratedContentDraft,
 } from '../../api/owner'
@@ -33,6 +34,13 @@ const emptyOptions: ContentGenerationOptions = {
   knowledge_points: [],
   sources: [],
 }
+
+const whyItMattersItems: Array<{ key: keyof ContentWhyItMatters; label: string }> = [
+  { key: 'daily_life', label: '日常生活' },
+  { key: 'human_world', label: '人与世界' },
+  { key: 'future_learning', label: '后续学习' },
+  { key: 'career_or_science', label: '职业与科学' },
+]
 
 const records = ref<ContentRecord[]>([])
 const breakdowns = ref<ContentKnowledgePointBreakdown[]>([])
@@ -521,6 +529,44 @@ onMounted(load)
           <dd>{{ point.common_stuck_point }}</dd>
         </div>
       </dl>
+      <div
+        v-if="point.why_it_matters"
+        data-testid="knowledge-point-why-it-matters"
+        class="mt-4"
+      >
+        <h3 class="text-xs font-semibold text-zinc-500">
+          为什么重要
+        </h3>
+        <ul class="mt-2 space-y-2 text-sm leading-6">
+          <li
+            v-for="item in whyItMattersItems"
+            v-show="point.why_it_matters[item.key]"
+            :key="item.key"
+          >
+            <span class="font-semibold">{{ item.label }}</span>
+            {{ point.why_it_matters[item.key] }}
+          </li>
+        </ul>
+      </div>
+      <div
+        v-if="point.world_connections?.length"
+        class="mt-4"
+      >
+        <h3 class="text-xs font-semibold text-zinc-500">
+          生活场景
+        </h3>
+        <ul class="mt-2 space-y-2 text-sm leading-6">
+          <li
+            v-for="scene in point.world_connections"
+            :key="scene.connection_type"
+            data-testid="knowledge-point-world-connection"
+            :data-connection-type="scene.connection_type"
+          >
+            <span class="font-semibold">{{ scene.title }}</span>
+            <span class="block">{{ scene.explanation }}</span>
+          </li>
+        </ul>
+      </div>
       <div
         v-if="point.release_records.length"
         class="mt-4"
