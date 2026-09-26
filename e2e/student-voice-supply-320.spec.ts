@@ -180,3 +180,61 @@ for (const viewport of viewports) {
     })
   })
 }
+
+// Five long sentences: laid out as one long list they pushed "我懂了，回原题"
+// below the first screen at 320 px. Only the sentence being read and its
+// neighbours are shown now, and the actions stay on the first screen.
+const longVoiceSession = {
+  ...voiceSession,
+  voice_segments: [
+    { id: 'long-1', text: '先把两个圆都分成一样多的小格，这样每一小格才能拿来直接比较大小。', start_ms: 0, end_ms: 3000 },
+    { id: 'long-2', text: '三分之一可以换成十二分之四，四分之一可以换成十二分之三，小格就一样大了。', start_ms: 3000, end_ms: 6000 },
+    { id: 'long-3', text: '现在只要数一数每一份里有几个小格，就知道哪一份更多一些。', start_ms: 6000, end_ms: 9000 },
+    { id: 'long-4', text: '换成同样大的小格以后，比较两个分数就变成了比较两个整数。', start_ms: 9000, end_ms: 12000 },
+    { id: 'long-5', text: '回到原题，用同样的办法自己再试一次，看看你能不能说清楚理由。', start_ms: 12000, end_ms: 15000 },
+  ],
+}
+
+test.describe('student voice sentence window at 320x720', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 720 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+  })
+
+  test('the current sentence leads and all three actions sit on the first screen', async ({ page }) => {
+    const unexpected = await routeStudent(page, jsonResponse(longVoiceSession))
+    await page.route(`**${voiceAudioPath}`, (route) => route.fulfill({ status: 200, contentType: 'audio/wav', body: silentWav(15000) }))
+    await page.goto(`/student/session/${sessionID}/voice`)
+    await expect(page.getByTestId('voice-sentences')).toBeVisible()
+
+    const current = page.locator('[data-voice-sentence="current"]')
+    await expect(current).toHaveCount(1)
+    await expect(current).toHaveText(longVoiceSession.voice_segments[0].text)
+    await expectReadable(current, 'current sentence')
+    await expect(page.locator('[data-voice-sentence]')).toHaveCount(2)
+    await expect(page.locator('[data-voice-sentence="unread"]')).toHaveText(longVoiceSession.voice_segments[1].text)
+    await expect(page.getByText(longVoiceSession.voice_segments[4].text)).toHaveCount(0)
+    const currentSize = await current.evaluate((node) => Number.parseFloat(getComputedStyle(node).fontSize))
+    const unreadSize = await page.locator('[data-voice-sentence="unread"]').evaluate((node) => Number.parseFloat(getComputedStyle(node).fontSize))
+    expect(currentSize, 'current sentence is the largest text').toBeGreaterThan(unreadSize)
+
+    const play = page.getByRole('button', { name: '播放', exact: true })
+    await expect(play).toBeEnabled()
+    await expectTappable(play, '播放')
+    await expectTappable(page.getByRole('button', { name: '再听一句' }), '再听一句')
+    const done = page.getByRole('button', { name: '我懂了，回原题' })
+    await expectTappable(done, '我懂了，回原题')
+
+    const scrollY = await page.evaluate(() => window.scrollY)
+    expect(scrollY).toBe(0)
+    for (const [label, locator] of [['播放', play], ['再听一句', page.getByRole('button', { name: '再听一句' })], ['我懂了，回原题', done]] as const) {
+      const box = (await locator.boundingBox())!
+      test.info().annotations.push({ type: 'bottom', description: `${label}: ${box.y + box.height}px of 720` })
+      expect(box.y + box.height, `${label} inside the first screen`).toBeLessThanOrEqual(720)
+      expect(box.y, `${label} in the lower half`).toBeGreaterThanOrEqual(360)
+    }
+
+    await expectNoHorizontalScroll(page, 320)
+    expect(unexpected).toEqual([])
+  })
+})
