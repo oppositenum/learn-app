@@ -119,7 +119,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
       <div class="mt-8 h-8 w-4/5 animate-pulse rounded-lg bg-zinc-200" />
       <div class="mt-3 h-8 w-2/3 animate-pulse rounded-lg bg-zinc-200" />
       <div class="card mt-10 h-36 animate-pulse" />
-      <p class="mt-5 text-sm font-medium text-zinc-600">
+      <p class="mt-5 text-base font-medium text-zinc-600">
         正在准备这次探索
       </p>
       <!-- A loading state must never be a dead end: if preparing outlives the
@@ -141,7 +141,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
       </h1>
       <p
         v-if="learning.error"
-        class="mt-3 text-sm text-red-700"
+        class="notice-warm mt-3 px-4 py-3 text-base"
         role="alert"
       >
         {{ learning.error }}
@@ -186,7 +186,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
           </button>
           <span
             v-else
-            class="text-right text-xs font-medium text-zinc-500"
+            class="text-right text-base font-medium text-zinc-500"
           >{{ learning.status === 'PAUSED' ? '已暂停' : '' }}</span>
         </div>
         <div class="mt-3 flex items-center justify-center gap-5 text-base text-zinc-500">
@@ -308,7 +308,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
           <p class="font-semibold">
             当前任务暂时只能显示文字题面
           </p>
-          <p class="mt-1 text-sm leading-6">
+          <p class="mt-1 text-base leading-6">
             校验材料没有完整载入，本次不会记录答题证据。
           </p>
           <button
@@ -523,7 +523,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
             </button>
           </div>
           <p
-            class="mt-3 min-h-5 text-sm text-zinc-600"
+            class="mt-3 min-h-6 text-base text-zinc-600"
             aria-live="polite"
           >
             {{ learning.reflectionStatus }}

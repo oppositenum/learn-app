@@ -865,3 +865,59 @@ test('shows one why-it-matters line above the question and nothing when the sess
   expect(without.find('[data-testid="why-it-matters"]').exists()).toBe(false)
   without.unmount()
 })
+
+// Text the child reads in the classroom stays at least 16px, and nothing on
+// this page uses red to report a failure.
+function expectChildReadable(element: { classes: () => string[] }) {
+  const classes = element.classes()
+  expect(classes).toContain('text-base')
+  expect(classes.filter((name) => name === 'text-sm' || name === 'text-xs' || name.startsWith('text-red'))).toEqual([])
+}
+
+test('the preparing line is readable at 16px', async () => {
+  const { wrapper } = await mountPage(vi.fn(() => new Promise<Response>(() => {})))
+
+  const line = wrapper.findAll('p').find((p) => p.text() === '正在准备这次探索')
+  expect(line).toBeDefined()
+  expectChildReadable(line!)
+  wrapper.unmount()
+})
+
+test('a failed classroom load is a warm notice at 16px with its text unchanged', async () => {
+  const { learning, wrapper } = await mountPage(vi.fn(async () => response(null, 500)))
+
+  expect(wrapper.text()).toContain('课堂暂时没有准备好')
+  const alert = wrapper.get('[role="alert"]')
+  expect(alert.text()).toBe(learning.error)
+  expect(alert.classes()).toContain('notice-warm')
+  expectChildReadable(alert)
+  expect(wrapper.html()).not.toMatch(/text-red/)
+  wrapper.unmount()
+})
+
+test('the unavailable-material explanation is readable at 16px', async () => {
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({
+    status: 'ACTIVE', state: 'ORIGINAL',
+    interaction: {
+      version: 'student-text-fallback-v1', renderer: 'TEXT_FALLBACK', answer_schema: { type: 'string' },
+      accessible_fallback: '保留的文字任务', fallback: true,
+    },
+    stage_flow: { version: 'classroom-stage-flow-v1', stage: 'ORIGINAL', task_version: 'content-v1' },
+  }))))
+
+  const explanation = wrapper.get('[role="alert"]').findAll('p').find((p) => p.text().includes('本次不会记录答题证据'))
+  expect(explanation).toBeDefined()
+  expectChildReadable(explanation!)
+  wrapper.unmount()
+})
+
+test('the reflection status and the header status are readable at 16px', async () => {
+  const { wrapper } = await mountPage(vi.fn(async () => response(session({
+    status: 'COMPLETED', state: 'COMPLETE',
+  }))))
+
+  expectChildReadable(wrapper.get('p[aria-live="polite"]'))
+  expectChildReadable(wrapper.get('header span.text-right'))
+  expect(wrapper.html()).not.toMatch(/text-(sm|xs)|text-red/)
+  wrapper.unmount()
+})

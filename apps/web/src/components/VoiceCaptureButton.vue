@@ -45,7 +45,7 @@ onBeforeUnmount(() => { if (recorder?.state === 'recording') recorder.stop(); st
 </script>
 
 <template>
-  <div class="grid min-h-16 w-24 shrink-0 grid-rows-[2.75rem_1.25rem]">
+  <div class="grid min-h-16 w-24 shrink-0 grid-rows-[2.75rem_1.5rem]">
     <button
       type="button"
       class="icon-button border border-zinc-300 bg-white"
@@ -65,14 +65,14 @@ onBeforeUnmount(() => { if (recorder?.state === 'recording') recorder.stop(); st
     </button>
     <p
       v-if="recording || busy"
-      class="mt-1 whitespace-nowrap text-xs font-medium text-zinc-600"
+      class="mt-1 whitespace-nowrap text-base font-medium leading-6 text-zinc-600"
       aria-live="polite"
     >
       {{ recording ? '正在录音' : '识别中' }}
     </p>
     <p
       v-if="error"
-      class="mt-1 w-24 text-xs font-medium leading-4 text-red-700"
+      class="mt-1 w-24 text-base font-medium leading-6 text-amber-800"
       role="alert"
     >
       {{ error }}

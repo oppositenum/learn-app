@@ -207,7 +207,7 @@ function labelForItem(id: string) {
       <legend class="sr-only">
         {{ scene.accessible_fallback }}
       </legend>
-      <label class="grid gap-2 text-sm font-semibold">
+      <label class="grid gap-2 text-base font-semibold">
         {{ scene.number_line.label }}
         <input
           type="range"
@@ -256,7 +256,7 @@ function labelForItem(id: string) {
       </label>
     </fieldset>
 
-    <details class="mt-4 border-t border-zinc-200 pt-3 text-sm text-zinc-700">
+    <details class="mt-4 border-t border-zinc-200 pt-3 text-base text-zinc-700">
       <summary class="cursor-pointer font-semibold">
         文字版任务
       </summary>

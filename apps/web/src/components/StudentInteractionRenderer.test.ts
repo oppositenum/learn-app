@@ -62,6 +62,12 @@ test('renders matching and grouping as labelled native selects', async () => {
 test('renders number-line and fill contracts with labelled native inputs', async () => {
   const numberLine = material({ version: 'student-interaction-v1', renderer: 'NUMBER_LINE', accessible_fallback: '输入数轴位置。', number_line: { label: '位置', min: -1, max: 1, step: 0.5 } })
   const numberWrapper = mount(StudentInteractionRenderer, { props: { interaction: numberLine, modelValue: { value: -1 } } })
+  // The answer label and the text version are read by the child: 16px, never smaller.
+  for (const element of [numberWrapper.get('label.grid'), numberWrapper.get('details')]) {
+    expect(element.classes()).toContain('text-base')
+    expect(element.classes()).not.toContain('text-sm')
+    expect(element.classes()).not.toContain('text-xs')
+  }
   await numberWrapper.get('input[type="number"]').setValue('0.5')
   expect(latest(numberWrapper)).toEqual({ value: 0.5 })
 	await numberWrapper.get('input[type="number"]').setValue('')
