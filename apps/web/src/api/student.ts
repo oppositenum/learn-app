@@ -225,6 +225,12 @@ export async function completeStudentVoiceExplanation(sessionID: string): Promis
   })
 }
 
+export async function returnStudentFromBacktrack(sessionID: string): Promise<SubmitAnswerResult> {
+  return studentJSON<SubmitAnswerResult>(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/backtrack/return`, {
+    method: 'POST',
+  })
+}
+
 export async function submitSessionReflection(sessionID: string, willingness: 'CONTINUE_TOMORROW' | 'PAUSE' | 'STOP'): Promise<void> {
   await studentJSON(`/api/v1/student/sessions/${encodeURIComponent(sessionID)}/reflection`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ willingness }),

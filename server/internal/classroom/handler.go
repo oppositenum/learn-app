@@ -215,6 +215,43 @@ func (handler *Handler) ReturnFromVoice(writer http.ResponseWriter, request *htt
 	writeJSON(writer, http.StatusOK, result)
 }
 
+func (handler *Handler) ReturnFromBacktrack(writer http.ResponseWriter, request *http.Request) {
+	principal, _ := auth.PrincipalFromContext(request.Context())
+	userID, err := uuid.Parse(principal.UserID)
+	if err != nil {
+		http.Error(writer, "invalid principal", http.StatusUnauthorized)
+		return
+	}
+	sessionID, err := uuid.Parse(request.PathValue("session_id"))
+	if err != nil {
+		http.Error(writer, "invalid session id", http.StatusBadRequest)
+		return
+	}
+	result, err := handler.service.ReturnFromBacktrack(request.Context(), userID, sessionID)
+	if errors.Is(err, ErrSessionNotFound) {
+		http.Error(writer, "session not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, ErrSessionNotActive) {
+		writeJSON(writer, http.StatusConflict, map[string]string{"code": SessionResumeRequiredCode})
+		return
+	}
+	if errors.Is(err, ErrBacktrackNotActive) {
+		http.Error(writer, "cross-subject backtrack is not active", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, auth.ErrSessionRevoked) {
+		http.Error(writer, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		log.Printf("backtrack return failed: %v", err)
+		http.Error(writer, "backtrack return could not be completed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
 func (handler *Handler) RequestSupport(writer http.ResponseWriter, request *http.Request) {
 	principal, _ := auth.PrincipalFromContext(request.Context())
 	userID, err := uuid.Parse(principal.UserID)

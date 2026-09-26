@@ -9,10 +9,18 @@ const learning = useLearningStore()
 const route = useRoute()
 const router = useRouter()
 const classroomRoute = computed(() => route.params.id ? `/student/session/${String(route.params.id)}` : '/student')
+// A cross-subject backtrack names the subject and knowledge point to fill in
+// first. The classroom has already switched to them, so they are the current
+// subject and knowledge point.
+const backtrack = computed(() => learning.tutorAction === 'BACKTRACK')
 const explanation = computed(() => learning.timeline.filter((item) => item.actor === 'TUTOR').at(-1)?.text || '补给内容正在由当前课堂生成。')
 async function anotherExample() {
 	if (learning.status !== 'ACTIVE' || !learning.sessionID) return
 	await learning.requestSupport(learning.sessionID, 'EXPLAIN')
+}
+async function returnFromBacktrack() {
+	const sessionID = String(route.params.id || '')
+	if (await learning.returnFromBacktrack(sessionID)) await router.replace(`/student/session/${sessionID}`)
 }
 
 watch(() => route.params.id, async (value) => {
@@ -21,7 +29,7 @@ watch(() => route.params.id, async (value) => {
 	const loaded = learning.sessionID === sessionID || await learning.loadSession(sessionID)
 	if (!loaded || String(route.params.id) !== sessionID) return
 	if (learning.status === 'PAUSED') return
-	if (!learning.error && learning.tutorAction !== 'EXPLAIN') await router.replace(`/student/session/${sessionID}`)
+	if (!learning.error && learning.tutorAction !== 'EXPLAIN' && learning.tutorAction !== 'BACKTRACK') await router.replace(`/student/session/${sessionID}`)
 }, { immediate: true })
 </script>
 
@@ -29,7 +37,18 @@ watch(() => route.params.id, async (value) => {
   <main class="page-wrap min-h-dvh pb-8 pt-6">
     <!-- Outside the loading branch on purpose: the way back to the question
          must exist even while the supply is still being prepared. -->
+    <button
+      v-if="backtrack"
+      type="button"
+      class="icon-button classroom-icon-action"
+      aria-label="返回原题"
+      :disabled="learning.status !== 'ACTIVE' || learning.loading"
+      @click="returnFromBacktrack"
+    >
+      <ArrowLeft :size="20" />
+    </button>
     <RouterLink
+      v-else
       :to="classroomRoute"
       class="icon-button classroom-icon-action"
       aria-label="返回原题"
@@ -77,10 +96,38 @@ watch(() => route.params.id, async (value) => {
         <p class="text-base font-semibold text-sky-700">
           知识补给站
         </p>
-        <h1 class="mt-3 text-3xl font-semibold leading-10">
+        <template v-if="backtrack">
+          <h1
+            data-testid="backtrack-reason"
+            class="mt-3 text-2xl font-semibold leading-9"
+          >
+            不是这科不会，是先补一下
+          </h1>
+          <div class="mt-8 border-y border-zinc-300 py-7">
+            <p
+              data-testid="backtrack-subject"
+              class="text-base text-zinc-500"
+            >
+              {{ learning.subject }}
+            </p>
+            <p
+              data-testid="backtrack-knowledge-point"
+              class="mt-3 text-2xl font-semibold"
+            >
+              {{ learning.knowledgePoint }}
+            </p>
+          </div>
+        </template>
+        <h1
+          v-else
+          class="mt-3 text-3xl font-semibold leading-10"
+        >
           {{ learning.knowledgePoint || '回到当前知识点' }}
         </h1>
-        <div class="mt-8 border-y border-zinc-300 py-7">
+        <div
+          v-if="!backtrack"
+          class="mt-8 border-y border-zinc-300 py-7"
+        >
           <p class="text-base text-zinc-500">
             当前讲解
           </p>
@@ -97,6 +144,7 @@ watch(() => route.params.id, async (value) => {
           {{ learning.error }}
         </p>
         <button
+          v-if="!backtrack"
           type="button"
           class="secondary-button home-action mt-5 w-full"
           :disabled="learning.status !== 'ACTIVE' || learning.loading || !learning.sessionID"
@@ -108,7 +156,22 @@ watch(() => route.params.id, async (value) => {
           />
           换个例子
         </button>
+        <button
+          v-if="backtrack"
+          type="button"
+          data-testid="backtrack-return"
+          class="primary-button home-action mt-8 w-full"
+          :disabled="learning.status !== 'ACTIVE' || learning.loading"
+          @click="returnFromBacktrack"
+        >
+          返回原题
+          <ArrowRight
+            :size="18"
+            aria-hidden="true"
+          />
+        </button>
         <RouterLink
+          v-else
           :to="classroomRoute"
           class="primary-button home-action mt-8 w-full"
         >

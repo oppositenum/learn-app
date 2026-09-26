@@ -4,6 +4,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import type { StudentSession } from '../../api/student'
+import { useLearningStore } from '../../stores/learning'
 import StudentSupplyPage from './StudentSupplyPage.vue'
 
 function response(body: unknown, status = 200): Response {
@@ -115,5 +116,46 @@ test('keeps supply page text at 16px and main actions at 48px', async () => {
 	expect(textElement(wrapper, 'a', '回到课堂继续探索').classes()).toContain('home-action')
 	expect(textElement(wrapper, 'button', '换个例子').classes()).toContain('home-action')
 	expect(textElement(wrapper, 'a', '返回原题').classes()).toContain('home-action')
+	wrapper.unmount()
+})
+
+test('a cross-subject backtrack names what to fill in first and returns to the original question', async () => {
+	const requests: string[] = []
+	let returned = false
+	const { router, wrapper } = await mountPage(vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const path = String(input)
+		requests.push(`${init?.method ?? 'GET'} ${path}`)
+		if (path.endsWith('/backtrack/return')) {
+			returned = true
+			return response({
+				session_id: 'session-1', version: 3, timing_version: 2, action: 'RETURN', socratic_round: 0,
+				message: '先补的这一步放在这里，现在回到原题接着想。', status: 'ACTIVE', active_seconds: 20,
+				current_active_seconds: 1, timing_observed_at: '2026-08-26T12:00:21Z',
+			})
+		}
+		return response(returned
+			? session({ version: 3, status: 'ACTIVE', state: 'RETURN', subject_code: 'PHYSICS', subject_name: '物理', knowledge_point: '速度', question_id: 'question-original', prompt: '原题' })
+			: session({ version: 2, status: 'ACTIVE', state: 'BACKTRACK', subject_code: 'MATH', subject_name: '数学', knowledge_point: '分数通分', question_id: 'question-prerequisite' }))
+	}))
+
+	expect(router.currentRoute.value.path).toBe('/student/session/session-1/supply')
+	const reason = wrapper.get('[data-testid="backtrack-reason"]')
+	expect(reason.text()).toBe('不是这科不会，是先补一下')
+	expect(wrapper.get('[data-testid="backtrack-subject"]').text()).toBe('数学')
+	expect(wrapper.get('[data-testid="backtrack-knowledge-point"]').text()).toBe('分数通分')
+	expectBaseSize(wrapper.get('[data-testid="backtrack-subject"]').classes())
+	for (const text of ['分钟', '当前讲解', '换个例子', '分数：', '答案']) expect(wrapper.text()).not.toContain(text)
+	const back = wrapper.get('[data-testid="backtrack-return"]')
+	expect(back.text()).toContain('返回原题')
+	expect(back.classes()).toContain('home-action')
+
+	await back.trigger('click')
+	await flushPromises()
+
+	expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+	expect(requests.filter((request) => request.startsWith('POST'))).toEqual(['POST /api/v1/student/sessions/session-1/backtrack/return'])
+	const learning = useLearningStore()
+	expect(learning.questionID).toBe('question-original')
+	expect(learning.tutorAction).toBe('RETURN')
 	wrapper.unmount()
 })

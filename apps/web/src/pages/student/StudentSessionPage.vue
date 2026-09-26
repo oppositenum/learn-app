@@ -100,6 +100,13 @@ watch(() => route.params.id, (sessionID) => {
   if (sessionID) void openSession(String(sessionID))
 }, { immediate: true })
 watch(() => learning.sessionGone, (gone) => { if (gone) void router.replace('/student') })
+// A cross-subject backtrack is taken in the knowledge supply, which is also
+// where the child returns to this question from. An active classroom on one
+// sends the child there, whether it got there by an answer, a reload or a resume.
+const backtracking = computed(() => sessionMatchesRoute.value && learning.status === 'ACTIVE' && learning.tutorAction === 'BACKTRACK')
+watch(backtracking, (value) => {
+	if (value) void router.replace(`/student/session/${routeSessionID.value}/supply`)
+}, { immediate: true })
 
 onMounted(() => {
   timer = window.setInterval(() => { monotonicNow.value = performance.now() }, 1000)

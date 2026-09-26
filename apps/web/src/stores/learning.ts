@@ -4,6 +4,7 @@ import {
   ApiError,
   abandonStudentSession,
   completeStudentVoiceExplanation,
+  returnStudentFromBacktrack,
   getStudentSession,
   heartbeatStudentSession,
   pauseStudentSession,
@@ -20,6 +21,7 @@ import {
 	type SafetyNotice,
   type SpeechSegment,
   type StudentSession,
+  type SubmitAnswerResult,
   type StudentInteraction,
   type StudentStageFlow,
   type StudentSessionTurn,
@@ -473,12 +475,18 @@ export const useLearningStore = defineStore('learning', {
 			}
 	    },
 	    async returnFromVoice(sessionID: string) {
+			return this.returnToQuestion(sessionID, completeStudentVoiceExplanation)
+	    },
+	    async returnFromBacktrack(sessionID: string) {
+			return this.returnToQuestion(sessionID, returnStudentFromBacktrack)
+	    },
+	    async returnToQuestion(sessionID: string, request: (sessionID: string) => Promise<SubmitAnswerResult>) {
 			if (this.sessionID !== sessionID || this.loading) return false
 			const operation = ++this.operationSequence
       this.loading = true
       this.error = ''
       try {
-	        const result = await completeStudentVoiceExplanation(sessionID)
+	        const result = await request(sessionID)
 					if (operation !== this.operationSequence || this.sessionID !== sessionID) return false
 					if (result.version < this.version) return false
 					const appendResult = result.version > this.snapshotVersion

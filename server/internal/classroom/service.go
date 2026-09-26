@@ -32,6 +32,7 @@ var (
 	ErrClassroomChanged    = errors.New("classroom changed while support response was generated")
 	ErrVoiceReturnRequired = errors.New("voice explanation must return to the original question before answering")
 	ErrVoiceNotActive      = errors.New("voice explanation is not active")
+	ErrBacktrackNotActive  = errors.New("cross-subject backtrack is not active")
 	ErrSessionNotActive    = errors.New("classroom session is not active")
 	ErrAnotherSessionOpen  = errors.New("another classroom session is already open")
 	ErrSubmitTimedOut      = errors.New("classroom submission timed out")
@@ -529,7 +530,7 @@ ORDER BY dep.strength DESC,q.difficulty,q.id LIMIT 1`, row.knowledgePointID, row
 		return SubmitResult{}, realtime.Event{}, false, err
 	}
 	message := "发现可能的底层缺口，先补一小步：" + prerequisiteName + "。完成后会自动回到原题。"
-	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET original_task_id=COALESCE(original_task_id,$2),active_task_id=$3,current_question_id=$4,subject_id=$5,current_state='BACKTRACK',socratic_fail_count=0,evidence_form='TEXTBOOK',teaching_response_id=COALESCE(NULLIF($6,''),teaching_response_id),engagement_state=$7,assistance_level=GREATEST(assistance_level,3),last_activity_at=CASE WHEN status='ACTIVE' THEN $8 ELSE last_activity_at END,processing_token=NULL,processing_until=NULL,version=version+1 WHERE id=$1`, sessionID, row.knowledgePointID, prerequisiteKnowledgePointID, prerequisiteQuestionID, prerequisiteSubjectID, responseID, engagement, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET original_task_id=COALESCE(original_task_id,$2),backtrack_origin_question_id=COALESCE(backtrack_origin_question_id,current_question_id),backtrack_origin_evidence_form=COALESCE(backtrack_origin_evidence_form,evidence_form),active_task_id=$3,current_question_id=$4,subject_id=$5,current_state='BACKTRACK',socratic_fail_count=0,evidence_form='TEXTBOOK',teaching_response_id=COALESCE(NULLIF($6,''),teaching_response_id),engagement_state=$7,assistance_level=GREATEST(assistance_level,3),last_activity_at=CASE WHEN status='ACTIVE' THEN $8 ELSE last_activity_at END,processing_token=NULL,processing_until=NULL,version=version+1 WHERE id=$1`, sessionID, row.knowledgePointID, prerequisiteKnowledgePointID, prerequisiteQuestionID, prerequisiteSubjectID, responseID, engagement, now); err != nil {
 		return SubmitResult{}, realtime.Event{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private,response_id) VALUES($1,$2,$3,'TUTOR','BACKTRACK',$4,'released cross-subject prerequisite selected; original task preserved',NULLIF($5,''))`, uuid.New(), sessionID, turnSequence, message, responseID); err != nil {
@@ -772,6 +773,67 @@ func (service *Service) ReturnFromVoice(ctx context.Context, studentUserID, sess
 		_ = service.hub.Publish(event)
 	}
 	return sessionSubmitResult(resultRow, sessionID, version, tutor.StateReturn, socraticRound, message, resultAt), nil
+}
+
+// ReturnFromBacktrack leaves the knowledge supply of a cross-subject backtrack
+// and restores the question the classroom left, with its subject and evidence
+// form. It records no answer, keeps the failed-round count and calls no model.
+func (service *Service) ReturnFromBacktrack(ctx context.Context, studentUserID, sessionID uuid.UUID) (SubmitResult, error) {
+	if err := service.RecoverStaleSessions(ctx, studentUserID); err != nil {
+		return SubmitResult{}, err
+	}
+	var event realtime.Event
+	var version int64
+	var resultRow sessionRow
+	var resultAt time.Time
+	message := "先补的这一步放在这里，现在回到原题接着想。"
+	err := pgx.BeginFunc(ctx, service.pool, func(tx pgx.Tx) error {
+		row, err := loadSession(ctx, tx, studentUserID, sessionID)
+		if err != nil {
+			return err
+		}
+		if row.state != tutor.StateBacktrack {
+			return ErrBacktrackNotActive
+		}
+		var questionID, subjectID, knowledgePointID uuid.UUID
+		var prompt string
+		err = tx.QueryRow(ctx, `
+SELECT q.id,kp.subject_id,kp.id,q.prompt_public FROM learning_sessions ls
+JOIN questions q ON q.id=ls.backtrack_origin_question_id AND q.status='RELEASED'
+JOIN knowledge_points kp ON kp.id=q.knowledge_point_id AND kp.status='RELEASED'
+WHERE ls.id=$1`, sessionID).Scan(&questionID, &subjectID, &knowledgePointID, &prompt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrBacktrackNotActive
+		}
+		if err != nil {
+			return err
+		}
+		now := latestTime(service.now(), row.lastActivityAt)
+		resultRow = row
+		resultAt = now
+		version = row.version + 1
+		turnSequence, eventSequence, err := nextSequences(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_question_id=$2,subject_id=$3,current_state='RETURN',active_task_id=$4,evidence_form=COALESCE(backtrack_origin_evidence_form,evidence_form),backtrack_origin_question_id=NULL,backtrack_origin_evidence_form=NULL,last_activity_at=$5,processing_token=NULL,processing_until=NULL,version=version+1 WHERE id=$1`, sessionID, questionID, subjectID, knowledgePointID, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private) VALUES($1,$2,$3,'TUTOR','RETURN',$4,'student left the cross-subject supply; original question restored')`, uuid.New(), sessionID, turnSequence, message); err != nil {
+			return err
+		}
+		studentPayload, _ := json.Marshal(map[string]any{"action": tutor.StateReturn, "message": message, "prompt": prompt})
+		parentPayload, _ := json.Marshal(map[string]any{"action": tutor.StateReturn, "message": message, "reason": "student left the cross-subject supply; original question restored", "remediated_knowledge_point_id": row.knowledgePointID, "restored_knowledge_point_id": knowledgePointID})
+		event = makeEvent(row.studentID, sessionID, eventSequence, realtime.EventBacktrackCompleted, studentPayload, parentPayload, now)
+		return insertEvent(ctx, tx, event)
+	})
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if service.hub != nil {
+		_ = service.hub.Publish(event)
+	}
+	return sessionSubmitResult(resultRow, sessionID, version, tutor.StateReturn, resultRow.fails, message, resultAt), nil
 }
 
 func loadSession(ctx context.Context, tx pgx.Tx, userID, sessionID uuid.UUID) (sessionRow, error) {
@@ -1102,19 +1164,23 @@ func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow,
 }
 
 func (service *Service) returnToOriginal(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID uuid.UUID, turnSequence, eventSequence int64, now time.Time, skillState mastery.State, energy int) (SubmitResult, []realtime.Event, error) {
+	// A classroom that backtracked from a question of the original task returns
+	// to that question; otherwise, as for a session started on a remediation
+	// block, it takes the first released question of the original task.
 	var questionID, subjectID uuid.UUID
 	var prompt string
 	if err := tx.QueryRow(ctx, `
-	SELECT q.id,kp.subject_id,q.prompt_public FROM questions q
+	SELECT q.id,kp.subject_id,q.prompt_public FROM learning_sessions ls
+	JOIN questions q ON q.knowledge_point_id=$1 AND q.status='RELEASED'
 	JOIN knowledge_points kp ON kp.id=q.knowledge_point_id AND kp.status='RELEASED'
 	JOIN grade_bands grade_band ON grade_band.code=kp.grade_band_code
 	JOIN students student ON student.id=$2
-	WHERE q.knowledge_point_id=$1 AND q.status='RELEASED' AND grade_band.min_grade<=student.grade_level
-	ORDER BY q.difficulty,q.id LIMIT 1`, *row.originalTaskID, row.studentID).Scan(&questionID, &subjectID, &prompt); err != nil {
+	WHERE ls.id=$3 AND grade_band.min_grade<=student.grade_level
+	ORDER BY q.id IS NOT DISTINCT FROM ls.backtrack_origin_question_id DESC,q.difficulty,q.id LIMIT 1`, *row.originalTaskID, row.studentID, sessionID).Scan(&questionID, &subjectID, &prompt); err != nil {
 		return SubmitResult{}, nil, fmt.Errorf("released original task unavailable: %w", err)
 	}
 	message := "底层知识已经补好，现在回到原问题，用刚才的方法再验证一次。"
-	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_question_id=$2,subject_id=$3,current_state='RETURN',socratic_fail_count=0,active_task_id=original_task_id,evidence_form='VARIANT',last_activity_at=CASE WHEN status='ACTIVE' THEN $4 ELSE last_activity_at END,processing_token=NULL,processing_until=NULL,version=version+1 WHERE id=$1`, sessionID, questionID, subjectID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_question_id=$2,subject_id=$3,current_state='RETURN',backtrack_origin_question_id=NULL,backtrack_origin_evidence_form=NULL,socratic_fail_count=0,active_task_id=original_task_id,evidence_form='VARIANT',last_activity_at=CASE WHEN status='ACTIVE' THEN $4 ELSE last_activity_at END,processing_token=NULL,processing_until=NULL,version=version+1 WHERE id=$1`, sessionID, questionID, subjectID, now); err != nil {
 		return SubmitResult{}, nil, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO tutor_turns(id,session_id,sequence,actor,action,message,reason_private) VALUES($1,$2,$3,'TUTOR','RETURN',$4,'cross-subject prerequisite verified; original task restored')`, uuid.New(), sessionID, turnSequence, message); err != nil {

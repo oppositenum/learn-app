@@ -921,3 +921,65 @@ test('the reflection status and the header status are readable at 16px', async (
   expect(wrapper.html()).not.toMatch(/text-(sm|xs)|text-red/)
   wrapper.unmount()
 })
+
+// A cross-subject backtrack is taken in the knowledge supply. The classroom
+// sends the child there only when the server reports BACKTRACK, and never
+// while paused, since the supply page sends a paused child back here.
+type TutorActionUnderTest = 'BACKTRACK' | 'SCAFFOLD'
+
+function backtrackFetch(action: TutorActionUnderTest) {
+  let answered = false
+  const requests: string[] = []
+  const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const path = String(input)
+    requests.push(`${init?.method ?? 'GET'} ${path}`)
+    if (path.endsWith('/answers')) {
+      answered = true
+      return response({
+        session_id: 'session-1', version: 2, timing_version: 1, action, socratic_round: 0,
+        message: '先补一小步。', status: 'ACTIVE', active_seconds: 20, current_active_seconds: 1,
+        timing_observed_at: '2026-08-26T12:00:21Z',
+      })
+    }
+    return response(answered && action === 'BACKTRACK'
+      ? session({ version: 2, status: 'ACTIVE', state: 'BACKTRACK', question_id: 'question-prerequisite', subject_code: 'MATH', subject_name: '数学' })
+      : session({ version: answered ? 2 : 1, status: 'ACTIVE', state: answered ? action : 'ASK', question_id: 'question-original', subject_code: 'PHYSICS', subject_name: '物理' }))
+  })
+  return { fetch, requests }
+}
+
+test('an answer that starts a cross-subject backtrack takes the child to the knowledge supply', async () => {
+  const { fetch } = backtrackFetch('BACKTRACK')
+  const { router, wrapper } = await mountPage(fetch)
+  expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+
+  await wrapper.get('#student-answer').setValue('我的想法')
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(router.currentRoute.value.path).toBe('/student/session/session-1/supply')
+  wrapper.unmount()
+})
+
+test('an answer without a released prerequisite keeps the child in the classroom', async () => {
+  const { fetch } = backtrackFetch('SCAFFOLD')
+  const { router, wrapper } = await mountPage(fetch)
+
+  await wrapper.get('#student-answer').setValue('我的想法')
+  await wrapper.get('form').trigger('submit')
+  await flushPromises()
+
+  expect(router.currentRoute.value.path).toBe('/student/session/session-1')
+  wrapper.unmount()
+})
+
+test('reopening an active backtracking classroom goes to the knowledge supply, a paused one stays', async () => {
+  const active = await mountPage(vi.fn(async () => response(session({ status: 'ACTIVE', state: 'BACKTRACK' }))))
+  expect(active.router.currentRoute.value.path).toBe('/student/session/session-1/supply')
+  active.wrapper.unmount()
+
+  const paused = await mountPage(vi.fn(async () => response(session({ status: 'PAUSED', state: 'BACKTRACK' }))))
+  expect(paused.router.currentRoute.value.path).toBe('/student/session/session-1')
+  expect(paused.wrapper.find('[data-testid="resume-session"]').exists()).toBe(true)
+  paused.wrapper.unmount()
+})
