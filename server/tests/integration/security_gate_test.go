@@ -441,6 +441,8 @@ func assertStudentPayloadHasNoPrivateFields(t *testing.T, body []byte) {
 		"hint_policy": true, "hint_policy_private_json": true,
 		"reason_private": true,
 		"weakness_layer": true,
+		// The §1.1 knowledge point breakdown is for the Owner only.
+		"foundation": true, "difficulty_points": true, "common_stuck_point": true,
 	}
 	var walk func(any)
 	walk = func(value any) {

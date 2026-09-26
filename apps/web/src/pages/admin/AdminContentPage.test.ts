@@ -145,3 +145,57 @@ it('filters the expanded catalog by grade band, domain, and knowledge-point sear
   expect(knowledgePoint.text()).toContain('小数、分数与百分数 · 分数 [MATH-PRI-FRACTIONS]')
   expect(wrapper.text()).toContain('来源：互动式学习 V1 产品课程骨架')
 })
+
+it('shows the §1.1 breakdown and release history only for knowledge points that have one', async () => {
+  const record = { id: 'question-1', status: 'RELEASED', content_version: 'v5', subject: 'MATH', knowledge_point: '一元一次方程', prompt: '题面', automatic_validation_passed: true, secondary_review_passed: true }
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    if (String(input) === '/api/v1/owner/content/generation-options') {
+      return { ok: true, status: 200, json: async () => generationOptions } as Response
+    }
+    return { ok: true, status: 200, json: async () => ({
+      records: [record, { ...record, id: 'question-2', knowledge_point: '分数' }],
+      knowledge_points: [{
+        knowledge_point_code: 'MATH-LINEAR-EQUATION',
+        knowledge_point: '一元一次方程',
+        subject: 'MATH',
+        foundation: '四则运算熟练、负数概念、等式性质',
+        difficulty_points: '把文字问题翻译成方程；等式两边同时运算；检验答案',
+        common_stuck_point: '不会算不是主要问题，而是看不到题目里的等量关系，所以不知道为什么要列方程',
+        release_records: [{ from_status: 'AI_REVIEWED', to_status: 'RELEASED', at: '2026-09-20T08:00:00Z' }],
+      }],
+    }) } as Response
+  }))
+
+  const wrapper = mount(AdminContentPage)
+  await flushPromises()
+
+  const breakdowns = wrapper.findAll('[data-testid="knowledge-point-breakdown"]')
+  expect(breakdowns).toHaveLength(1)
+  const breakdown = breakdowns[0]
+  expect(breakdown.text()).toContain('MATH-LINEAR-EQUATION')
+  expect(breakdown.findAll('dt').map((term) => term.text())).toEqual(['基础', '难度点', '常见卡点'])
+  expect(breakdown.text()).toContain('四则运算熟练、负数概念、等式性质')
+  expect(breakdown.text()).toContain('把文字问题翻译成方程；等式两边同时运算；检验答案')
+  expect(breakdown.text()).toContain('看不到题目里的等量关系')
+  const release = breakdown.get('[data-testid="knowledge-point-release"]')
+  expect(release.text()).toContain('AI_REVIEWED → RELEASED')
+  expect(release.get('time').attributes('datetime')).toBe('2026-09-20T08:00:00Z')
+  expect(wrapper.text()).not.toContain('findings')
+})
+
+it('shows no breakdown headings when no knowledge point has one', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    if (String(input) === '/api/v1/owner/content/generation-options') {
+      return { ok: true, status: 200, json: async () => generationOptions } as Response
+    }
+    return { ok: true, status: 200, json: async () => ({ records: [], knowledge_points: [] }) } as Response
+  }))
+
+  const wrapper = mount(AdminContentPage)
+  await flushPromises()
+
+  expect(wrapper.find('[data-testid="knowledge-point-breakdown"]').exists()).toBe(false)
+  for (const heading of ['基础', '难度点', '常见卡点', '发布记录']) {
+    expect(wrapper.findAll('dt, h3').some((node) => node.text() === heading)).toBe(false)
+  }
+})

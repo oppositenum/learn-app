@@ -14,6 +14,19 @@ export interface LearningEffectReport {
 	ai_anomaly: MetricRate & { requests: number; anomalies: number }
 }
 export interface ContentRecord { id: string; status: string; content_version: string; subject: string; knowledge_point: string; prompt: string; automatic_validation_passed: boolean; secondary_review_passed: boolean }
+export interface ContentReleaseRecord { from_status: string; to_status: string; at: string }
+// The §1.1 breakdown of a knowledge point. The server only lists knowledge
+// points that have one written.
+export interface ContentKnowledgePointBreakdown {
+	knowledge_point_code: string
+	knowledge_point: string
+	subject: string
+	foundation: string
+	difficulty_points: string
+	common_stuck_point: string
+	release_records: ContentReleaseRecord[]
+}
+export interface OwnerContentReport { records: ContentRecord[]; knowledge_points: ContentKnowledgePointBreakdown[] }
 export interface ContentKnowledgePointOption {
 	id: string
 	subject_code: string
@@ -50,7 +63,10 @@ export async function getOwnerLearningEffects(filters: Pick<CostFilters, 'studen
 	const query = new URLSearchParams(Object.entries(filters).filter((entry): entry is [string, string] => Boolean(entry[1])))
 	return ownerGet<LearningEffectReport>(`/api/v1/owner/learning-effects?${query}`)
 }
-export async function getOwnerContent(): Promise<ContentRecord[]> { return (await ownerGet<{ records: ContentRecord[] }>('/api/v1/owner/content')).records }
+export async function getOwnerContent(): Promise<OwnerContentReport> {
+	const report = await ownerGet<{ records: ContentRecord[]; knowledge_points?: ContentKnowledgePointBreakdown[] }>('/api/v1/owner/content')
+	return { records: report.records, knowledge_points: report.knowledge_points ?? [] }
+}
 export async function getContentGenerationOptions(): Promise<ContentGenerationOptions> { return ownerGet('/api/v1/owner/content/generation-options') }
 export async function getOwnerTrials(): Promise<{ criteria: string; generated_at: string; records: TrialRecord[] }> { return ownerGet('/api/v1/owner/trials') }
 export async function getOwnerAccounts(): Promise<OwnerAccounts> { return ownerGet('/api/v1/owner/accounts') }

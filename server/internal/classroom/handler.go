@@ -1,6 +1,7 @@
 package classroom
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -650,7 +651,72 @@ ORDER BY q.updated_at DESC,q.id LIMIT 200`)
 		}
 		records = append(records, map[string]any{"id": id, "status": status, "content_version": version, "subject": subject, "knowledge_point": knowledge, "prompt": prompt, "automatic_validation_passed": validated, "secondary_review_passed": reviewed})
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"records": records})
+	if err := rows.Err(); err != nil {
+		http.Error(writer, "content report unavailable", 500)
+		return
+	}
+	breakdowns, err := ownerKnowledgePointBreakdowns(request.Context(), handler.pool)
+	if err != nil {
+		http.Error(writer, "content report unavailable", 500)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"records": records, "knowledge_points": breakdowns})
+}
+
+// ownerKnowledgePointBreakdowns returns the §1.1 breakdown of every knowledge
+// point that has one, with the release history of its questions. Knowledge
+// points without a written breakdown are left out.
+func ownerKnowledgePointBreakdowns(ctx context.Context, pool *pgxpool.Pool) ([]map[string]any, error) {
+	rows, err := pool.Query(ctx, `
+SELECT kp.id,kp.code,kp.name,s.code,COALESCE(kp.foundation,''),COALESCE(kp.difficulty_points,''),COALESCE(kp.common_stuck_point,'')
+FROM knowledge_points kp JOIN subjects s ON s.id=kp.subject_id
+WHERE COALESCE(kp.foundation,'')<>'' OR COALESCE(kp.difficulty_points,'')<>'' OR COALESCE(kp.common_stuck_point,'')<>''
+ORDER BY kp.code`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	breakdowns := []map[string]any{}
+	ids := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		var code, name, subject, foundation, difficultyPoints, stuckPoint string
+		if err := rows.Scan(&id, &code, &name, &subject, &foundation, &difficultyPoints, &stuckPoint); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+		breakdowns = append(breakdowns, map[string]any{"knowledge_point_code": code, "knowledge_point": name, "subject": subject, "foundation": foundation, "difficulty_points": difficultyPoints, "common_stuck_point": stuckPoint, "release_records": []map[string]any{}})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for index, id := range ids {
+		releases, err := pool.Query(ctx, `
+SELECT r.from_status,r.to_status,r.created_at
+FROM content_release_records r JOIN questions q ON q.id=r.question_id
+WHERE q.knowledge_point_id=$1
+ORDER BY r.created_at DESC,r.id LIMIT 100`, id)
+		if err != nil {
+			return nil, err
+		}
+		records := []map[string]any{}
+		for releases.Next() {
+			var fromStatus, toStatus string
+			var at time.Time
+			if err := releases.Scan(&fromStatus, &toStatus, &at); err != nil {
+				releases.Close()
+				return nil, err
+			}
+			records = append(records, map[string]any{"from_status": fromStatus, "to_status": toStatus, "at": at})
+		}
+		releases.Close()
+		if err := releases.Err(); err != nil {
+			return nil, err
+		}
+		breakdowns[index]["release_records"] = records
+	}
+	return breakdowns, nil
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {

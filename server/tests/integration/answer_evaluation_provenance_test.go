@@ -435,6 +435,11 @@ func assertLegacySchemaUnchanged(t *testing.T, ctx context.Context, pool *pgxpoo
 		// Added by 000037 as a nullable column; the rest of answer_analyses
 		// must still be exactly what it was before provenance.
 		"answer_analyses.weakness_layer",
+		// Added by 000040 as nullable columns for the §1.1 knowledge point
+		// breakdown; the rest of knowledge_points must stay unchanged.
+		"knowledge_points.foundation",
+		"knowledge_points.difficulty_points",
+		"knowledge_points.common_stuck_point",
 	})
 	if after != before {
 		t.Fatal("additive provenance migration changed a legacy table definition")

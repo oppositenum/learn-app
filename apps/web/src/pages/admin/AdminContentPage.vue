@@ -22,6 +22,7 @@ import {
   reviewContent,
   validateContent,
   type ContentGenerationOptions,
+  type ContentKnowledgePointBreakdown,
   type ContentRecord,
   type GenerateContentInput,
   type GeneratedContentDraft,
@@ -34,6 +35,7 @@ const emptyOptions: ContentGenerationOptions = {
 }
 
 const records = ref<ContentRecord[]>([])
+const breakdowns = ref<ContentKnowledgePointBreakdown[]>([])
 const options = ref<ContentGenerationOptions>(emptyOptions)
 const error = ref('')
 const loading = ref(false)
@@ -136,8 +138,9 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [contentRecords, generationOptions] = await Promise.all([getOwnerContent(), getContentGenerationOptions()])
-    records.value = contentRecords
+    const [contentReport, generationOptions] = await Promise.all([getOwnerContent(), getContentGenerationOptions()])
+    records.value = contentReport.records
+    breakdowns.value = contentReport.knowledge_points
     options.value = generationOptions
     applyGenerationDefaults()
   } catch (cause) {
@@ -156,7 +159,9 @@ async function generateDrafts() {
       ...generation,
       requirements: generation.requirements.trim(),
     })
-    records.value = await getOwnerContent()
+    const contentReport = await getOwnerContent()
+    records.value = contentReport.records
+    breakdowns.value = contentReport.knowledge_points
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'AI 题目生成失败'
   } finally {
@@ -483,6 +488,62 @@ onMounted(load)
     >
       {{ error }}
     </p>
+
+    <section
+      v-for="point in breakdowns"
+      :key="point.knowledge_point_code"
+      data-testid="knowledge-point-breakdown"
+      class="mt-7 border-y border-zinc-300 py-5"
+    >
+      <p class="text-xs font-semibold text-zinc-500">
+        {{ point.subject }} · {{ point.knowledge_point_code }}
+      </p>
+      <h2 class="mt-1 font-semibold">
+        {{ point.knowledge_point }}
+      </h2>
+      <dl class="mt-3 space-y-3 text-sm leading-6">
+        <div v-if="point.foundation">
+          <dt class="text-xs font-semibold text-zinc-500">
+            基础
+          </dt>
+          <dd>{{ point.foundation }}</dd>
+        </div>
+        <div v-if="point.difficulty_points">
+          <dt class="text-xs font-semibold text-zinc-500">
+            难度点
+          </dt>
+          <dd>{{ point.difficulty_points }}</dd>
+        </div>
+        <div v-if="point.common_stuck_point">
+          <dt class="text-xs font-semibold text-zinc-500">
+            常见卡点
+          </dt>
+          <dd>{{ point.common_stuck_point }}</dd>
+        </div>
+      </dl>
+      <div
+        v-if="point.release_records.length"
+        class="mt-4"
+      >
+        <h3 class="text-xs font-semibold text-zinc-500">
+          发布记录
+        </h3>
+        <ol class="mt-2 space-y-1 text-xs">
+          <li
+            v-for="(release, index) in point.release_records"
+            :key="`${release.at}-${index}`"
+            data-testid="knowledge-point-release"
+            class="flex flex-wrap gap-x-3"
+          >
+            <span class="font-semibold">{{ release.from_status }} → {{ release.to_status }}</span>
+            <time
+              :datetime="release.at"
+              class="text-zinc-500 tabular-nums"
+            >{{ new Date(release.at).toLocaleString('zh-CN', { hour12: false }) }}</time>
+          </li>
+        </ol>
+      </div>
+    </section>
 
     <div class="mt-7 divide-y divide-zinc-200">
       <article
