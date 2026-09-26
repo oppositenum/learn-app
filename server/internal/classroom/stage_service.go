@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,20 +26,23 @@ import (
 )
 
 type stageSnapshot struct {
-	sessionID           uuid.UUID
-	studentID           uuid.UUID
-	lineageID           uuid.UUID
-	knowledgePointID    uuid.UUID
-	planBlockID         *uuid.UUID
-	reviewQueueID       *uuid.UUID
-	stage               Stage
-	task                stageTask
-	status              string
-	stageVersion        int64
-	learningVersion     int64
-	timingVersion       int64
-	socraticFailCount   int
-	limitExplained      bool
+	sessionID         uuid.UUID
+	studentID         uuid.UUID
+	lineageID         uuid.UUID
+	knowledgePointID  uuid.UUID
+	planBlockID       *uuid.UUID
+	reviewQueueID     *uuid.UUID
+	stage             Stage
+	task              stageTask
+	status            string
+	stageVersion      int64
+	learningVersion   int64
+	timingVersion     int64
+	socraticFailCount int
+	limitExplained    bool
+	// lastWrongDigest is the request digest of the latest wrong answer on the
+	// current task, or empty. The digest covers the task and the exact response.
+	lastWrongDigest     string
 	startedAt           time.Time
 	accumulatedSeconds  int
 	lastResumedAt       *time.Time
@@ -262,7 +266,7 @@ func (service *Service) submitStageWithinBudget(ctx context.Context, studentUser
 	if request.Kind == StageAttemptAnswer {
 		score = scoreStageTask(snapshot.task, request.Response)
 	}
-	feedback, err := service.prepareStageFeedback(ctx, snapshot, request, score)
+	feedback, err := service.prepareStageFeedback(ctx, snapshot, request, digest, score)
 	if err != nil {
 		return StageSubmitResult{}, err
 	}
@@ -372,7 +376,16 @@ SELECT session.id,session.student_id,stage_session.lineage_id,stage_session.know
            WHERE attempt.session_id=session.id
              AND attempt.question_id=stage_task.question_id
              AND attempt.response_code='SOCRATIC_LIMIT_EXPLAINED'
-       )
+       ),
+       COALESCE((
+           SELECT attempt.request_digest FROM classroom_stage_attempts attempt
+           WHERE attempt.session_id=session.id
+             AND attempt.question_id=stage_task.question_id
+             AND attempt.attempt_kind='ANSWER'
+             AND attempt.deterministic_result IN ('INCORRECT','INDETERMINATE')
+           ORDER BY attempt.response_session_version DESC
+           LIMIT 1
+       ),'')
 FROM classroom_stage_sessions stage_session
 JOIN learning_sessions session ON session.id=stage_session.session_id
 JOIN students student ON student.id=session.student_id
@@ -392,6 +405,7 @@ WHERE stage_session.session_id=$1 AND student.user_id=$2`+lock, sessionID, stude
 		&snapshot.task.ContentVersion, &snapshot.task.Prompt, &snapshot.task.Scene,
 		&snapshot.task.InputSchema, &snapshot.task.SubjectCode, &snapshot.actualTaskStatus,
 		&snapshot.actualTaskVersion, &snapshot.contentReleaseValid, &snapshot.limitExplained,
+		&snapshot.lastWrongDigest,
 	)
 	snapshot.task.KnowledgePointID = snapshot.knowledgePointID
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -426,9 +440,12 @@ func (service *Service) validateStageRequest(snapshot stageSnapshot, request Sta
 	return nil
 }
 
-func (service *Service) prepareStageFeedback(ctx context.Context, snapshot stageSnapshot, request StageSubmitRequest, score StageScore) (ai.TutorTurn, error) {
+func (service *Service) prepareStageFeedback(ctx context.Context, snapshot stageSnapshot, request StageSubmitRequest, digest string, score StageScore) (ai.TutorTurn, error) {
 	if score == StageScoreCorrect {
 		return ai.TutorTurn{}, nil
+	}
+	if stageEmotion(snapshot, request, digest, score) == tutor.EmotionBored {
+		return ai.TutorTurn{Action: tutor.StateBreak, Message: stageMessage("EMOTION_BREAK")}, nil
 	}
 	action := tutor.StateHint
 	fallback := "先确认问题要求的信息类别，再逐项核对。"
@@ -631,6 +648,11 @@ func (service *Service) commitStageAttempt(
 		case StageScoreIncorrect, StageScoreIndeterminate:
 			// A failure stays on the current task. Only a success after help
 			// or guidance moves on to a fresh task, through ASSISTED_REPROOF.
+			// An emotion signal takes a break first and leaves the round alone.
+			if stageEmotion(snapshot, request, digest, score) == tutor.EmotionBored {
+				responseCode = "EMOTION_BREAK"
+				break
+			}
 			_, responseCode = stageFailureAction(snapshot)
 			responseSocratic = min(3, snapshot.socraticFailCount+1)
 			if responseCode == "SOCRATIC_REPROOF_FAILED" {
@@ -1001,6 +1023,40 @@ func (service *Service) refreshStageCompletionPlan(ctx context.Context, studentI
 	if service.hub != nil {
 		_ = service.hub.Publish(event)
 	}
+}
+
+// stageBoredPhrases are the §13.2 sayings a fill-in answer can carry. "我不会"
+// is not here: asking for help stays a HINT request.
+var stageBoredPhrases = []string{"烦死了", "不想做", "随便", "你直接告诉我吧", "我不知道不知道"}
+
+// stageEmotion reads an emotion signal from a wrong answer by fixed rules and
+// never asks a model. A fill-in answer carrying a stageBoredPhrases saying, or
+// a wrong answer identical to the previous wrong answer on the same task, is
+// BORED. Other renderers are not read for sayings. Emotion comes before the
+// Socratic rounds, so the classroom takes a break on the same task.
+func stageEmotion(snapshot stageSnapshot, request StageSubmitRequest, digest string, score StageScore) tutor.Emotion {
+	if request.Kind != StageAttemptAnswer || (score != StageScoreIncorrect && score != StageScoreIndeterminate) {
+		return tutor.EmotionNeutral
+	}
+	if snapshot.lastWrongDigest != "" && snapshot.lastWrongDigest == digest {
+		return tutor.EmotionBored
+	}
+	scene, ok := validStageTaskScene(snapshot.task)
+	if !ok || scene.Renderer != studentinteraction.RendererFillBlanks {
+		return tutor.EmotionNeutral
+	}
+	var submitted fillResponse
+	if err := json.Unmarshal(request.Response, &submitted); err != nil {
+		return tutor.EmotionNeutral
+	}
+	for _, value := range submitted.Values {
+		for _, phrase := range stageBoredPhrases {
+			if strings.Contains(value.Value, phrase) {
+				return tutor.EmotionBored
+			}
+		}
+	}
+	return tutor.EmotionNeutral
 }
 
 // stageFailureAction follows the Socratic limit in §13.1 on the current task:

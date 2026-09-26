@@ -370,7 +370,7 @@ VALUES($1,$2,$3,'MASTERY',now())`, reviewQueueID, fixture.security.studentID, fi
 		body := map[string]any{
 			"operation_id": uuid.New(), "stage": current.StageFlow.Stage,
 			"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
-			"response": incorrectStageResponse(t, ctx, pool, current.QuestionID),
+			"response": incorrectStageResponseAt(t, ctx, pool, current.QuestionID, index),
 		}
 		response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, body)
 		if response.Code != http.StatusOK {
@@ -506,7 +506,7 @@ VALUES($1,$2,$3,'MASTERY',now())`, reproofQueueID, reproofFixture.security.stude
 		response := performJSON(reproofRouter, http.MethodPost, "/api/v1/student/sessions/"+reproofSession.ID.String()+"/answers", reproofFixture.security.studentToken, map[string]any{
 			"operation_id": uuid.New(), "stage": current.StageFlow.Stage,
 			"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
-			"response": incorrectStageResponse(t, ctx, reproofPool, current.QuestionID),
+			"response": incorrectStageResponseAt(t, ctx, reproofPool, current.QuestionID, failure),
 		})
 		if response.Code != http.StatusOK {
 			t.Fatalf("reproof setup failure %d=%d %s", failure, response.Code, response.Body.String())
@@ -517,7 +517,8 @@ VALUES($1,$2,$3,'MASTERY',now())`, reproofQueueID, reproofFixture.security.stude
 	reproofBody := map[string]any{
 		"operation_id": reproofOperationID, "stage": postExplain.StageFlow.Stage,
 		"task_id": postExplain.QuestionID, "task_version": postExplain.StageFlow.TaskVersion,
-		"response": incorrectStageResponse(t, ctx, reproofPool, postExplain.QuestionID),
+		// The fourth failure used index 4; the reproof differs from it.
+		"response": incorrectStageResponseAt(t, ctx, reproofPool, postExplain.QuestionID, 5),
 	}
 	reproofFailure := performJSON(reproofRouter, http.MethodPost, "/api/v1/student/sessions/"+reproofSession.ID.String()+"/answers", reproofFixture.security.studentToken, reproofBody)
 	if reproofFailure.Code != http.StatusOK {
@@ -567,6 +568,183 @@ SELECT
 			reproofStatus, reproofBlockStatus, reproofReviewStatus, reproofReviewAttempts)
 	}
 	awaitEventType(t, reproofStudentEvents, string(realtime.EventSessionAbandoned))
+}
+
+// §13.2 in the stage classroom: a fixed emotion signal on a wrong answer takes
+// a BREAK on the same task before any Socratic round. The round, the help level
+// and the model call count stay where they were, and the next wrong answer
+// without a signal continues the M02 rounds.
+func TestFourStageEmotionSignalBreaksBeforeSocraticRounds(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedCompleteStageFixture(t, ctx, pool)
+	var fillTask uuid.UUID
+	if err := pool.QueryRow(ctx, `
+SELECT question_id FROM classroom_stage_tasks
+WHERE lineage_id=$1 AND stage_role='ORIGINAL' AND selection_order=1`, fixture.lineageID).Scan(&fillTask); err != nil {
+		t.Fatal(err)
+	}
+	scene := studentinteraction.Scene{
+		Version: studentinteraction.Version, Renderer: studentinteraction.RendererFillBlanks,
+		AccessibleFallback: "填写内容。", Slots: []studentinteraction.Item{{ID: "slot-1", Label: "内容"}},
+	}
+	rawScene, err := json.Marshal(scene)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, ok := studentinteraction.AnswerSchema(scene)
+	if !ok {
+		t.Fatal("fill scene did not produce answer schema")
+	}
+	rule := json.RawMessage(`{"rule_type":"EXACT_FILL","expected_values":[{"slot_id":"slot-1","accepted_values":["已发布值"]}],"allowed_slot_ids":["slot-1"]}`)
+	if _, err := pool.Exec(ctx, `UPDATE questions SET question_type='FILL_BLANKS',scene_public_json=$2,input_schema_json=$3 WHERE id=$1`,
+		fillTask, rawScene, schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE classroom_stage_tasks SET scoring_rule_version='exact-fill-v1',scoring_rule_private_json=$2 WHERE question_id=$1`,
+		fillTask, rule); err != nil {
+		t.Fatal(err)
+	}
+	agent := &provenanceTeachingAgent{}
+	service := classroom.NewService(pool, realtime.NewHub(), nil, nil).WithTeachingAgent(agent)
+	router := stageRouter(pool, service)
+	session := startStageSession(t, router, fixture)
+	if session.QuestionID != fillTask {
+		t.Fatalf("session started on %s, want the fill task %s", session.QuestionID, fillTask)
+	}
+	answersPath := "/api/v1/student/sessions/" + session.ID.String() + "/answers"
+
+	type sessionRow struct {
+		round, assistance int
+		state             string
+	}
+	readRow := func() sessionRow {
+		var row sessionRow
+		if err := pool.QueryRow(ctx, `SELECT socratic_fail_count,assistance_level,current_state FROM learning_sessions WHERE id=$1`,
+			session.ID).Scan(&row.round, &row.assistance, &row.state); err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+	recorded := func(operationID uuid.UUID) (string, string) {
+		var code, action string
+		if err := pool.QueryRow(ctx, `SELECT response_code,response_action FROM classroom_stage_attempts WHERE operation_id=$1`,
+			operationID).Scan(&code, &action); err != nil {
+			t.Fatal(err)
+		}
+		return code, action
+	}
+	// submit answers the current task and checks the action, the recorded
+	// code, the round, the task and the model call count after it.
+	submit := func(label string, response map[string]any, action tutor.State, code string, round, calls int) {
+		t.Helper()
+		current := readStageSession(t, router, fixture.security.studentToken, session.ID)
+		operationID := uuid.New()
+		body := map[string]any{
+			"operation_id": operationID, "stage": current.StageFlow.Stage,
+			"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
+			"response": response,
+		}
+		before := readRow()
+		reply := performJSON(router, http.MethodPost, answersPath, fixture.security.studentToken, body)
+		if reply.Code != http.StatusOK {
+			t.Fatalf("%s=%d %s", label, reply.Code, reply.Body.String())
+		}
+		var result classroom.StageSubmitResult
+		if err := json.Unmarshal(reply.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		recordedCode, recordedAction := recorded(operationID)
+		if result.Action != action || recordedAction != string(action) || recordedCode != code || result.Code != "" ||
+			result.SocraticRound != round || result.Status != "ACTIVE" || result.EvidenceKind != classroom.StageEvidenceNone ||
+			result.TaskID == nil || *result.TaskID != current.QuestionID {
+			t.Fatalf("%s result=%+v recorded=%s/%s want=%s/%s/%d", label, result, recordedCode, recordedAction, action, code, round)
+		}
+		if agent.generateCalls != calls {
+			t.Fatalf("%s model calls=%d want=%d", label, agent.generateCalls, calls)
+		}
+		after := readRow()
+		if after.round != round || after.state != string(current.StageFlow.Stage) {
+			t.Fatalf("%s session=%+v want round %d on %s", label, after, round, current.StageFlow.Stage)
+		}
+		if action == tutor.StateBreak {
+			if after.assistance != before.assistance || before.round != round {
+				t.Fatalf("%s break changed session before=%+v after=%+v", label, before, after)
+			}
+			if result.Message != "先停一下，喝口水、动一动。准备好了再回到这道题，不着急。" {
+				t.Fatalf("%s break message=%q", label, result.Message)
+			}
+		}
+		repeated := performJSON(router, http.MethodPost, answersPath, fixture.security.studentToken, body)
+		if repeated.Code != http.StatusOK || repeated.Body.String() != reply.Body.String() {
+			t.Fatalf("%s idempotency first=%s repeated=%d/%s", label, reply.Body.String(), repeated.Code, repeated.Body.String())
+		}
+	}
+	fill := func(value string) map[string]any {
+		return map[string]any{"values": []map[string]string{{"slot_id": "slot-1", "value": value}}}
+	}
+
+	submit("first wrong fill", fill("5"), tutor.StateProbe, "SOCRATIC_GUIDED", 1, 1)
+	for _, saying := range []string{"烦死了", "不想做", "随便吧", "你直接告诉我吧", "我不知道不知道"} {
+		submit("fill saying "+saying, fill(saying), tutor.StateBreak, "EMOTION_BREAK", 1, 1)
+	}
+	if row := readRow(); row.assistance != 0 {
+		t.Fatalf("emotion breaks raised the help level: %+v", row)
+	}
+	submit("different wrong fill after the break", fill("7"), tutor.StateScaffold, "SOCRATIC_GUIDED", 2, 2)
+	submit("same wrong fill again", fill("7"), tutor.StateBreak, "EMOTION_BREAK", 2, 2)
+	// "我不会" is not an emotion saying; typed into a blank it is an ordinary wrong answer.
+	submit("我不会 typed into the blank", fill("我不会"), tutor.StateAnalogy, "SOCRATIC_GUIDED", 3, 3)
+	if row := readRow(); row.assistance != 0 {
+		t.Fatalf("Socratic rounds raised the help level: %+v", row)
+	}
+
+	// Asking for help stays the existing HINT, not a BREAK.
+	current := readStageSession(t, router, fixture.security.studentToken, session.ID)
+	helpOperation := uuid.New()
+	help := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/support", fixture.security.studentToken, map[string]any{
+		"type": "HINT", "operation_id": helpOperation, "stage": current.StageFlow.Stage,
+		"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
+	})
+	if help.Code != http.StatusOK {
+		t.Fatalf("help=%d %s", help.Code, help.Body.String())
+	}
+	if code, action := recorded(helpOperation); code != "HELP_DELIVERED" || action != string(tutor.StateHint) {
+		t.Fatalf("help recorded=%s/%s", code, action)
+	}
+	if agent.generateCalls != 4 {
+		t.Fatalf("help model calls=%d", agent.generateCalls)
+	}
+
+	// The assisted success moves to a fresh selection task. There only an
+	// identical wrong answer counts: no saying is read from option content.
+	success := performJSON(router, http.MethodPost, answersPath, fixture.security.studentToken, map[string]any{
+		"operation_id": uuid.New(), "stage": current.StageFlow.Stage,
+		"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
+		"response": fill("已发布值"),
+	})
+	if success.Code != http.StatusOK {
+		t.Fatalf("assisted success=%d %s", success.Code, success.Body.String())
+	}
+	optionTask := readStageSession(t, router, fixture.security.studentToken, session.ID).QuestionID
+	if optionTask == fillTask {
+		t.Fatal("assisted success stayed on the fill task")
+	}
+	submit("first wrong option", incorrectStageResponseAt(t, ctx, pool, optionTask, 0), tutor.StateProbe, "SOCRATIC_GUIDED", 1, 5)
+	submit("same wrong option again", incorrectStageResponseAt(t, ctx, pool, optionTask, 0), tutor.StateBreak, "EMOTION_BREAK", 1, 5)
+	submit("different wrong option after the break", incorrectStageResponseAt(t, ctx, pool, optionTask, 1), tutor.StateScaffold, "SOCRATIC_GUIDED", 2, 6)
+
+	var breakTurns, analyzeCalls int
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM tutor_turns WHERE session_id=$1 AND action='BREAK'`, session.ID).Scan(&breakTurns); err != nil {
+		t.Fatal(err)
+	}
+	analyzeCalls = agent.analyzeCalls
+	if breakTurns != 7 || analyzeCalls != 0 {
+		t.Fatalf("break turns=%d analyze calls=%d", breakTurns, analyzeCalls)
+	}
 }
 
 func TestFourStageContentPreflightAndRuntimeDriftFailClosed(t *testing.T) {
@@ -875,6 +1053,14 @@ func correctStageResponse(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 
 func incorrectStageResponse(t *testing.T, ctx context.Context, pool *pgxpool.Pool, questionID uuid.UUID) map[string]any {
 	t.Helper()
+	return incorrectStageResponseAt(t, ctx, pool, questionID, 0)
+}
+
+// incorrectStageResponseAt picks one of the wrong options by index. Consecutive
+// failures alternate indexes so that no wrong answer repeats the previous one,
+// which the stage classroom reads as an emotion signal.
+func incorrectStageResponseAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, questionID uuid.UUID, index int) map[string]any {
+	t.Helper()
 	var rule struct {
 		Expected []string `json:"expected_option_ids"`
 		Allowed  []string `json:"allowed_option_ids"`
@@ -886,17 +1072,20 @@ func incorrectStageResponse(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	if err := json.Unmarshal(raw, &rule); err != nil {
 		t.Fatal(err)
 	}
+	var wrong []string
 	for _, option := range rule.Allowed {
 		matched := false
 		for _, expected := range rule.Expected {
 			matched = matched || option == expected
 		}
 		if !matched {
-			return map[string]any{"selected_option_ids": []string{option}}
+			wrong = append(wrong, option)
 		}
 	}
-	t.Fatal("stage fixture has no deterministic incorrect option")
-	return nil
+	if len(wrong) == 0 {
+		t.Fatal("stage fixture has no deterministic incorrect option")
+	}
+	return map[string]any{"selected_option_ids": []string{wrong[index%len(wrong)]}}
 }
 
 func stageRouter(pool *pgxpool.Pool, service *classroom.Service) http.Handler {

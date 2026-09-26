@@ -159,6 +159,8 @@ func stageMessage(code string) string {
 		return "这次还没有通过确定性检查，换一道不重复的新任务再试。"
 	case "SOCRATIC_GUIDED":
 		return "这次还没有通过确定性检查，先按这条引导再想一步，还是这道题。"
+	case "EMOTION_BREAK":
+		return "先停一下，喝口水、动一动。准备好了再回到这道题，不着急。"
 	case "HELP_DELIVERED":
 		return "先按这条提示完成当前任务；完成后还要用新任务独立证明。"
 	case "ASSISTED_REPROOF":
