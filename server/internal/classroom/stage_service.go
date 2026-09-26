@@ -38,6 +38,7 @@ type stageSnapshot struct {
 	learningVersion     int64
 	timingVersion       int64
 	socraticFailCount   int
+	limitExplained      bool
 	startedAt           time.Time
 	accumulatedSeconds  int
 	lastResumedAt       *time.Time
@@ -365,6 +366,12 @@ SELECT session.id,session.student_id,stage_session.lineage_id,stage_session.know
             AND release_record.to_status='RELEASED'
            WHERE version.question_id=question.id
              AND version.version=question.content_version
+       ),
+       EXISTS (
+           SELECT 1 FROM classroom_stage_attempts attempt
+           WHERE attempt.session_id=session.id
+             AND attempt.question_id=stage_task.question_id
+             AND attempt.response_code='SOCRATIC_LIMIT_EXPLAINED'
        )
 FROM classroom_stage_sessions stage_session
 JOIN learning_sessions session ON session.id=stage_session.session_id
@@ -384,7 +391,7 @@ WHERE stage_session.session_id=$1 AND student.user_id=$2`+lock, sessionID, stude
 		&snapshot.task.ScoringRule, &snapshot.task.EvidenceForm,
 		&snapshot.task.ContentVersion, &snapshot.task.Prompt, &snapshot.task.Scene,
 		&snapshot.task.InputSchema, &snapshot.task.SubjectCode, &snapshot.actualTaskStatus,
-		&snapshot.actualTaskVersion, &snapshot.contentReleaseValid,
+		&snapshot.actualTaskVersion, &snapshot.contentReleaseValid, &snapshot.limitExplained,
 	)
 	snapshot.task.KnowledgePointID = snapshot.knowledgePointID
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -423,24 +430,21 @@ func (service *Service) prepareStageFeedback(ctx context.Context, snapshot stage
 	if score == StageScoreCorrect {
 		return ai.TutorTurn{}, nil
 	}
-	if (score == StageScoreIncorrect || score == StageScoreIndeterminate) && snapshot.socraticFailCount >= 3 {
-		return ai.TutorTurn{
-			Action:  tutor.State(snapshot.stage),
-			Message: stageMessage("SOCRATIC_REPROOF_FAILED"),
-		}, nil
-	}
-	action := tutor.StateProbe
-	fallback := "换一道任务，再按问题要求逐项检查。"
-	explain := request.Support == SupportExplain ||
-		((score == StageScoreIncorrect || score == StageScoreIndeterminate) && snapshot.socraticFailCount+1 >= 3)
-	if score == StageScoreHelpRequested || explain {
-		if explain {
-			action = tutor.StateExplain
-			fallback = "先看一个同结构的完整示范，再回到当前任务自己验证。"
-		} else {
-			action = tutor.StateHint
-			fallback = "先确认问题要求的信息类别，再逐项核对。"
+	action := tutor.StateHint
+	fallback := "先确认问题要求的信息类别，再逐项核对。"
+	if score == StageScoreIncorrect || score == StageScoreIndeterminate {
+		var code string
+		action, code = stageFailureAction(snapshot)
+		if code == "SOCRATIC_REPROOF_FAILED" {
+			return ai.TutorTurn{
+				Action:  tutor.State(snapshot.stage),
+				Message: stageMessage(code),
+			}, nil
 		}
+		fallback = stageFailureFallback[action]
+	} else if request.Support == SupportExplain {
+		action = tutor.StateExplain
+		fallback = stageFailureFallback[tutor.StateExplain]
 	}
 	if service.agent == nil {
 		return ai.TutorTurn{Action: action, Message: fallback}, nil
@@ -464,9 +468,12 @@ func (service *Service) prepareStageFeedback(ctx context.Context, snapshot stage
 		},
 	}
 	var turn ai.TutorTurn
-	if explain {
+	switch action {
+	case tutor.StateExplain:
 		turn, err = service.agent.GenerateParallelExample(ctx, ai.ExampleRequest(generationRequest))
-	} else {
+	case tutor.StateAnalogy:
+		turn, err = service.agent.GenerateAnalogy(ctx, ai.AnalogyRequest(generationRequest))
+	default:
 		turn, err = service.agent.GenerateTurn(ctx, generationRequest)
 	}
 	if err != nil {
@@ -622,23 +629,12 @@ func (service *Service) commitStageAttempt(
 		case StageScoreHelpRequested:
 			// Help keeps the current task active. A later success on this task is assisted.
 		case StageScoreIncorrect, StageScoreIndeterminate:
+			// A failure stays on the current task. Only a success after help
+			// or guidance moves on to a fresh task, through ASSISTED_REPROOF.
+			_, responseCode = stageFailureAction(snapshot)
 			responseSocratic = min(3, snapshot.socraticFailCount+1)
-			if snapshot.socraticFailCount >= 3 {
-				responseCode = "SOCRATIC_REPROOF_FAILED"
+			if responseCode == "SOCRATIC_REPROOF_FAILED" {
 				abandonCode = responseCode
-			} else if responseSocratic >= 3 {
-				responseCode = "SOCRATIC_LIMIT_EXPLAINED"
-			} else {
-				responseCode = "TRY_NEW_TASK"
-				task, err := selectUnpresentedStageTask(ctx, tx, snapshot.lineageID, snapshot.stage, snapshot.sessionID, snapshot.task.ID)
-				if errors.Is(err, ErrStageContentExhausted) {
-					responseCode = "CONTENT_EXHAUSTED"
-					abandonCode = responseCode
-				} else if err != nil {
-					return err
-				} else {
-					nextTask = &task
-				}
 			}
 		case StageScoreCorrect:
 			responseSocratic = 0
@@ -863,7 +859,7 @@ WHERE session_id=$1`, snapshot.sessionID, currentTaskID, currentTaskVersion); er
 		return err
 	}
 	assistance := 0
-	if score == StageScoreHelpRequested || socraticFailCount >= 3 {
+	if score == StageScoreHelpRequested || feedback.Action == tutor.StateExplain {
 		assistance = assistanceForState(feedback.Action)
 	}
 	_, err := tx.Exec(ctx, `
@@ -1007,13 +1003,40 @@ func (service *Service) refreshStageCompletionPlan(ctx context.Context, studentI
 	}
 }
 
+// stageFailureAction follows the Socratic limit in §13.1 on the current task:
+// three effective rounds (check the reasoning, split off a smaller step, a life
+// analogy), then one parallel-example explanation, and a failed reproof after
+// that explanation ends the classroom without another model call.
+func stageFailureAction(snapshot stageSnapshot) (tutor.State, string) {
+	switch {
+	case snapshot.limitExplained:
+		return tutor.State(snapshot.stage), "SOCRATIC_REPROOF_FAILED"
+	case snapshot.socraticFailCount >= 3:
+		return tutor.StateExplain, "SOCRATIC_LIMIT_EXPLAINED"
+	case snapshot.socraticFailCount == 2:
+		return tutor.StateAnalogy, "SOCRATIC_GUIDED"
+	case snapshot.socraticFailCount == 1:
+		return tutor.StateScaffold, "SOCRATIC_GUIDED"
+	default:
+		return tutor.StateProbe, "SOCRATIC_GUIDED"
+	}
+}
+
+// stageFailureFallback is the feedback when no teaching agent is configured.
+var stageFailureFallback = map[tutor.State]string{
+	tutor.StateProbe:    "先说说你是怎么想的，再按问题要求逐项检查。",
+	tutor.StateScaffold: "先只做第一小步，确认这一步对了再往下。",
+	tutor.StateAnalogy:  "把这道题想成生活里的一件小事，再回来看这一步。",
+	tutor.StateExplain:  "先看一个同结构的完整示范，再回到当前任务自己验证。",
+}
+
 func stageTaskWasHelped(ctx context.Context, tx pgx.Tx, sessionID, taskID uuid.UUID) (bool, error) {
 	var helped bool
 	err := tx.QueryRow(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM classroom_stage_attempts
     WHERE session_id=$1 AND question_id=$2
-      AND (attempt_kind='HELP' OR response_code='SOCRATIC_LIMIT_EXPLAINED')
+      AND (attempt_kind='HELP' OR response_code IN ('SOCRATIC_GUIDED','SOCRATIC_LIMIT_EXPLAINED'))
 )`, sessionID, taskID).Scan(&helped)
 	return helped, err
 }

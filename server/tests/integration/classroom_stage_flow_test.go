@@ -23,6 +23,7 @@ import (
 	"github.com/oppositenum/ai-learning-tutor/server/internal/planner"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/realtime"
 	"github.com/oppositenum/ai-learning-tutor/server/internal/studentinteraction"
+	"github.com/oppositenum/ai-learning-tutor/server/internal/tutor"
 	"github.com/oppositenum/ai-learning-tutor/server/migrations"
 )
 
@@ -268,9 +269,29 @@ func TestFourStageHelpAndFailureRequireFreshNeverPresentedReproof(t *testing.T) 
 		t.Fatalf("wrong=%d %s", wrong.Code, wrong.Body.String())
 	}
 	read = readStageSession(t, router, fixture.security.studentToken, session.ID)
-	if read.QuestionID == firstTask || read.QuestionID == secondTask || read.StageFlow.Stage != classroom.StageOriginal {
-		t.Fatalf("failed task was repeated or stage advanced: %+v", read)
+	if read.QuestionID != secondTask || read.StageFlow.Stage != classroom.StageOriginal {
+		t.Fatalf("a failure left the current task or advanced the stage: %+v", read)
 	}
+
+	// Success on a task that received Socratic guidance is assisted, so the
+	// independent proof still needs a fresh task.
+	guided := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, map[string]any{
+		"operation_id": uuid.New(), "stage": read.StageFlow.Stage,
+		"task_id": secondTask, "task_version": read.StageFlow.TaskVersion,
+		"response": correctStageResponse(t, ctx, pool, secondTask),
+	})
+	if guided.Code != http.StatusOK {
+		t.Fatalf("guided success=%d %s", guided.Code, guided.Body.String())
+	}
+	var guidedResult classroom.StageSubmitResult
+	if err := json.Unmarshal(guided.Body.Bytes(), &guidedResult); err != nil {
+		t.Fatal(err)
+	}
+	if guidedResult.EvidenceKind != classroom.StageEvidenceAssisted || guidedResult.StageCompleted ||
+		guidedResult.TaskID == nil || *guidedResult.TaskID == firstTask || *guidedResult.TaskID == secondTask {
+		t.Fatalf("guided success result=%+v", guidedResult)
+	}
+	read = readStageSession(t, router, fixture.security.studentToken, session.ID)
 	thirdTask := read.QuestionID
 
 	finishStage := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, map[string]any{
@@ -328,67 +349,104 @@ VALUES($1,$2,$3,'MASTERY',now())`, reviewQueueID, fixture.security.studentID, fi
 		t.Fatal(err)
 	}
 
-	seen := map[uuid.UUID]struct{}{session.QuestionID: {}}
-	for wantRound := 1; wantRound <= 3; wantRound++ {
+	// §13.1: three effective Socratic rounds on the same task, then the limit
+	// explanation with a parallel example, still on that task.
+	firstTask := session.QuestionID
+	ladder := []struct {
+		action tutor.State
+		code   string
+		round  int
+	}{
+		{tutor.StateProbe, "SOCRATIC_GUIDED", 1},
+		{tutor.StateScaffold, "SOCRATIC_GUIDED", 2},
+		{tutor.StateAnalogy, "SOCRATIC_GUIDED", 3},
+		{tutor.StateExplain, "SOCRATIC_LIMIT_EXPLAINED", 3},
+	}
+	for index, want := range ladder {
 		current := readStageSession(t, router, fixture.security.studentToken, session.ID)
-		operationID := uuid.New()
+		if current.QuestionID != firstTask {
+			t.Fatalf("failure %d left the original task: %s", index+1, current.QuestionID)
+		}
 		body := map[string]any{
-			"operation_id": operationID, "stage": current.StageFlow.Stage,
+			"operation_id": uuid.New(), "stage": current.StageFlow.Stage,
 			"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
 			"response": incorrectStageResponse(t, ctx, pool, current.QuestionID),
 		}
 		response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, body)
 		if response.Code != http.StatusOK {
-			t.Fatalf("failure round %d=%d %s", wantRound, response.Code, response.Body.String())
+			t.Fatalf("failure %d=%d %s", index+1, response.Code, response.Body.String())
 		}
 		var result classroom.StageSubmitResult
 		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}
-		if result.SocraticRound != wantRound {
-			t.Fatalf("failure round result=%+v want=%d", result, wantRound)
+		var recordedCode string
+		if err := pool.QueryRow(ctx, `SELECT response_code FROM classroom_stage_attempts WHERE operation_id=$1`, body["operation_id"]).Scan(&recordedCode); err != nil {
+			t.Fatal(err)
 		}
-		if wantRound < 3 {
-			if result.TaskID == nil {
-				t.Fatalf("round %d did not select a task: %+v", wantRound, result)
-			}
-			if _, duplicate := seen[*result.TaskID]; duplicate {
-				t.Fatalf("round %d repeated task %s", wantRound, *result.TaskID)
-			}
-			seen[*result.TaskID] = struct{}{}
-		} else if result.TaskID == nil || *result.TaskID != current.QuestionID || result.Action != "EXPLAIN" {
-			t.Fatalf("third failure did not keep and explain current task: %+v", result)
+		if result.Action != want.action || recordedCode != want.code || result.Code != "" || result.SocraticRound != want.round ||
+			result.Status != "ACTIVE" || result.EvidenceKind != classroom.StageEvidenceNone || result.StageCompleted ||
+			result.TaskID == nil || *result.TaskID != firstTask {
+			t.Fatalf("failure %d result=%+v want=%+v", index+1, result, want)
 		}
 		repeated := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, body)
 		if repeated.Code != http.StatusOK || repeated.Body.String() != response.Body.String() {
-			t.Fatalf("round %d idempotency first=%s repeated=%d/%s", wantRound, response.Body.String(), repeated.Code, repeated.Body.String())
+			t.Fatalf("failure %d idempotency first=%s repeated=%d/%s", index+1, response.Body.String(), repeated.Code, repeated.Body.String())
 		}
 	}
-	if len(seen) != 3 || agent.generateCalls != 3 {
-		t.Fatalf("presented=%d feedback_calls=%d", len(seen), agent.generateCalls)
+	if agent.generateCalls != 4 || strings.Join(agent.generators, ",") != "analogy,parallel-example" {
+		t.Fatalf("feedback calls=%d generators=%v", agent.generateCalls, agent.generators)
 	}
-
-	current := readStageSession(t, router, fixture.security.studentToken, session.ID)
-	finalOperation := uuid.New()
-	finalBody := map[string]any{
-		"operation_id": finalOperation, "stage": current.StageFlow.Stage,
-		"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
-		"response": correctStageResponse(t, ctx, pool, current.QuestionID),
-	}
-	final := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, finalBody)
-	if final.Code != http.StatusOK {
-		t.Fatalf("content exhaustion=%d %s", final.Code, final.Body.String())
-	}
-	var result classroom.StageSubmitResult
-	if err := json.Unmarshal(final.Body.Bytes(), &result); err != nil {
+	var turnActions []string
+	if err := pool.QueryRow(ctx, `
+SELECT COALESCE(array_agg(action ORDER BY sequence),'{}') FROM tutor_turns
+WHERE session_id=$1 AND action IN ('PROBE','SCAFFOLD','ANALOGY','HINT','BACKTRACK','EXPLAIN','VOICE_EXPLAIN')`, session.ID).Scan(&turnActions); err != nil {
 		t.Fatal(err)
 	}
-	if result.Code != "CONTENT_EXHAUSTED" || result.Status != "ABANDONED" || result.EvidenceKind != classroom.StageEvidenceAssisted || result.StageCompleted {
-		t.Fatalf("content exhaustion result=%+v", result)
+	if strings.Join(turnActions, ",") != "PROBE,SCAFFOLD,ANALOGY,EXPLAIN" {
+		t.Fatalf("persisted tutor actions=%v", turnActions)
 	}
-	repeatedFinal := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, finalBody)
-	if repeatedFinal.Code != http.StatusOK || repeatedFinal.Body.String() != final.Body.String() {
-		t.Fatalf("content exhaustion idempotency first=%s repeated=%d/%s", final.Body.String(), repeatedFinal.Code, repeatedFinal.Body.String())
+
+	// Success on the original task after the explanation is assisted and moves
+	// to a fresh task. Help on the remaining tasks then exhausts the stage.
+	for step := 0; step < 3; step++ {
+		current := readStageSession(t, router, fixture.security.studentToken, session.ID)
+		if step > 0 {
+			help := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/support", fixture.security.studentToken, map[string]any{
+				"type": "HINT", "operation_id": uuid.New(), "stage": current.StageFlow.Stage,
+				"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
+			})
+			if help.Code != http.StatusOK {
+				t.Fatalf("help on task %d=%d %s", step+1, help.Code, help.Body.String())
+			}
+		}
+		body := map[string]any{
+			"operation_id": uuid.New(), "stage": current.StageFlow.Stage,
+			"task_id": current.QuestionID, "task_version": current.StageFlow.TaskVersion,
+			"response": correctStageResponse(t, ctx, pool, current.QuestionID),
+		}
+		response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, body)
+		if response.Code != http.StatusOK {
+			t.Fatalf("assisted success on task %d=%d %s", step+1, response.Code, response.Body.String())
+		}
+		var result classroom.StageSubmitResult
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if step < 2 {
+			if result.EvidenceKind != classroom.StageEvidenceAssisted || result.StageCompleted ||
+				result.TaskID == nil || *result.TaskID == current.QuestionID {
+				t.Fatalf("assisted success on task %d=%+v", step+1, result)
+			}
+			continue
+		}
+		if result.Code != "CONTENT_EXHAUSTED" || result.Status != "ABANDONED" || result.EvidenceKind != classroom.StageEvidenceAssisted || result.StageCompleted {
+			t.Fatalf("content exhaustion result=%+v", result)
+		}
+		repeated := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, body)
+		if repeated.Code != http.StatusOK || repeated.Body.String() != response.Body.String() {
+			t.Fatalf("content exhaustion idempotency first=%s repeated=%d/%s", response.Body.String(), repeated.Code, repeated.Body.String())
+		}
 	}
 
 	var attempts, independentEvidence, rewards, activityDays int
@@ -410,7 +468,7 @@ SELECT
 	); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 4 || independentEvidence != 0 || rewards != 0 || activityDays != 0 || status != "ABANDONED" || blockStatus != "AVAILABLE" || reviewStatus != "PENDING" || reviewAttempts != 0 {
+	if attempts != 9 || independentEvidence != 0 || rewards != 0 || activityDays != 0 || status != "ABANDONED" || blockStatus != "AVAILABLE" || reviewStatus != "PENDING" || reviewAttempts != 0 {
 		t.Fatalf("terminal state attempts=%d independent=%d rewards=%d activity=%d session=%s block=%s review=%s/%d",
 			attempts, independentEvidence, rewards, activityDays, status, blockStatus, reviewStatus, reviewAttempts)
 	}
@@ -443,7 +501,7 @@ VALUES($1,$2,$3,'MASTERY',now())`, reproofQueueID, reproofFixture.security.stude
 		t.Fatal(err)
 	}
 
-	for wantRound := 1; wantRound <= 3; wantRound++ {
+	for failure := 1; failure <= 4; failure++ {
 		current := readStageSession(t, reproofRouter, reproofFixture.security.studentToken, reproofSession.ID)
 		response := performJSON(reproofRouter, http.MethodPost, "/api/v1/student/sessions/"+reproofSession.ID.String()+"/answers", reproofFixture.security.studentToken, map[string]any{
 			"operation_id": uuid.New(), "stage": current.StageFlow.Stage,
@@ -451,7 +509,7 @@ VALUES($1,$2,$3,'MASTERY',now())`, reproofQueueID, reproofFixture.security.stude
 			"response": incorrectStageResponse(t, ctx, reproofPool, current.QuestionID),
 		})
 		if response.Code != http.StatusOK {
-			t.Fatalf("reproof setup round %d=%d %s", wantRound, response.Code, response.Body.String())
+			t.Fatalf("reproof setup failure %d=%d %s", failure, response.Code, response.Body.String())
 		}
 	}
 	postExplain := readStageSession(t, reproofRouter, reproofFixture.security.studentToken, reproofSession.ID)
@@ -477,7 +535,7 @@ VALUES($1,$2,$3,'MASTERY',now())`, reproofQueueID, reproofFixture.security.stude
 	if replayedReproofFailure.Code != http.StatusOK || replayedReproofFailure.Body.String() != reproofFailure.Body.String() {
 		t.Fatalf("post-explanation idempotency first=%s repeated=%d/%s", reproofFailure.Body.String(), replayedReproofFailure.Code, replayedReproofFailure.Body.String())
 	}
-	if reproofAgent.generateCalls != 3 {
+	if reproofAgent.generateCalls != 4 {
 		t.Fatalf("post-explanation failure generated another model turn: calls=%d", reproofAgent.generateCalls)
 	}
 
@@ -501,7 +559,7 @@ SELECT
 	); err != nil {
 		t.Fatal(err)
 	}
-	if reproofAttempts != 4 || reproofEvidence != 0 || reproofRewards != 0 || reproofActivityDays != 0 ||
+	if reproofAttempts != 5 || reproofEvidence != 0 || reproofRewards != 0 || reproofActivityDays != 0 ||
 		reproofExplanations != 1 || reproofStatus != "ABANDONED" || reproofBlockStatus != "AVAILABLE" ||
 		reproofReviewStatus != "PENDING" || reproofReviewAttempts != 0 {
 		t.Fatalf("post-explanation state attempts=%d evidence=%d rewards=%d activity=%d explanations=%d session=%s block=%s review=%s/%d",
@@ -563,10 +621,19 @@ ORDER BY selection_order LIMIT 1`, fixture.lineageID, session.QuestionID).Scan(&
 	if _, err := pool.Exec(ctx, `UPDATE classroom_stage_tasks SET scoring_rule_private_json='{}' WHERE question_id=$1`, driftedCandidateID); err != nil {
 		t.Fatal(err)
 	}
+	// A failure stays on the current task, so the candidate is selected by the
+	// assisted success that follows help.
+	help := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/support", fixture.security.studentToken, map[string]any{
+		"type": "HINT", "operation_id": uuid.New(), "stage": session.StageFlow.Stage,
+		"task_id": session.QuestionID, "task_version": session.StageFlow.TaskVersion,
+	})
+	if help.Code != http.StatusOK {
+		t.Fatalf("help before drifted selection=%d %s", help.Code, help.Body.String())
+	}
 	driftedSelection := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, map[string]any{
 		"operation_id": uuid.New(), "stage": session.StageFlow.Stage,
 		"task_id": session.QuestionID, "task_version": session.StageFlow.TaskVersion,
-		"response": incorrectStageResponse(t, ctx, pool, session.QuestionID),
+		"response": correctStageResponse(t, ctx, pool, session.QuestionID),
 	})
 	if driftedSelection.Code != http.StatusServiceUnavailable || driftedSelection.Header().Get("Cache-Control") != "no-store" || !strings.Contains(driftedSelection.Body.String(), "CLASSROOM_STAGE_UNAVAILABLE") || strings.Contains(driftedSelection.Body.String(), "CONTENT_EXHAUSTED") {
 		t.Fatalf("drifted candidate selection=%d %s", driftedSelection.Code, driftedSelection.Body.String())
@@ -585,15 +652,17 @@ ORDER BY selection_order LIMIT 1`, fixture.lineageID, session.QuestionID).Scan(&
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "CLASSROOM_STAGE_UNAVAILABLE") {
 		t.Fatalf("quarantined runtime task=%d %s", response.Code, response.Body.String())
 	}
-	var attempts int
+	var answers, helps int
 	var state string
 	if err := pool.QueryRow(ctx, `
-SELECT (SELECT count(*)::int FROM classroom_stage_attempts WHERE session_id=$1),current_state
-FROM learning_sessions WHERE id=$1`, session.ID).Scan(&attempts, &state); err != nil {
+SELECT (SELECT count(*)::int FROM classroom_stage_attempts WHERE session_id=$1 AND attempt_kind='ANSWER'),
+       (SELECT count(*)::int FROM classroom_stage_attempts WHERE session_id=$1 AND attempt_kind='HELP'),
+       current_state
+FROM learning_sessions WHERE id=$1`, session.ID).Scan(&answers, &helps, &state); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 0 || state != "ORIGINAL" {
-		t.Fatalf("runtime drift mutated classroom attempts=%d state=%s", attempts, state)
+	if answers != 0 || helps != 1 || state != "ORIGINAL" {
+		t.Fatalf("runtime drift mutated classroom answers=%d helps=%d state=%s", answers, helps, state)
 	}
 }
 

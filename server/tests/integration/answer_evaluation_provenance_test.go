@@ -27,6 +27,9 @@ type provenanceTeachingAgent struct {
 	analysis      ai.AnalyzeAnswerResult
 	analyzeCalls  int
 	generateCalls int
+	// generators records the dedicated generator behind each analogy and
+	// parallel example; plain turns are counted by generateCalls only.
+	generators []string
 }
 
 func (agent *provenanceTeachingAgent) AnalyzeAnswer(context.Context, ai.AnalyzeAnswerRequest) (ai.AnalyzeAnswerResult, error) {
@@ -40,10 +43,12 @@ func (agent *provenanceTeachingAgent) GenerateTurn(_ context.Context, request ai
 }
 
 func (agent *provenanceTeachingAgent) GenerateAnalogy(_ context.Context, request ai.AnalogyRequest) (ai.TutorTurn, error) {
+	agent.generators = append(agent.generators, "analogy")
 	return agent.GenerateTurn(context.Background(), ai.GenerateTurnRequest(request))
 }
 
 func (agent *provenanceTeachingAgent) GenerateParallelExample(_ context.Context, request ai.ExampleRequest) (ai.TutorTurn, error) {
+	agent.generators = append(agent.generators, "parallel-example")
 	return agent.GenerateTurn(context.Background(), ai.GenerateTurnRequest(request))
 }
 
