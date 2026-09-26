@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { BookOpen, CalendarCheck2, FlaskConical, HandHelping, Landmark, RefreshCcw, Shuffle, Sparkles, Target } from '@lucide/vue'
-import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { BookOpen, CalendarCheck2, ChevronDown, Compass, FlaskConical, HandHelping, Landmark, Library, RefreshCcw, Shuffle, Sparkles, Target } from '@lucide/vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
+import type { GrowthEvidenceEvent, GrowthIndicatorCode } from '../../api/learning'
+import { subjectCodes, subjectNames, type SubjectCode } from '../../lib/subjects'
 import { useGrowthStore } from '../../stores/growth'
 import { useAuthSession } from '../../stores/auth'
 
@@ -23,11 +25,16 @@ onMounted(() => {
 })
 onBeforeUnmount(() => window.removeEventListener('pageshow', handlePageShow))
 
-const count = (subject: 'MATH' | 'CHINESE' | 'ENGLISH' | 'PHYSICS' | 'CHEMISTRY') => buildings.value.mastered_by_subject?.[subject] ?? 0
+const count = (subject: SubjectCode) => buildings.value.mastered_by_subject?.[subject] ?? 0
+const subjects = computed(() => subjectCodes.map((code) => ({ code, name: subjectNames[code], count: count(code) })))
+// Each building lights up with the knowledge points its subjects have
+// mastered. No subject belongs to 世界图书馆 or 探索站 yet, so they stay at 0.
 const places = computed(() => [
-  { name: '数学塔', detail: `${count('MATH')} 个数学知识点已点亮`, icon: Landmark, color: 'bg-teal-100 text-teal-800' },
-  { name: '语言馆', detail: `${count('CHINESE') + count('ENGLISH')} 个语言知识点已点亮`, icon: BookOpen, color: 'bg-amber-100 text-amber-800' },
-  { name: '科学实验室', detail: `${count('PHYSICS') + count('CHEMISTRY')} 个科学知识点 · ${buildings.value.cross_subject_insights ?? 0} 次跨学科发现`, icon: FlaskConical, color: 'bg-sky-100 text-sky-800' },
+  { key: 'MATH_TOWER', name: '数学塔', count: count('MATH'), detail: `${count('MATH')} 个数学知识点已点亮`, icon: Landmark, color: 'bg-teal-100 text-teal-800' },
+  { key: 'LANGUAGE_HALL', name: '语言馆', count: count('CHINESE') + count('ENGLISH'), detail: `${count('CHINESE') + count('ENGLISH')} 个语言知识点已点亮`, icon: BookOpen, color: 'bg-amber-100 text-amber-800' },
+  { key: 'WORLD_LIBRARY', name: '世界图书馆', count: 0, detail: '0 个知识点已点亮', icon: Library, color: 'bg-rose-100 text-rose-800' },
+  { key: 'SCIENCE_LAB', name: '科学实验室', count: count('PHYSICS') + count('CHEMISTRY'), detail: `${count('PHYSICS') + count('CHEMISTRY')} 个科学知识点已点亮 · ${buildings.value.cross_subject_insights ?? 0} 次跨学科发现`, icon: FlaskConical, color: 'bg-sky-100 text-sky-800' },
+  { key: 'EXPLORATION_STATION', name: '探索站', count: 0, detail: '0 个知识点已点亮', icon: Compass, color: 'bg-violet-100 text-violet-800' },
 ])
 const evidenceIcons = {
   INDEPENDENT_SOLVING: Target,
@@ -37,9 +44,30 @@ const evidenceIcons = {
   DELAYED_REVIEW: CalendarCheck2,
 }
 const evidence = computed(() => currentGrowth.value?.growth_evidence?.indicators ?? [])
+const openIndicator = ref<GrowthIndicatorCode | ''>('')
 
-function evidenceDetail(event: { subject: string; knowledge_point: string; occurred_at: string }) {
-  return `${event.subject} · ${event.knowledge_point} · ${new Date(event.occurred_at).toLocaleDateString('zh-CN')}`
+function toggleIndicator(code: GrowthIndicatorCode) {
+  openIndicator.value = openIndicator.value === code ? '' : code
+}
+
+// Built from parts so every browser shows the same 8月26日 18:05 in the
+// child's learning time zone.
+const occurredAtParts = new Intl.DateTimeFormat('en', {
+  timeZone: 'Asia/Shanghai',
+  month: 'numeric',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+})
+
+function occurredAt(value: string) {
+  const part = Object.fromEntries(occurredAtParts.formatToParts(new Date(value)).map((item) => [item.type, item.value]))
+  return `${part.month}月${part.day}日 ${part.hour}:${part.minute}`
+}
+
+function evidenceDetail(event: GrowthEvidenceEvent) {
+  return `${subjectNames[event.subject] ?? event.subject} · ${event.knowledge_point} · ${occurredAt(event.occurred_at)}`
 }
 </script>
 
@@ -94,26 +122,95 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
         <article
           v-for="indicator in evidence"
           :key="indicator.code"
-          class="grid grid-cols-[2.5rem_minmax(0,1fr)_auto] gap-3 py-4"
+          class="py-2"
         >
-          <span class="grid size-10 place-items-center bg-white text-teal-800">
-            <component
-              :is="evidenceIcons[indicator.code]"
-              :size="19"
+          <button
+            type="button"
+            :data-testid="`growth-indicator-${indicator.code}`"
+            :aria-expanded="openIndicator === indicator.code"
+            :aria-controls="`growth-events-${indicator.code}`"
+            class="growth-indicator grid min-h-12 w-full grid-cols-[2.5rem_minmax(0,1fr)_auto_1.25rem] items-center gap-3 py-2 text-left"
+            @click="toggleIndicator(indicator.code)"
+          >
+            <span class="grid size-10 place-items-center bg-white text-teal-800">
+              <component
+                :is="evidenceIcons[indicator.code]"
+                :size="19"
+                aria-hidden="true"
+              />
+            </span>
+            <span class="min-w-0 text-base font-semibold">{{ indicator.label }}</span>
+            <strong class="text-2xl tabular-nums">{{ indicator.count }}</strong>
+            <ChevronDown
+              :size="20"
+              class="growth-indicator-chevron text-zinc-500"
               aria-hidden="true"
             />
-          </span>
-          <div class="min-w-0">
-            <h3 class="font-semibold">
-              {{ indicator.label }}
-            </h3>
-            <p class="mt-1 break-words text-base leading-6 text-zinc-500">
-              {{ indicator.events[0] ? evidenceDetail(indicator.events[0]) : '等待新的学习证据' }}
+          </button>
+          <div
+            v-if="openIndicator === indicator.code"
+            :id="`growth-events-${indicator.code}`"
+            :data-testid="`growth-events-${indicator.code}`"
+            class="growth-events pb-2 pl-[3.25rem]"
+          >
+            <ul
+              v-if="indicator.events.length"
+              class="space-y-2"
+            >
+              <li
+                v-for="event in indicator.events"
+                :key="`${event.source_kind}:${event.source_id}`"
+                class="break-words text-base leading-6 text-zinc-600"
+              >
+                {{ evidenceDetail(event) }}
+              </li>
+            </ul>
+            <p
+              v-else
+              class="text-base leading-6 text-zinc-500"
+            >
+              等待新的学习证据
+            </p>
+            <p
+              v-if="indicator.events_truncated"
+              data-testid="growth-events-truncated"
+              class="mt-2 text-base leading-6 text-zinc-500"
+            >
+              还有更早的记录没有列出
             </p>
           </div>
-          <strong class="pt-1 text-2xl tabular-nums">{{ indicator.count }}</strong>
         </article>
       </div>
+    </section>
+
+    <section
+      class="mt-8"
+      aria-labelledby="subjects-title"
+    >
+      <h2
+        id="subjects-title"
+        class="text-lg font-semibold"
+      >
+        点亮的知识点
+      </h2>
+      <ul
+        v-if="currentGrowth"
+        class="mt-4 grid grid-cols-2 gap-2 min-[375px]:grid-cols-3"
+      >
+        <li
+          v-for="subject in subjects"
+          :key="subject.code"
+          :data-testid="`growth-subject-${subject.code}`"
+          :data-lit="subject.count > 0"
+          class="card-flat flex items-center justify-between gap-2 px-3 py-2 text-base"
+        >
+          <span>{{ subject.name }}</span>
+          <strong
+            :class="subject.count > 0 ? 'growth-lit text-teal-800' : 'text-zinc-400'"
+            class="tabular-nums"
+          >{{ subject.count }}</strong>
+        </li>
+      </ul>
     </section>
 
     <section
@@ -132,11 +229,13 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
       >
         <article
           v-for="place in places"
-          :key="place.name"
+          :key="place.key"
+          :data-testid="`growth-building-${place.key}`"
+          :data-lit="place.count > 0"
           class="card-flat flex items-center gap-4 p-4"
         >
           <span
-            :class="place.color"
+            :class="place.count > 0 ? ['growth-lit', place.color] : 'bg-zinc-100 text-zinc-400'"
             class="grid size-12 shrink-0 place-items-center"
           >
             <component
@@ -146,7 +245,7 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
             />
           </span>
           <div class="min-w-0">
-            <h3 class="font-semibold">
+            <h3 class="text-base font-semibold">
               {{ place.name }}
             </h3>
             <p class="mt-1 break-words text-base leading-6 text-zinc-500">
@@ -168,7 +267,10 @@ function evidenceDetail(event: { subject: string; knowledge_point: string; occur
       </div>
     </section>
 
-    <p class="mt-8 border-t border-zinc-300 pt-4 text-base text-zinc-500">
+    <p
+      data-testid="growth-compat-energy"
+      class="mt-8 border-t border-zinc-300 pt-4 text-base text-zinc-500"
+    >
       兼容能量记录：{{ currentGrowth?.total_energy ?? '--' }}
     </p>
   </main>

@@ -211,7 +211,9 @@ WHERE id=$1`, fixture.sessionID, now); err != nil {
 		t.Fatalf("AI calls analyze=%d generate=%d", agent.analyzeCalls, agent.generateCalls)
 	}
 	t.Logf("accepted_path_ai_calls analyze=%d generate=%d", agent.analyzeCalls, agent.generateCalls)
-	if result.Status != "COMPLETED" || result.Action != tutor.StateComplete || result.MasteryState != mastery.Learning || result.Energy != 2 || result.TomorrowChanged {
+	// The fixture session already holds a wrong answer on this question, so the
+	// accepted answer is a self correction under the growth point table.
+	if result.Status != "COMPLETED" || result.Action != tutor.StateComplete || result.MasteryState != mastery.Learning || result.Energy != 8 || result.TomorrowChanged {
 		t.Fatalf("legacy accepted result changed: %+v", result)
 	}
 
@@ -567,12 +569,12 @@ WHERE session.id=$1`, fixture.sessionID).Scan(
 	}
 	if sessionStatus != "COMPLETED" || currentState != "COMPLETE" || !endedAt.Equal(now) ||
 		skillState != "LEARNING" || independent != 1 || assisted != 0 || life != 1 ||
-		variant != 0 || textbook != 0 || review != 0 || score != 25 || energy != 2 {
+		variant != 0 || textbook != 0 || review != 0 || score != 25 || energy != 8 {
 		t.Fatalf("accepted legacy snapshot session=%s/%s ended=%s skill=%s evidence=%d/%d/%d/%d/%d/%d score=%d energy=%d",
 			sessionStatus, currentState, endedAt, skillState, independent, assisted, life, variant, textbook, review, score, energy)
 	}
 	var rewardCount, activityCount, completedSessions int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM reward_events WHERE session_id=$1 AND type='EFFORT' AND points=2`, fixture.sessionID).Scan(&rewardCount); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM reward_events WHERE session_id=$1 AND type='SELF_CORRECTION' AND points=8`, fixture.sessionID).Scan(&rewardCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*),COALESCE(sum(completed_sessions),0)::integer FROM student_activity_days WHERE student_id=$1`, fixture.studentID).Scan(&activityCount, &completedSessions); err != nil {

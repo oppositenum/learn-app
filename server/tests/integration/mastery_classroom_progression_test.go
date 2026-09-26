@@ -27,7 +27,10 @@ func TestMasteryRequiresFourRealClassroomEvidenceForms(t *testing.T) {
 	service := classroom.NewService(pool, nil, nil, nil, planner.NewService(pool))
 	forms := []mastery.Form{mastery.FormLife, mastery.FormVariant, mastery.FormTextbook, mastery.FormReview}
 	states := []mastery.State{mastery.Learning, mastery.Understood, mastery.Understood, mastery.Mastered}
-	energy := []int{2, 4, 6, 18}
+	// The fixture session already holds a wrong answer, so the first form is a
+	// self correction. The later first-try answers are on an L2 question and
+	// earn nothing; the review completes mastery and is an independent review.
+	energy := []int{8, 8, 8, 40}
 	for index, form := range forms {
 		sessionID := fixture.sessionID
 		if index == 0 {
@@ -66,8 +69,29 @@ func TestMasteryRequiresFourRealClassroomEvidenceForms(t *testing.T) {
 	if life != 1 || variant != 1 || textbook != 1 || review != 1 || score != 100 {
 		t.Fatalf("evidence counts life=%d variant=%d textbook=%d review=%d score=%d", life, variant, textbook, review, score)
 	}
-	var masteryRewards int
+	var masteryRewards, masteryPoints, reviewPoints int
+	if err := pool.QueryRow(ctx, `SELECT count(*),COALESCE(sum(points),0) FROM reward_events WHERE student_id=$1 AND type='MASTERY'`, fixture.studentID).Scan(&masteryRewards, &masteryPoints); err != nil || masteryRewards != 1 || masteryPoints != 20 {
+		t.Fatalf("mastery rewards=%d points=%d err=%v", masteryRewards, masteryPoints, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(sum(points),0) FROM reward_events WHERE student_id=$1 AND type='DELAYED_REVIEW'`, fixture.studentID).Scan(&reviewPoints); err != nil || reviewPoints != 12 {
+		t.Fatalf("delayed review points=%d err=%v", reviewPoints, err)
+	}
+
+	// Another successful review keeps the knowledge point mastered; the
+	// mastery reward is not granted again, the review is.
+	var queueID uuid.UUID
+	sessionID := uuid.New()
+	if err := pool.QueryRow(ctx, `UPDATE review_queue SET due_at=now()-interval '1 second' WHERE student_id=$1 AND knowledge_point_id=$2 AND status='PENDING' RETURNING id`, fixture.studentID, knowledgePointID).Scan(&queueID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO learning_sessions(id,student_id,review_queue_id,subject_id,current_question_id,status,target_minutes,current_state,evidence_form)VALUES($1,$2,$5,$3,$4,'ACTIVE',10,'ASK','REVIEW')`, sessionID, fixture.studentID, subjectID, fixture.releasedQuestionID, queueID); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Submit(ctx, studentUserID, sessionID, fixture.privateCanary)
+	if err != nil || result.MasteryState != mastery.Mastered || result.Energy != 52 {
+		t.Fatalf("second review state=%s energy=%d err=%v", result.MasteryState, result.Energy, err)
+	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM reward_events WHERE student_id=$1 AND type='MASTERY'`, fixture.studentID).Scan(&masteryRewards); err != nil || masteryRewards != 1 {
-		t.Fatalf("mastery rewards=%d err=%v", masteryRewards, err)
+		t.Fatalf("mastery rewards after a second review=%d err=%v", masteryRewards, err)
 	}
 }

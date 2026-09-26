@@ -16,9 +16,11 @@ const (
 
 var ErrUnknownReward = errors.New("unknown reward type")
 
+// points follows the V1.2 §4.3 table. Changing it applies only to rewards
+// granted afterwards; recorded reward_events keep the points they were given.
 var points = map[Type]int{
-	Effort: 2, SelfCorrection: 5, HintSuccess: 3, Mastery: 12,
-	DelayedReview: 8, DailyCompletion: 10, CrossSubjectInsight: 6,
+	Effort: 3, SelfCorrection: 8, HintSuccess: 6, Mastery: 20,
+	DelayedReview: 12, DailyCompletion: 15, CrossSubjectInsight: 10,
 }
 
 type Event struct {

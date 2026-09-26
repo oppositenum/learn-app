@@ -220,7 +220,7 @@ func TestCrossSubjectRemediationReturnsSameSessionToReleasedOriginalTask(t *test
 	if err := pool.QueryRow(ctx, `SELECT count(*),COALESCE(sum(points),0) FROM reward_events WHERE student_id=$1 AND session_id=$2 AND type='CROSS_SUBJECT_INSIGHT'`, fixture.studentID, session.ID).Scan(&insights, &points); err != nil {
 		t.Fatal(err)
 	}
-	if status != "COMPLETED" || state != "COMPLETE" || insights != 1 || points != 6 {
+	if status != "COMPLETED" || state != "COMPLETE" || insights != 1 || points != 10 {
 		t.Fatalf("completion status=%s state=%s insights=%d points=%d", status, state, insights, points)
 	}
 }

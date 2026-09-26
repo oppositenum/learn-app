@@ -1095,6 +1095,7 @@ func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow,
 		return SubmitResult{}, nil, err
 	}
 	independent := row.assistanceLevel == 0
+	wasMastered := skill.State == mastery.Mastered
 	skill = mastery.NewEngine().Apply(skill, mastery.Evidence{Correct: true, Independent: independent, Form: row.evidenceForm, At: now})
 	if err := resolveSuccessfulReview(ctx, tx, row, skill, independent, now); err != nil {
 		return SubmitResult{}, nil, err
@@ -1111,27 +1112,42 @@ func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow,
 			return SubmitResult{}, nil, err
 		}
 	}
-	rewardType, rewardSource := reward.Effort, sessionID.String()
-	if skill.State == mastery.Mastered {
-		rewardType, rewardSource = reward.Mastery, row.knowledgePointID.String()
-	}
-	returnToOriginal := row.originalTaskID != nil && row.activeTaskID != nil && *row.originalTaskID != *row.activeTaskID
-	if returnToOriginal {
-		rewardType, rewardSource = reward.CrossSubjectInsight, sessionID.String()+":"+row.knowledgePointID.String()
-	}
-	energy, err := grantReward(ctx, tx, row.studentID, sessionID, rewardType, rewardSource)
+	hinted, err := sessionWasHinted(ctx, tx, sessionID)
 	if err != nil {
 		return SubmitResult{}, nil, err
 	}
-	if returnToOriginal {
-		return service.returnToOriginal(ctx, tx, row, sessionID, turnSequence, eventSequence, now, skill.State, energy)
-	}
-	corrected := row.assistanceLevel > 0
-	if !corrected {
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM student_answers sa JOIN answer_analyses aa ON aa.student_answer_id=sa.id WHERE sa.session_id=$1 AND sa.question_id=$2 AND sa.id<>$3 AND NOT aa.answer_correct)`, sessionID, row.questionID, studentAnswerID).Scan(&corrected); err != nil {
+	priorWrong := false
+	if !hinted {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM student_answers sa JOIN answer_analyses aa ON aa.student_answer_id=sa.id WHERE sa.session_id=$1 AND sa.question_id=$2 AND sa.id<>$3 AND NOT aa.answer_correct)`, sessionID, row.questionID, studentAnswerID).Scan(&priorWrong); err != nil {
 			return SubmitResult{}, nil, err
 		}
 	}
+	difficulty, err := questionDifficulty(ctx, tx, row.questionID)
+	if err != nil {
+		return SubmitResult{}, nil, err
+	}
+	rewards := []earnedReward{}
+	if earned, ok := answerReward(hinted, priorWrong, independent, difficulty, sessionID.String()+":"+row.questionID.String()); ok {
+		rewards = append(rewards, earned)
+	}
+	if skill.State == mastery.Mastered && !wasMastered {
+		rewards = append(rewards, earnedReward{reward.Mastery, row.knowledgePointID.String()})
+	}
+	// A review closed as INDEPENDENT_SUCCESS is what the growth page counts as
+	// a delayed review; an assisted review earns only its answer reward.
+	if row.evidenceForm == mastery.FormReview && row.reviewQueueID != nil && independent {
+		rewards = append(rewards, earnedReward{reward.DelayedReview, row.reviewQueueID.String()})
+	}
+	returnToOriginal := row.originalTaskID != nil && row.activeTaskID != nil && *row.originalTaskID != *row.activeTaskID
+	if returnToOriginal {
+		rewards = append(rewards, earnedReward{reward.CrossSubjectInsight, sessionID.String() + ":" + row.knowledgePointID.String()})
+		energy, err := grantRewards(ctx, tx, row.studentID, sessionID, rewards)
+		if err != nil {
+			return SubmitResult{}, nil, err
+		}
+		return service.returnToOriginal(ctx, tx, row, sessionID, turnSequence, eventSequence, now, skill.State, energy)
+	}
+	corrected := !independent || priorWrong
 	message := correctAnswerMessage(explained, corrected, skill.State == mastery.Mastered)
 	activeSeconds := checkpointTotal(lifecycleRow{startedAt: row.startedAt, accumulatedSeconds: row.accumulatedSeconds, lastResumedAt: row.lastResumedAt, status: row.status}, now)
 	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_state='COMPLETE',status='COMPLETED',ended_at=$2,accumulated_seconds=$3,actual_seconds=$3,last_resumed_at=NULL,last_activity_at=CASE WHEN status='ACTIVE' THEN $2 ELSE last_activity_at END,processing_token=NULL,processing_until=NULL,version=version+1,timing_version=timing_version+1 WHERE id=$1`, sessionID, now, activeSeconds); err != nil {
@@ -1141,6 +1157,15 @@ func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow,
 		if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status='COMPLETED' WHERE id=$1`, *row.planBlockID); err != nil {
 			return SubmitResult{}, nil, err
 		}
+	}
+	if earned, ok, err := dailyCompletionReward(ctx, tx, row.planBlockID); err != nil {
+		return SubmitResult{}, nil, err
+	} else if ok {
+		rewards = append(rewards, earned)
+	}
+	energy, err := grantRewards(ctx, tx, row.studentID, sessionID, rewards)
+	if err != nil {
+		return SubmitResult{}, nil, err
 	}
 	if err := recordStudentActivity(ctx, tx, row.studentID, sessionID, now); err != nil {
 		return SubmitResult{}, nil, err
@@ -1154,8 +1179,9 @@ func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow,
 	if err := insertEvent(ctx, tx, masteryEvent); err != nil {
 		return SubmitResult{}, nil, err
 	}
-	rewardStudent, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType})
-	rewardParent, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType, "source_id": rewardSource})
+	rewardType, rewardSource := headlineReward(rewards)
+	rewardStudent, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType, "reward_types": rewardTypes(rewards)})
+	rewardParent, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType, "reward_types": rewardTypes(rewards), "source_id": rewardSource})
 	rewardEvent := makeEvent(row.studentID, sessionID, eventSequence+1, realtime.EventRewardGranted, rewardStudent, rewardParent, now)
 	if err := insertEvent(ctx, tx, rewardEvent); err != nil {
 		return SubmitResult{}, nil, err

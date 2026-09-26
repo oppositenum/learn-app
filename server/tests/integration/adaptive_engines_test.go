@@ -361,7 +361,9 @@ func TestFullStudentParentOwnerE2E(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &completed); err != nil {
 		t.Fatal(err)
 	}
-	if completed.MasteryState != "UNDERSTOOD" || completed.Energy != 2 || !completed.TomorrowChanged {
+	// The review was finished after a voice explanation, so it earns only
+	// HINT_SUCCESS; an assisted review is not counted as a delayed review.
+	if completed.MasteryState != "UNDERSTOOD" || completed.Energy != 6 || !completed.TomorrowChanged {
 		t.Fatalf("completion = %+v", completed)
 	}
 	studentCompletionEvent := awaitEventType(t, studentEvents, "SESSION_COMPLETED")
@@ -373,7 +375,7 @@ func TestFullStudentParentOwnerE2E(t *testing.T) {
 		t.Fatalf("Parent completion event lacks mastery update: %s", parentCompletionEvent)
 	}
 	response = performJSON(router, http.MethodGet, "/api/v1/student/growth", fixture.studentToken, nil)
-	if response.Code != 200 || !strings.Contains(response.Body.String(), `"total_energy":2`) {
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"total_energy":6`) {
 		t.Fatalf("growth: %d %s", response.Code, response.Body.String())
 	}
 	response = performJSON(router, http.MethodGet, "/api/v1/student/today", fixture.studentToken, nil)

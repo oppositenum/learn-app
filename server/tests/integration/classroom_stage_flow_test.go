@@ -145,6 +145,9 @@ func TestFourStageClassroomCompletesRealStagesWithoutAIOrPrivateDisclosure(t *te
 	if agent.analyzeCalls != 0 || agent.generateCalls != 0 {
 		t.Fatalf("deterministic correct path called AI analyze=%d generate=%d", agent.analyzeCalls, agent.generateCalls)
 	}
+	// Stage tasks are L2, so a first-try independent classroom earns no EFFORT;
+	// it was the plan's only block, so the day's completion is recorded.
+	assertRewards(t, sessionRewardRows(t, pool, session.ID), "DAILY_COMPLETION=15")
 
 	var attempts, completedStages, evidenceRows, authorizedRows, responseColumns int
 	if err := pool.QueryRow(ctx, `
@@ -338,6 +341,25 @@ WHERE session_id=$1 AND submitted_stage='ORIGINAL'`, session.ID).Scan(&presented
 	if presented != 3 {
 		t.Fatalf("presented original tasks=%d", presented)
 	}
+
+	// Finishing the classroom after the help is a hint success, never also a
+	// self correction.
+	for range []classroom.Stage{classroom.StageVariant, classroom.StageAbstract, classroom.StageVerify} {
+		read = readStageSession(t, router, fixture.security.studentToken, session.ID)
+		next := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+session.ID.String()+"/answers", fixture.security.studentToken, map[string]any{
+			"operation_id": uuid.New(), "stage": read.StageFlow.Stage,
+			"task_id": read.QuestionID, "task_version": read.StageFlow.TaskVersion,
+			"response": correctStageResponse(t, ctx, pool, read.QuestionID),
+		})
+		if next.Code != http.StatusOK {
+			t.Fatalf("stage %s=%d %s", read.StageFlow.Stage, next.Code, next.Body.String())
+		}
+	}
+	read = readStageSession(t, router, fixture.security.studentToken, session.ID)
+	if read.Status != "COMPLETED" {
+		t.Fatalf("helped classroom status=%s", read.Status)
+	}
+	assertRewards(t, sessionRewardRows(t, pool, session.ID), "DAILY_COMPLETION=15", "HINT_SUCCESS=6")
 }
 
 func TestFourStageSocraticLimitAndContentExhaustionTerminateSafely(t *testing.T) {

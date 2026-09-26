@@ -194,7 +194,7 @@ func TestWrongAnswerAndHintAreRecordedAsAssistedEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if completed.MasteryState != "ASSISTED" || completed.Energy != 2 {
+	if completed.MasteryState != "ASSISTED" || completed.Energy != 6 {
 		t.Fatalf("assisted completion=%+v", completed)
 	}
 

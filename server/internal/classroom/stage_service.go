@@ -755,11 +755,13 @@ func (service *Service) commitStageAttempt(
 		}
 
 		var skill mastery.Skill
+		wasMastered := false
 		if evidenceKind != StageEvidenceNone {
 			skill, err = loadSkill(ctx, tx, snapshot.studentID, snapshot.knowledgePointID)
 			if err != nil {
 				return err
 			}
+			wasMastered = skill.State == mastery.Mastered
 			independent := evidenceKind == StageEvidenceIndependent
 			skill = mastery.NewEngine().Apply(skill, mastery.Evidence{
 				Correct: true, Independent: independent, Form: mastery.Form(snapshot.task.EvidenceForm), At: now,
@@ -788,8 +790,10 @@ VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), snapshot.sessionID
 			return err
 		}
 
+		var completionRewards []earnedReward
 		if sessionCompleted {
-			if err := service.completeStageSession(ctx, tx, snapshot, skill, now); err != nil {
+			completionRewards, err = service.completeStageSession(ctx, tx, snapshot, skill, wasMastered, now)
+			if err != nil {
 				return err
 			}
 			completed := now
@@ -852,7 +856,7 @@ VALUES($1,$2,$3,'TUTOR',$4,$5,$6,NULLIF($7,''))`, uuid.New(), snapshot.sessionID
 		}
 
 		if sessionCompleted {
-			completionEvents, err := service.stageCompletionEvents(ctx, tx, snapshot, skill, eventSequence, now)
+			completionEvents, err := service.stageCompletionEvents(ctx, tx, snapshot, skill, completionRewards, eventSequence, now)
 			if err != nil {
 				return err
 			}
@@ -914,7 +918,7 @@ WHERE id=$1`, snapshot.sessionID, now, activeSeconds, socraticFailCount); err !=
 	return nil
 }
 
-func (service *Service) completeStageSession(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, skill mastery.Skill, now time.Time) error {
+func (service *Service) completeStageSession(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, skill mastery.Skill, wasMastered bool, now time.Time) ([]earnedReward, error) {
 	activeSeconds := checkpointTotal(lifecycleRow{
 		status: snapshot.status, startedAt: snapshot.startedAt,
 		accumulatedSeconds: snapshot.accumulatedSeconds, lastResumedAt: snapshot.lastResumedAt,
@@ -923,7 +927,7 @@ func (service *Service) completeStageSession(ctx context.Context, tx pgx.Tx, sna
 UPDATE classroom_stage_sessions
 SET completed_at=$2,version=version+1
 WHERE session_id=$1`, snapshot.sessionID, now); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
 UPDATE learning_sessions
@@ -932,18 +936,18 @@ SET current_state='COMPLETE',status='COMPLETED',ended_at=$2,
     last_activity_at=CASE WHEN status='ACTIVE' THEN $2 ELSE last_activity_at END,
     processing_token=NULL,processing_until=NULL,version=version+1,timing_version=timing_version+1
 WHERE id=$1`, snapshot.sessionID, now, activeSeconds); err != nil {
-		return err
+		return nil, err
 	}
 	if snapshot.planBlockID != nil {
 		if _, err := tx.Exec(ctx, `UPDATE learning_plan_blocks SET status='COMPLETED' WHERE id=$1`, *snapshot.planBlockID); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if _, err := tx.Exec(ctx, `
 UPDATE student_misconceptions
 SET successful_corrections=successful_corrections+1,status='MONITORING',last_seen_at=$3
 WHERE student_id=$1 AND knowledge_point_id=$2 AND status='ACTIVE'`, snapshot.studentID, snapshot.knowledgePointID, now); err != nil {
-		return err
+		return nil, err
 	}
 	if snapshot.reviewQueueID != nil {
 		row := sessionRow{
@@ -955,29 +959,68 @@ WHERE student_id=$1 AND knowledge_point_id=$2 AND status='ACTIVE'`, snapshot.stu
 			skill.NextReviewAt = &next
 		}
 		if err := resolveSuccessfulReview(ctx, tx, row, skill, true, now); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	rewardType, sourceID := reward.Effort, snapshot.sessionID.String()
-	if skill.State == mastery.Mastered {
-		rewardType, sourceID = reward.Mastery, snapshot.knowledgePointID.String()
+	rewards, err := stageCompletionRewards(ctx, tx, snapshot, skill, wasMastered)
+	if err != nil {
+		return nil, err
 	}
-	if _, err := grantReward(ctx, tx, snapshot.studentID, snapshot.sessionID, rewardType, sourceID); err != nil {
-		return err
+	if _, err := grantRewards(ctx, tx, snapshot.studentID, snapshot.sessionID, rewards); err != nil {
+		return nil, err
 	}
-	return recordStudentActivity(ctx, tx, snapshot.studentID, snapshot.sessionID, now)
+	return rewards, recordStudentActivity(ctx, tx, snapshot.studentID, snapshot.sessionID, now)
 }
 
-func (service *Service) stageCompletionEvents(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, skill mastery.Skill, eventSequence int64, now time.Time) ([]realtime.Event, error) {
+// stageCompletionRewards applies the growth reward rules to a finished
+// four-stage classroom. The last stage is always answered without help on a
+// fresh task, so help anywhere in the classroom counts as HINT_SUCCESS, and an
+// earlier wrong answer on the last stage as a self correction.
+func stageCompletionRewards(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, skill mastery.Skill, wasMastered bool) ([]earnedReward, error) {
+	var helped, priorWrong bool
+	if err := tx.QueryRow(ctx, `
+SELECT
+    EXISTS (
+        SELECT 1 FROM classroom_stage_attempts
+        WHERE session_id=$1
+          AND (attempt_kind='HELP' OR response_code IN ('SOCRATIC_GUIDED','SOCRATIC_LIMIT_EXPLAINED'))
+    ),
+    EXISTS (
+        SELECT 1 FROM classroom_stage_attempts
+        WHERE session_id=$1 AND submitted_stage=$2
+          AND deterministic_result IN ('INCORRECT','INDETERMINATE')
+    )`, snapshot.sessionID, snapshot.stage).Scan(&helped, &priorWrong); err != nil {
+		return nil, err
+	}
+	difficulty, err := questionDifficulty(ctx, tx, snapshot.task.ID)
+	if err != nil {
+		return nil, err
+	}
+	rewards := []earnedReward{}
+	if earned, ok := answerReward(helped, priorWrong, !helped, difficulty, snapshot.sessionID.String()+":"+snapshot.task.ID.String()); ok {
+		rewards = append(rewards, earned)
+	}
+	if skill.State == mastery.Mastered && !wasMastered {
+		rewards = append(rewards, earnedReward{reward.Mastery, snapshot.knowledgePointID.String()})
+	}
+	if snapshot.reviewQueueID != nil {
+		rewards = append(rewards, earnedReward{reward.DelayedReview, snapshot.reviewQueueID.String()})
+	}
+	if earned, ok, err := dailyCompletionReward(ctx, tx, snapshot.planBlockID); err != nil {
+		return nil, err
+	} else if ok {
+		rewards = append(rewards, earned)
+	}
+	return rewards, nil
+}
+
+func (service *Service) stageCompletionEvents(ctx context.Context, tx pgx.Tx, snapshot stageSnapshot, skill mastery.Skill, rewards []earnedReward, eventSequence int64, now time.Time) ([]realtime.Event, error) {
 	score := mastery.NewEngine().Score(skill)
 	var energy int
 	if err := tx.QueryRow(ctx, `SELECT total_energy FROM student_growth WHERE student_id=$1`, snapshot.studentID).Scan(&energy); err != nil {
 		return nil, err
 	}
-	rewardType := reward.Effort
-	if skill.State == mastery.Mastered {
-		rewardType = reward.Mastery
-	}
+	rewardType, _ := headlineReward(rewards)
 	message := stageMessage("CLASSROOM_COMPLETE")
 	studentMastery, _ := json.Marshal(map[string]any{"mastery_state": skill.State, "mastery_score": score, "energy": energy, "message": message})
 	parentMastery, _ := json.Marshal(map[string]any{"action": StageComplete, "mastery_state": skill.State, "mastery_score": score, "energy": energy, "message": message})
@@ -985,8 +1028,8 @@ func (service *Service) stageCompletionEvents(ctx context.Context, tx pgx.Tx, sn
 	if err := insertEvent(ctx, tx, masteryEvent); err != nil {
 		return nil, err
 	}
-	studentReward, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType})
-	parentReward, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType})
+	studentReward, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType, "reward_types": rewardTypes(rewards)})
+	parentReward, _ := json.Marshal(map[string]any{"energy": energy, "reward_type": rewardType, "reward_types": rewardTypes(rewards)})
 	rewardEvent := makeEvent(snapshot.studentID, snapshot.sessionID, eventSequence+1, realtime.EventRewardGranted, studentReward, parentReward, now)
 	if err := insertEvent(ctx, tx, rewardEvent); err != nil {
 		return nil, err

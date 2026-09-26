@@ -116,7 +116,7 @@ const growth = {
   growth_evidence: {
     policy_version: 'growth-evidence-v1',
     indicators: [
-      { code: 'INDEPENDENT_SOLVING', label: '独立解决', count: 8, events: [{ source_kind: 'CLASSROOM_STAGE_EVIDENCE', source_id: 'event-1', subject: 'MATH', knowledge_point: '一元一次方程在实际购物问题中的应用', occurred_at: '2030-01-01T02:00:00Z' }], events_truncated: false },
+      { code: 'INDEPENDENT_SOLVING', label: '独立解决', count: 28, events: Array.from({ length: 20 }, (_, index) => ({ source_kind: 'CLASSROOM_STAGE_EVIDENCE', source_id: `event-${index}`, subject: 'MATH', knowledge_point: '一元一次方程在实际购物问题中的应用', occurred_at: '2030-01-01T02:00:00Z' })), events_truncated: true },
       { code: 'UNDERSTANDING_AFTER_HELP', label: '帮助后理解', count: 2, events: [], events_truncated: false },
       { code: 'SELF_CORRECTION', label: '自我纠正', count: 3, events: [], events_truncated: false },
       { code: 'TRANSFER_SUCCESS', label: '迁移成功', count: 4, events: [], events_truncated: false },
@@ -262,7 +262,39 @@ for (const viewport of viewports) {
       await page.goto('/student/growth')
       await expect(page.getByText('连续 7 天')).toBeVisible()
       await expectReadableAndTappable(page, viewport.width, 'growth')
+      for (const building of ['数学塔', '语言馆', '世界图书馆', '科学实验室', '探索站']) await expect(page.getByText(building, { exact: true })).toBeVisible()
       expect(unexpected).toEqual([])
+    })
+
+    test('growth with an evidence list open', async ({ page }) => {
+      await routeStudent(page, {})
+      await page.goto('/student/growth')
+      const indicator = page.getByTestId('growth-indicator-INDEPENDENT_SOLVING')
+      await indicator.click()
+      await expect(page.getByTestId('growth-events-INDEPENDENT_SOLVING')).toContainText('数学 · 一元一次方程在实际购物问题中的应用')
+      await expect(page.getByTestId('growth-events-truncated')).toBeVisible()
+      await expectReadableAndTappable(page, viewport.width, 'growth-open')
+    })
+
+    test('growth lights up briefly, and not at all under reduced motion', async ({ page }) => {
+      await routeStudent(page, {})
+      await page.goto('/student/growth')
+      const lit = page.getByTestId('growth-building-MATH_TOWER').locator('.growth-lit')
+      await expect(lit).toBeVisible()
+      const motion = await lit.evaluate((node) => {
+        const style = getComputedStyle(node)
+        return { animationName: style.animationName, animationDuration: style.animationDuration }
+      })
+      expect(motion.animationName).toBe('growth-light-in')
+      expect(Number.parseFloat(motion.animationDuration) * 1000).toBeGreaterThanOrEqual(150)
+      expect(Number.parseFloat(motion.animationDuration) * 1000).toBeLessThanOrEqual(400)
+
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      await page.reload()
+      await expect(lit).toBeVisible()
+      expect(await lit.evaluate((node) => getComputedStyle(node).animationName)).toBe('none')
+      await page.getByTestId('growth-indicator-INDEPENDENT_SOLVING').click()
+      expect(await page.getByTestId('growth-events-INDEPENDENT_SOLVING').evaluate((node) => getComputedStyle(node).animationName)).toBe('none')
     })
 
     test('growth when it fails to load', async ({ page }) => {

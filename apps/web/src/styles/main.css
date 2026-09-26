@@ -487,3 +487,45 @@ input:focus-visible {
     box-shadow: none;
   }
 }
+
+/* Growth page: a lit building or subject grows in once, and an opened
+   evidence list eases in. Both are short and neither loops. */
+.growth-lit {
+  animation: growth-light-in 280ms var(--ease);
+}
+
+.growth-events {
+  transform-origin: top;
+  animation: growth-events-in 180ms var(--ease);
+}
+
+.growth-indicator-chevron {
+  transition: transform 180ms var(--ease);
+}
+
+.growth-indicator[aria-expanded="true"] .growth-indicator-chevron {
+  transform: rotate(180deg);
+}
+
+@keyframes growth-light-in {
+  from {
+    transform: scale(0.9);
+  }
+}
+
+@keyframes growth-events-in {
+  from {
+    transform: scaleY(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .growth-lit,
+  .growth-events {
+    animation: none;
+  }
+
+  .growth-indicator-chevron {
+    transition: none;
+  }
+}

@@ -54,13 +54,13 @@ test.describe('student growth and profile at 320px', () => {
     await routeStudent(page)
     await page.goto('/student/growth')
     await expect(page.getByText('连续 7 天')).toBeVisible()
+    await page.getByTestId('growth-indicator-INDEPENDENT_SOLVING').click()
 
     const texts = [
       page.getByText('本周成长'),
       page.getByText('学习证据', { exact: true }),
       page.getByText('连续 7 天'),
       page.getByText('一元一次方程在实际购物问题中的应用', { exact: false }),
-      page.getByText('等待新的学习证据').first(),
       page.getByText('2 个数学知识点已点亮'),
       page.getByText('次跨学科发现', { exact: false }),
       page.getByText('兼容能量记录：42'),
@@ -69,6 +69,13 @@ test.describe('student growth and profile at 320px', () => {
       await expect(text).toBeVisible()
       expect(await fontSize(text), await text.textContent() ?? '').toBeGreaterThanOrEqual(16)
     }
+    await expectNoHorizontalScroll(page)
+
+    // Only one category is open at a time; an empty one says it is waiting.
+    await page.getByTestId('growth-indicator-UNDERSTANDING_AFTER_HELP').click()
+    const waiting = page.getByText('等待新的学习证据')
+    await expect(waiting).toBeVisible()
+    expect(await fontSize(waiting)).toBeGreaterThanOrEqual(16)
     await expectNoHorizontalScroll(page)
   })
 
