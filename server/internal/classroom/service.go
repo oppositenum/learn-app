@@ -329,7 +329,10 @@ func (service *Service) submitWithinBudget(ctx context.Context, studentUserID, s
 
 		if evaluation.correct {
 			var completedEvents []realtime.Event
-			result, completedEvents, err = service.complete(ctx, tx, row, sessionID, answerID, evaluationProvenanceID, provenance, turnSequence+1, eventSequence, now)
+			// Only a model analysis of this answer can say the reasoning was
+			// explained; a key match records STRONG without reading it.
+			explained := prepared != nil && !prepared.deterministicMatch && prepared.analysis.ReasoningQuality == string(tutor.ReasoningStrong)
+			result, completedEvents, err = service.complete(ctx, tx, row, sessionID, answerID, evaluationProvenanceID, provenance, explained, turnSequence+1, eventSequence, now)
 			published = append(published, completedEvents...)
 			if result.Action == tutor.StateComplete {
 				planStudentID = row.studentID
@@ -1086,7 +1089,7 @@ func sessionSubmitResult(row sessionRow, sessionID uuid.UUID, version int64, act
 	}
 }
 
-func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID, studentAnswerID, evaluationProvenanceID uuid.UUID, provenance answerEvaluationProvenance, turnSequence, eventSequence int64, now time.Time) (SubmitResult, []realtime.Event, error) {
+func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow, sessionID, studentAnswerID, evaluationProvenanceID uuid.UUID, provenance answerEvaluationProvenance, explained bool, turnSequence, eventSequence int64, now time.Time) (SubmitResult, []realtime.Event, error) {
 	skill, err := loadSkill(ctx, tx, row.studentID, row.knowledgePointID)
 	if err != nil {
 		return SubmitResult{}, nil, err
@@ -1123,10 +1126,13 @@ func (service *Service) complete(ctx context.Context, tx pgx.Tx, row sessionRow,
 	if returnToOriginal {
 		return service.returnToOriginal(ctx, tx, row, sessionID, turnSequence, eventSequence, now, skill.State, energy)
 	}
-	message := "这次思路已经记录。"
-	if skill.State == mastery.Mastered {
-		message = "你已经在生活、变式、课本和跨天复习中都能独立解决，掌握证据完整。"
+	corrected := row.assistanceLevel > 0
+	if !corrected {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM student_answers sa JOIN answer_analyses aa ON aa.student_answer_id=sa.id WHERE sa.session_id=$1 AND sa.question_id=$2 AND sa.id<>$3 AND NOT aa.answer_correct)`, sessionID, row.questionID, studentAnswerID).Scan(&corrected); err != nil {
+			return SubmitResult{}, nil, err
+		}
 	}
+	message := correctAnswerMessage(explained, corrected, skill.State == mastery.Mastered)
 	activeSeconds := checkpointTotal(lifecycleRow{startedAt: row.startedAt, accumulatedSeconds: row.accumulatedSeconds, lastResumedAt: row.lastResumedAt, status: row.status}, now)
 	if _, err := tx.Exec(ctx, `UPDATE learning_sessions SET current_state='COMPLETE',status='COMPLETED',ended_at=$2,accumulated_seconds=$3,actual_seconds=$3,last_resumed_at=NULL,last_activity_at=CASE WHEN status='ACTIVE' THEN $2 ELSE last_activity_at END,processing_token=NULL,processing_until=NULL,version=version+1,timing_version=timing_version+1 WHERE id=$1`, sessionID, now, activeSeconds); err != nil {
 		return SubmitResult{}, nil, err
@@ -1398,6 +1404,24 @@ func isHelpRequest(answer string) bool {
 		return false
 	}
 }
+// correctAnswerMessage names what the child did to get this question right.
+// It reads only what the classroom already knows: whether a model analysis of
+// this answer found the reasoning explained, and whether this question already
+// had a wrong answer or help. The mastery conclusion follows when it is due.
+func correctAnswerMessage(explained, corrected, mastered bool) string {
+	message := "你自己把这道题做对了。"
+	switch {
+	case explained:
+		message = "你把做法说清楚了，结果也对。"
+	case corrected:
+		message = "你把刚才没做对的地方改对了。"
+	}
+	if mastered {
+		message += "你已经在生活、变式、课本和跨天复习中都能独立解决，掌握证据完整。"
+	}
+	return message
+}
+
 func reasoning(correct bool) string {
 	if correct {
 		return "STRONG"

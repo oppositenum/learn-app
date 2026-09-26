@@ -110,6 +110,17 @@ func TestFourStageClassroomCompletesRealStagesWithoutAIOrPrivateDisclosure(t *te
 			t.Fatalf("submit stage=%s status=%d body=%s", session.StageFlow.Stage, submit.Code, submit.Body.String())
 		}
 		assertStudentPayloadHasNoPrivateFields(t, submit.Body.Bytes())
+		var submitted classroom.StageSubmitResult
+		if err := json.Unmarshal(submit.Body.Bytes(), &submitted); err != nil {
+			t.Fatal(err)
+		}
+		wantMessage := "你自己做对了这一阶段。"
+		if wantStage == classroom.StageComplete {
+			wantMessage = "你自己做完了这一题的各个阶段。"
+		}
+		if submitted.Message != wantMessage {
+			t.Fatalf("stage %s correct feedback=%q want %q", session.StageFlow.Stage, submitted.Message, wantMessage)
+		}
 		if strings.Contains(submit.Body.String(), "deterministic_result") {
 			t.Fatalf("student response exposed internal correctness: %s", submit.Body.String())
 		}
@@ -247,6 +258,9 @@ func TestFourStageHelpAndFailureRequireFreshNeverPresentedReproof(t *testing.T) 
 	if assistedResult.EvidenceKind != classroom.StageEvidenceAssisted || assistedResult.StageCompleted || assistedResult.TaskID == nil || *assistedResult.TaskID == firstTask {
 		t.Fatalf("assisted result=%+v", assistedResult)
 	}
+	if assistedResult.Message != "你把这道题改对了。下一道要自己做。" {
+		t.Fatalf("assisted feedback=%q", assistedResult.Message)
+	}
 	secondTask := *assistedResult.TaskID
 
 	conflictBody := map[string]any{
@@ -291,6 +305,9 @@ func TestFourStageHelpAndFailureRequireFreshNeverPresentedReproof(t *testing.T) 
 		guidedResult.TaskID == nil || *guidedResult.TaskID == firstTask || *guidedResult.TaskID == secondTask {
 		t.Fatalf("guided success result=%+v", guidedResult)
 	}
+	if guidedResult.Message != "你把这道题改对了。下一道要自己做。" {
+		t.Fatalf("guided success feedback=%q", guidedResult.Message)
+	}
 	read = readStageSession(t, router, fixture.security.studentToken, session.ID)
 	thirdTask := read.QuestionID
 
@@ -308,6 +325,9 @@ func TestFourStageHelpAndFailureRequireFreshNeverPresentedReproof(t *testing.T) 
 	}
 	if !stageResult.StageCompleted || stageResult.Stage != classroom.StageVariant || stageResult.EvidenceKind != classroom.StageEvidenceIndependent {
 		t.Fatalf("fresh independent reproof=%+v", stageResult)
+	}
+	if stageResult.Message != "你自己做对了这一阶段。" {
+		t.Fatalf("fresh independent reproof feedback=%q", stageResult.Message)
 	}
 	var presented int
 	if err := pool.QueryRow(ctx, `

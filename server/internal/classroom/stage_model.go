@@ -164,15 +164,15 @@ func stageMessage(code string) string {
 	case "HELP_DELIVERED":
 		return "先按这条提示完成当前任务；完成后还要用新任务独立证明。"
 	case "ASSISTED_REPROOF":
-		return "当前任务在帮助下完成，现在换一道不重复的新任务独立证明。"
+		return "你把这道题改对了。下一道要自己做。"
 	case "SOCRATIC_LIMIT_EXPLAINED":
 		return "已经完成三次有效尝试。先看同结构示范，再回到当前任务验证。"
 	case "SOCRATIC_REPROOF_FAILED":
 		return "看过示范后这次还没有独立通过。当前课堂已结束，稍后可以重新开始。"
 	case "NEXT_STAGE":
-		return "这一阶段已独立完成，继续下一阶段。"
+		return "你自己做对了这一阶段。"
 	case "CLASSROOM_COMPLETE":
-		return "变式、抽象和验证都已真实完成。"
+		return "你自己做完了这一题的各个阶段。"
 	case "CONTENT_EXHAUSTED":
 		return "当前阶段暂时没有新的不重复任务。这次课堂已安全结束，可以稍后重新开始。"
 	default:
