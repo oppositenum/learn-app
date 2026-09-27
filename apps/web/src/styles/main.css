@@ -545,3 +545,9 @@ input:focus-visible {
     transition: none;
   }
 }
+
+.parent-live-label {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #71717a;
+}

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-import { getParentChildren, getParentLiveSession, sendParentIntervention, type ParentChild } from '../api/parent'
+import { getParentChildren, getParentLiveSession, sendParentIntervention, type ParentChild, type ParentLiveEmotion } from '../api/parent'
 
 export interface ParentTimelineItem {
   id: string
@@ -31,6 +31,8 @@ export const useSupervisionStore = defineStore('supervision', {
     connected: false,
     reconnecting: false,
     sessionActive: false,
+    sessionStatus: '',
+    questionPrompt: '', hintCount: 0, emotion: 'CALM' as ParentLiveEmotion,
 		studentID: '', sessionID: '', childName: '', startedAt: '', subject: '', knowledgePoint: '', elapsed: '00:00', target: '00:00', activeSeconds: 0, timingClientAt: 0,
     studentAnswerPreview: '', answerVisibility: 'NONE' as 'NONE' | 'SHORT_CURRENT' | 'WITHHELD_LONG' | 'WITHHELD_NOT_ACTIVE', correctAnswer: '', misconception: '', tutorAction: '', tutorReason: '', socraticRound: 0,
     masteryState: 'UNKNOWN', masteryScore: 0,
@@ -86,11 +88,15 @@ export const useSupervisionStore = defineStore('supervision', {
         if (generation !== requestGeneration || studentID !== this.studentID) return
         this.sessionID = sessionID
         this.sessionActive = live.status === 'ACTIVE'
+        this.sessionStatus = live.status
+        this.questionPrompt = live.question_prompt
+        this.hintCount = live.hint_count
+        this.emotion = live.emotion
         this.subject = live.subject
         this.knowledgePoint = live.knowledge_point
         this.studentAnswerPreview = live.student_answer_preview ?? ''
         this.answerVisibility = live.student_answer_visibility
-        this.correctAnswer = formatAnswer(live.correct_answer)
+        this.correctAnswer = live.correct_answer == null ? '' : formatAnswer(live.correct_answer)
         this.misconception = live.error_type || live.misconceptions.join('、')
         this.tutorAction = live.tutor_action || live.current_state
         this.tutorReason = formatTutorReason(live.tutor_reason)
@@ -111,6 +117,10 @@ export const useSupervisionStore = defineStore('supervision', {
     clearSession() {
       this.sessionID = ''
       this.sessionActive = false
+      this.sessionStatus = ''
+      this.questionPrompt = ''
+      this.hintCount = 0
+      this.emotion = 'CALM'
       this.startedAt = ''
       this.subject = ''
       this.knowledgePoint = ''
@@ -182,6 +192,7 @@ export const useSupervisionStore = defineStore('supervision', {
         this.clearSession()
         this.sessionID = message.session_id
         this.sessionActive = true
+        this.sessionStatus = 'ACTIVE'
       }
       if (child && message.type === 'SESSION_STARTED') child.active_session_id = message.session_id
       if (typeof payload.subject === 'string') this.subject = payload.subject
@@ -191,7 +202,7 @@ export const useSupervisionStore = defineStore('supervision', {
 				this.activeSeconds = payload.active_seconds
 				this.timingClientAt = performance.now()
 			}
-      if (typeof payload.correct_answer !== 'undefined') this.correctAnswer = formatAnswer(payload.correct_answer)
+      if (typeof payload.correct_answer !== 'undefined' && this.sessionActive) this.correctAnswer = formatAnswer(payload.correct_answer)
       if (typeof payload.error_type === 'string') this.misconception = payload.error_type
       if (typeof payload.misconception === 'string') this.misconception = payload.misconception
       if (typeof payload.action === 'string') this.tutorAction = payload.action
@@ -200,9 +211,19 @@ export const useSupervisionStore = defineStore('supervision', {
       if (typeof payload.mastery_state === 'string') this.masteryState = payload.mastery_state
       if (typeof payload.mastery_score === 'number') this.masteryScore = payload.mastery_score
       if (typeof payload.reason === 'string') this.tutorReason = formatTutorReason(payload.reason)
-			if (message.type === 'SESSION_RESUMED') this.sessionActive = true
+			if (message.type === 'SESSION_RESUMED') {
+				this.sessionActive = true
+				this.sessionStatus = 'ACTIVE'
+			}
 			if (message.type === 'SESSION_PAUSED' || message.type === 'SESSION_ABANDONED' || message.type === 'SESSION_COMPLETED') {
         this.sessionActive = false
+        this.sessionStatus = message.type === 'SESSION_PAUSED' ? 'PAUSED' : message.type === 'SESSION_COMPLETED' ? 'COMPLETED' : 'ABANDONED'
+        // A classroom that is not running keeps its question and answers off
+        // the parent page until the next read confirms what is left.
+        this.questionPrompt = ''
+        this.correctAnswer = ''
+        this.studentAnswerPreview = ''
+        this.answerVisibility = 'WITHHELD_NOT_ACTIVE'
 				if (child && (message.type === 'SESSION_ABANDONED' || message.type === 'SESSION_COMPLETED')) child.active_session_id = null
       }
       this.timeline.push({

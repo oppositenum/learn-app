@@ -54,6 +54,8 @@ function liveSession(sessionID: string, answer = '第一次回答') {
     current_state: 'SCAFFOLD',
     socratic_round: 2,
     engagement: 'NORMAL',
+    emotion: 'CALM',
+    hint_count: 0,
     question_prompt: '题目',
     correct_answer: { value: '铁钉生锈' },
     full_solution: '解析',
@@ -166,6 +168,45 @@ describe('Parent realtime supervision', () => {
     await vi.advanceTimersByTimeAsync(500)
     expect(FakeWebSocket.instances).toHaveLength(2)
     expect(FakeWebSocket.instances[1]?.url).toContain('/ws/parent/student-new')
+  })
+
+  it('reads the question, hints and emotion while running and drops the question and answers once paused', async () => {
+    let live: Record<string, unknown> = { ...liveSession('session-new'), hint_count: 3, emotion: 'FRUSTRATED' }
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      if (String(input).includes('/parent/children')) return {
+        ok: true,
+        json: async () => ({ children: [{ student_id: 'student-new', display_name: '媛媛', grade_level: 7, active_session_id: 'session-new', subject: '化学', knowledge_point: '变化', started_at: '2026-08-27T03:39:11Z' }] }),
+      } as Response
+      return { ok: true, json: async () => live } as Response
+    }))
+    const store = useSupervisionStore()
+
+    await store.initialize()
+    expect(store.sessionStatus).toBe('ACTIVE')
+    expect(store.questionPrompt).toBe('题目')
+    expect(store.correctAnswer).toBe('铁钉生锈')
+    expect(store.hintCount).toBe(3)
+    expect(store.emotion).toBe('FRUSTRATED')
+
+    FakeWebSocket.instances[0]?.open()
+    FakeWebSocket.instances[0]?.message({ event_id: 'event-pause', student_id: 'student-new', session_id: 'session-new', type: 'SESSION_PAUSED', payload: {} })
+    expect(store.sessionActive).toBe(false)
+    expect(store.sessionStatus).toBe('PAUSED')
+    expect(store.questionPrompt).toBe('')
+    expect(store.correctAnswer).toBe('')
+    expect(store.studentAnswerPreview).toBe('')
+    expect(store.answerVisibility).toBe('WITHHELD_NOT_ACTIVE')
+    // A late answer payload does not bring the standard answer back while paused.
+    FakeWebSocket.instances[0]?.message({ event_id: 'event-late', student_id: 'student-new', session_id: 'session-new', type: 'ANSWER_ANALYZED', payload: { correct_answer: '铁钉生锈' } })
+    expect(store.correctAnswer).toBe('')
+
+    live = { ...liveSession('session-new'), status: 'PAUSED', question_prompt: '', correct_answer: null, full_solution: '', student_answer_visibility: 'WITHHELD_NOT_ACTIVE', student_answer_preview: undefined, hint_count: 3, emotion: 'CALM' }
+    await vi.advanceTimersByTimeAsync(100)
+    expect(store.sessionStatus).toBe('PAUSED')
+    expect(store.questionPrompt).toBe('')
+    expect(store.correctAnswer).toBe('')
+    expect(store.hintCount).toBe(3)
+    expect(store.emotion).toBe('CALM')
   })
 
   it('clears private parent state and ignores requests from the previous account generation', async () => {

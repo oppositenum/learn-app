@@ -1,5 +1,7 @@
 import type { GrowthEvidenceProjection } from './learning'
 
+export type ParentLiveEmotion = 'CALM' | 'BORED' | 'FRUSTRATED'
+
 export interface ParentLiveSession {
   session_id: string
   student_id: string
@@ -10,6 +12,8 @@ export interface ParentLiveSession {
   current_state: string
   socratic_round: number
   engagement: string
+  emotion: ParentLiveEmotion
+  hint_count: number
   question_prompt: string
   correct_answer: unknown
   full_solution: string

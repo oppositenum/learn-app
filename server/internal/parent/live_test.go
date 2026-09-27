@@ -41,3 +41,11 @@ func TestParentTurnSummaryContainsNoOriginalMessage(t *testing.T) {
 		t.Fatalf("Tutor summary=%q", got)
 	}
 }
+
+func TestParentEmotionUsesOnlyThreeGentleStates(t *testing.T) {
+	for signal, want := range map[string]string{"": "CALM", "NEUTRAL": "CALM", "ANXIOUS": "CALM", "BORED": "BORED", "FRUSTRATED": "FRUSTRATED", "UNKNOWN": "CALM"} {
+		if got := parentEmotion(signal); got != want {
+			t.Fatalf("parentEmotion(%q)=%s want %s", signal, got, want)
+		}
+	}
+}

@@ -25,6 +25,8 @@ type LiveSessionDTO struct {
 	CurrentState         string          `json:"current_state"`
 	SocraticRound        int16           `json:"socratic_round"`
 	Engagement           string          `json:"engagement"`
+	Emotion              string          `json:"emotion"`
+	HintCount            int             `json:"hint_count"`
 	QuestionPrompt       string          `json:"question_prompt"`
 	CorrectAnswer        json.RawMessage `json:"correct_answer"`
 	FullSolution         string          `json:"full_solution"`
@@ -57,9 +59,15 @@ func (repository *Repository) LiveSession(ctx context.Context, studentID, sessio
 	var live LiveSessionDTO
 	var studentAnswer string
 	var answerCorrect sql.NullBool
+	var fresh bool
+	var emotionSignal string
 	err := repository.pool.QueryRow(ctx, `
 SELECT ls.id, ls.student_id, s.name_zh, kp.name, ls.started_at, ls.status,
+       ls.last_activity_at>=CURRENT_TIMESTAMP-interval '90 seconds',
        ls.current_state, ls.socratic_fail_count, ls.engagement_state,
+       COALESCE(emotion.emotion_signal, ''),
+       (SELECT count(*) FROM tutor_turns WHERE session_id=ls.id AND actor='TUTOR'
+           AND action IN ('HINT','SCAFFOLD','ANALOGY','BACKTRACK','EXPLAIN','VOICE_EXPLAIN'))::integer,
        q.prompt_public, qa.correct_answer_json, qa.full_solution_private,
        COALESCE(sa.answer_text, ''), aa.answer_correct,
        COALESCE(aa.error_type, ''), aa.weakness_layer, COALESCE(aa.misconceptions_private_json, '[]'::jsonb),
@@ -80,11 +88,15 @@ LEFT JOIN answer_analyses aa ON aa.student_answer_id = sa.id
 LEFT JOIN LATERAL (
     SELECT * FROM tutor_turns WHERE session_id = ls.id AND actor = 'TUTOR' ORDER BY sequence DESC LIMIT 1
 ) tt ON true
+LEFT JOIN LATERAL (
+    SELECT a.emotion_signal FROM answer_analyses a JOIN student_answers x ON x.id = a.student_answer_id
+    WHERE x.session_id = ls.id ORDER BY x.submitted_at DESC, a.created_at DESC LIMIT 1
+) emotion ON true
 LEFT JOIN student_skill_states ss ON ss.student_id=ls.student_id AND ss.knowledge_point_id=q.knowledge_point_id
 WHERE ls.id = $1 AND ls.student_id = $2`, sessionID, studentID).Scan(
 		&live.SessionID, &live.StudentID, &live.Subject, &live.KnowledgePoint,
-		&live.StartedAt, &live.Status, &live.CurrentState, &live.SocraticRound,
-		&live.Engagement, &live.QuestionPrompt, &live.CorrectAnswer, &live.FullSolution,
+		&live.StartedAt, &live.Status, &fresh, &live.CurrentState, &live.SocraticRound,
+		&live.Engagement, &emotionSignal, &live.HintCount, &live.QuestionPrompt, &live.CorrectAnswer, &live.FullSolution,
 		&studentAnswer, &answerCorrect, &live.ErrorType, &live.WeaknessLayer, &live.Misconceptions,
 		&live.TutorAction, &live.TutorReason, &live.TargetMinutes, &live.ActiveSeconds, &live.MasteryState, &live.MasteryScore,
 	)
@@ -96,6 +108,17 @@ WHERE ls.id = $1 AND ls.student_id = $2`, sessionID, studentID).Scan(
 	}
 	if answerCorrect.Valid {
 		live.AnswerCorrect = &answerCorrect.Bool
+	}
+	live.Emotion = parentEmotion(emotionSignal)
+	// A classroom quiet for 90 seconds is paused for the parent as well, and a
+	// paused classroom keeps its question and answers off the parent page.
+	if live.Status == "ACTIVE" && !fresh {
+		live.Status = "PAUSED"
+	}
+	if live.Status == "PAUSED" {
+		live.QuestionPrompt = ""
+		live.CorrectAnswer = nil
+		live.FullSolution = ""
 	}
 	live.DetailMode = "REPORT"
 	live.AnswerVisibility = "WITHHELD_NOT_ACTIVE"
@@ -123,6 +146,17 @@ WHERE ls.id = $1 AND ls.student_id = $2`, sessionID, studentID).Scan(
 }
 
 const parentCurrentAnswerLimit = 80
+
+// parentEmotion names the child's state from the latest answer analysis with
+// one of three gentle labels; anything else reads as calm.
+func parentEmotion(signal string) string {
+	switch signal {
+	case "BORED", "FRUSTRATED":
+		return signal
+	default:
+		return "CALM"
+	}
+}
 
 func currentAnswerPreview(answer string) (*string, string) {
 	if strings.ContainsAny(answer, "\r\n") {
