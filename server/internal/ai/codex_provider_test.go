@@ -30,6 +30,7 @@ type structuredClientStub struct {
 type tutorOutputAuditorStub struct {
 	requests    []TutorOutputAuditRequest
 	err         error
+	errs        []error
 	deadline    time.Time
 	hasDeadline bool
 }
@@ -37,6 +38,9 @@ type tutorOutputAuditorStub struct {
 func (stub *tutorOutputAuditorStub) AuditTutorOutput(ctx context.Context, request TutorOutputAuditRequest) error {
 	stub.requests = append(stub.requests, request)
 	stub.deadline, stub.hasDeadline = ctx.Deadline()
+	if index := len(stub.requests) - 1; index < len(stub.errs) {
+		return stub.errs[index]
+	}
 	return stub.err
 }
 
@@ -276,8 +280,134 @@ func TestCodexProviderRejectsIntroducedNumbersAfterIndependentDisclosureAudit(t 
 	if !errors.Is(err, ErrTutorOutputRephraseRequired) || !errors.Is(err, ErrTutorMaterialPolicyViolation) {
 		t.Fatalf("error=%v", err)
 	}
-	if len(auditor.requests) != 1 {
-		t.Fatalf("existing independent disclosure audit was bypassed: %+v", auditor.requests)
+	// Both sentences went through the independent audit; there is no third.
+	if len(auditor.requests) != 2 || client.calls != 2 {
+		t.Fatalf("generations=%d audits=%d want 2 and 2", client.calls, len(auditor.requests))
+	}
+}
+
+// rejectedByReview is what the audit service returns when the reviewer or a
+// deterministic disclosure rule rejects a sentence a new one could fix.
+var rejectedByReview = errors.Join(ErrTutorOutputRephraseRequired, ErrTutorOutputRegenerable)
+
+func generatedTurnWithID(action tutor.State, responseID string) StructuredResult {
+	result := validGeneratedTurn(action)
+	result.ResponseID = responseID
+	return result
+}
+
+func TestCodexProviderGeneratesOnceMoreAfterARejectedSentence(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		first    StructuredResult
+		firstErr error
+	}{
+		{"reviewer rejection", generatedTurnWithID(tutor.StateProbe, "response-first"), rejectedByReview},
+		{"material rejection", StructuredResult{ResponseID: "response-first", OutputJSON: json.RawMessage(`{
+			"message":"如果改成每盒10支会怎样？","action":"PROBE","answer_revealed":false,"segments":[]
+		}`)}, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &structuredClientStub{results: []StructuredResult{test.first, generatedTurnWithID(tutor.StateProbe, "response-second")}}
+			auditor := &tutorOutputAuditorStub{errs: []error{test.firstErr, nil}}
+			provider, err := NewCodexProvider(client, auditor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			turn, err := provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(),
+				Question:      content.QuestionPublic{Prompt: "每盒12支，共3盒。"},
+				TutorDecision: tutor.Decision{NextState: tutor.StateProbe},
+			})
+			if err != nil {
+				t.Fatalf("second sentence was not returned: %v", err)
+			}
+			if client.calls != 2 || len(auditor.requests) != 2 {
+				t.Fatalf("generations=%d audits=%d want 2 and 2", client.calls, len(auditor.requests))
+			}
+			if turn.ResponseID != "response-second" || auditor.requests[1].GeneratorResponseID != "response-second" {
+				t.Fatalf("returned=%s second audit=%s want response-second", turn.ResponseID, auditor.requests[1].GeneratorResponseID)
+			}
+			if !strings.Contains(client.requests[1].Instructions, "The previous candidate was rejected") ||
+				strings.Contains(client.requests[0].Instructions, "The previous candidate was rejected") {
+				t.Fatal("only the second generation carries the rejection correction")
+			}
+		})
+	}
+}
+
+func TestCodexProviderStopsAfterTheSecondRejectedSentence(t *testing.T) {
+	client := &structuredClientStub{result: validGeneratedTurn(tutor.StateProbe)}
+	auditor := &tutorOutputAuditorStub{err: rejectedByReview}
+	provider, err := NewCodexProvider(client, auditor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateProbe}})
+	if !errors.Is(err, ErrTutorOutputRephraseRequired) {
+		t.Fatalf("error=%v want the rephrase rejection", err)
+	}
+	if client.calls != 2 || len(auditor.requests) != 2 {
+		t.Fatalf("generations=%d audits=%d want 2 and 2", client.calls, len(auditor.requests))
+	}
+}
+
+func TestCodexProviderDoesNotRegenerateWhenTheReviewIsUnavailableOrUnfixable(t *testing.T) {
+	for name, auditErr := range map[string]error{
+		"review unavailable":         NewTutorOutputReviewFailure(TutorReviewFailureTimeout, 0, "", "", errors.New("review timed out")),
+		"private answer unavailable": ErrTutorOutputRephraseRequired,
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := &structuredClientStub{result: validGeneratedTurn(tutor.StateProbe)}
+			auditor := &tutorOutputAuditorStub{err: auditErr}
+			provider, err := NewCodexProvider(client, auditor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), TutorDecision: tutor.Decision{NextState: tutor.StateProbe}})
+			if !errors.Is(err, auditErr) {
+				t.Fatalf("error=%v want the original audit error", err)
+			}
+			if client.calls != 1 || len(auditor.requests) != 1 {
+				t.Fatalf("generations=%d audits=%d want 1 and 1", client.calls, len(auditor.requests))
+			}
+		})
+	}
+}
+
+func TestCodexProviderRegeneratesHintsAndExplanationsTheSameWay(t *testing.T) {
+	question := content.QuestionPublic{Prompt: "每盒12支，共3盒。"}
+	for name, generate := range map[string]func(*CodexProvider) (TutorTurn, error){
+		"hint": func(provider *CodexProvider) (TutorTurn, error) {
+			return provider.GenerateTurn(context.Background(), GenerateTurnRequest{Teaching: teachingFixture(), Question: question, TutorDecision: tutor.Decision{NextState: tutor.StateHint}})
+		},
+		"explanation": func(provider *CodexProvider) (TutorTurn, error) {
+			return provider.GenerateExplanation(context.Background(), ExplainRequest{Teaching: teachingFixture(), Question: question, TutorDecision: tutor.Decision{NextState: tutor.StateExplain}})
+		},
+		"parallel example": func(provider *CodexProvider) (TutorTurn, error) {
+			return provider.GenerateParallelExample(context.Background(), ExampleRequest(GenerateTurnRequest{Teaching: teachingFixture(), Question: question, TutorDecision: tutor.Decision{NextState: tutor.StateExplain}}))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			action := tutor.StateHint
+			if name != "hint" {
+				action = tutor.StateExplain
+			}
+			for _, secondErr := range []error{nil, rejectedByReview} {
+				client := &structuredClientStub{result: validGeneratedTurn(action)}
+				auditor := &tutorOutputAuditorStub{errs: []error{rejectedByReview, secondErr}}
+				provider, err := NewCodexProvider(client, auditor)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = generate(provider)
+				if (secondErr == nil) != (err == nil) || (err != nil && !errors.Is(err, ErrTutorOutputRephraseRequired)) {
+					t.Fatalf("second audit err=%v got %v", secondErr, err)
+				}
+				if client.calls != 2 || len(auditor.requests) != 2 {
+					t.Fatalf("generations=%d audits=%d want 2 and 2", client.calls, len(auditor.requests))
+				}
+			}
+		})
 	}
 }
 

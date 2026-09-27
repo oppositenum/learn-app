@@ -267,6 +267,28 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	if requiredAction != "" {
 		instructions = fmt.Sprintf(`%s Set the "action" output field to exactly %q.`, instructions, requiredAction)
 	}
+	// A rejected sentence is generated and audited once more inside the same
+	// submit budget, so one unlucky sample does not send the child back. Only a
+	// rejection is retried; an unavailable reviewer or a timeout is not.
+	var turn TutorTurn
+	for attempt := 1; attempt <= tutorOutputRejectionAttempts; attempt++ {
+		turn, err = provider.generateAuditedTurn(ctx, purpose, request, instructions, requiredAction)
+		if err == nil || !errors.Is(err, ErrTutorOutputRegenerable) {
+			break
+		}
+		instructions = withRejectionCorrection(instructions, err)
+	}
+	if err != nil {
+		return TutorTurn{}, err
+	}
+	return ensureOriginalTaskVerification(turn), nil
+}
+
+// tutorOutputRejectionAttempts bounds generation after a rejected sentence:
+// the first sentence and one more, never a third.
+const tutorOutputRejectionAttempts = 2
+
+func (provider *CodexProvider) generateAuditedTurn(ctx context.Context, purpose Purpose, request GenerateTurnRequest, instructions, requiredAction string) (TutorTurn, error) {
 	var turn TutorTurn
 	if err := provider.generateTutorTurn(ctx, purpose, request, instructions, requiredAction, &turn); err != nil {
 		return TutorTurn{}, err
@@ -278,10 +300,21 @@ func (provider *CodexProvider) generateTurn(ctx context.Context, purpose Purpose
 	}); err != nil {
 		return TutorTurn{}, err
 	}
+	// The audit applies the same rule before it records a verdict; this keeps
+	// the rule enforced for any auditor.
 	if err := enforceTutorMaterialPolicy(request.Question, turn); err != nil {
-		return TutorTurn{}, errors.Join(ErrTutorOutputRephraseRequired, err)
+		return TutorTurn{}, errors.Join(ErrTutorOutputRephraseRequired, ErrTutorOutputRegenerable, err)
 	}
-	return ensureOriginalTaskVerification(turn), nil
+	return turn, nil
+}
+
+// withRejectionCorrection tells the second attempt which rule the first
+// sentence broke. It names the rule only, never the rejected text.
+func withRejectionCorrection(instructions string, err error) string {
+	if errors.Is(err, ErrTutorMaterialPolicyViolation) {
+		return instructions + " The previous candidate was rejected because it used a number that does not appear in the question material. Use only numbers that the question already shows."
+	}
+	return instructions + " The previous candidate was rejected by the answer-disclosure review. Do not state, imply, or partially reveal the answer or a solution step that gives it away."
 }
 
 func (provider *CodexProvider) generateTutorTurn(ctx context.Context, purpose Purpose, request GenerateTurnRequest, instructions, requiredAction string, target *TutorTurn) error {

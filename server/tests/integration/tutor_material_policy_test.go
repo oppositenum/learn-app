@@ -48,7 +48,8 @@ func TestTutorNumberMaterialRejectionPrecedesClassroomRealtimeAndTTS(t *testing.
 	unsafeTurn, _ := json.Marshal(map[string]any{
 		"message": "把每杯改成99元再比较。", "action": "ANALOGY", "answer_revealed": false, "segments": []any{},
 	})
-	providerServer := structuredResponseServer(t, []string{validAnalysisJSON(), string(unsafeTurn)})
+	// The rejected sentence is generated once more and rejected again.
+	providerServer := structuredResponseServer(t, []string{validAnalysisJSON(), string(unsafeTurn), string(unsafeTurn)})
 	defer providerServer.Close()
 	recorder := usage.NewRecorder(pool)
 	client, err := ai.NewOpenAIResponsesClient(providerServer.Client(), providerServer.URL, "test-key", "mock-tutor")
@@ -96,7 +97,7 @@ func TestTutorNumberMaterialRejectionPrecedesClassroomRealtimeAndTTS(t *testing.
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_output_audits WHERE session_id=$1`, fixture.sessionID).Scan(&audits); err != nil {
 		t.Fatal(err)
 	}
-	if generationUsage != 2 || reviewUsage != 0 || audits != 0 {
+	if generationUsage != 3 || reviewUsage != 0 || audits != 0 {
 		// The integration fixture uses an in-process allow auditor, so the
 		// existing gate is crossed without an external review usage or record.
 		t.Fatalf("generation_usage=%d review_usage=%d audits=%d", generationUsage, reviewUsage, audits)

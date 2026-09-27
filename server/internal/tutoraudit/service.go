@@ -137,10 +137,17 @@ func (service *Service) AuditTutorOutput(ctx context.Context, request ai.TutorOu
 		finalErr = ErrInvalidProvenance
 	} else if !deterministic.Passed {
 		// Both gates have run. The deterministic rejection remains authoritative.
-		finalErr = ErrOutputRejected
+		switch reasonCode {
+		case "DETERMINISTIC_MATERIAL":
+			finalErr = errors.Join(ErrOutputRejected, ai.ErrTutorOutputRegenerable, ai.ErrTutorMaterialPolicyViolation)
+		case "DETERMINISTIC_ANSWER_MATCH":
+			finalErr = errors.Join(ErrOutputRejected, ai.ErrTutorOutputRegenerable)
+		default:
+			finalErr = ErrOutputRejected
+		}
 	} else if !reviewApproves(review) {
 		reasonCode = "REVIEWER_REJECTED"
-		finalErr = ErrOutputRejected
+		finalErr = errors.Join(ErrOutputRejected, ai.ErrTutorOutputRegenerable)
 	} else {
 		finalResult = "PASS"
 		reasonCode = "APPROVED"

@@ -313,8 +313,11 @@ func TestLeftoversLayeredTurnStillPassesTheAnswerAudit(t *testing.T) {
 	// past the deterministic check and reaches the independent reviewer.
 	leak := "leftovers 就是上一顿没吃完、留着下一顿再吃的那些。"
 	pool, fixture, router, queue := startLayerClassroom(t, ctx, question, tutorModel, reviewerModel, map[string][]queuedResponse{
-		tutorModel:    {{status: http.StatusOK, output: layerAnalysisJSON(false, question.layer)}, {status: http.StatusOK, output: probeTurnJSON(leak)}},
-		reviewerModel: {{status: http.StatusOK, output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`}},
+		tutorModel: {{status: http.StatusOK, output: layerAnalysisJSON(false, question.layer)}, {status: http.StatusOK, output: probeTurnJSON(leak)}, {status: http.StatusOK, output: probeTurnJSON(leak)}},
+		reviewerModel: {
+			{status: http.StatusOK, output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`},
+			{status: http.StatusOK, output: `{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`},
+		},
 	})
 	before := readProtectedClassroomSnapshot(t, ctx, pool, fixture)
 	code, body := submitLayerAnswer(router, fixture, question.wrongAnswer)
@@ -326,17 +329,20 @@ func TestLeftoversLayeredTurnStillPassesTheAnswerAudit(t *testing.T) {
 		t.Fatalf("audit rejection mutated the classroom:\nbefore=%+v\nafter=%+v", before, after)
 	}
 	requests := queue.requestsFor(tutorModel)
-	if len(requests) != 2 {
-		t.Fatalf("tutor requests=%d", len(requests))
+	// The rejected turn is generated once more, still layered, and rejected again.
+	if len(requests) != 3 {
+		t.Fatalf("tutor requests=%d want 3", len(requests))
 	}
-	if instructions, _ := requests[1]["instructions"].(string); !strings.Contains(instructions, "weakness_layer is "+question.layer+": ") {
-		t.Fatalf("the audited turn was not the layered one: %q", instructions)
+	for _, request := range requests[1:] {
+		if instructions, _ := request["instructions"].(string); !strings.Contains(instructions, "weakness_layer is "+question.layer+": ") {
+			t.Fatal("an audited turn was not the layered one")
+		}
 	}
-	if queue.callCount(reviewerModel) != 1 {
-		t.Fatalf("reviewer calls=%d want 1", queue.callCount(reviewerModel))
+	if queue.callCount(reviewerModel) != 2 {
+		t.Fatalf("reviewer calls=%d want 2", queue.callCount(reviewerModel))
 	}
 	var violationsJSON string
-	if err := pool.QueryRow(ctx, `SELECT violations_json::text FROM tutor_output_audits WHERE session_id=$1 AND reviewer_result='REJECT' AND final_result='REJECT'`, fixture.sessionID).Scan(&violationsJSON); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT DISTINCT violations_json::text FROM tutor_output_audits WHERE session_id=$1 AND reviewer_result='REJECT' AND final_result='REJECT'`, fixture.sessionID).Scan(&violationsJSON); err != nil {
 		t.Fatal(err)
 	}
 	assertMinimalViolationJSON(t, violationsJSON, []tutoraudit.Violation{{ViolationType: "DIRECT_ANSWER", PayloadKind: "MESSAGE", SegmentIndex: -1}}, question.answers[0], leak)

@@ -37,6 +37,10 @@ func (DeterministicChecker) Check(request ai.TutorOutputAuditRequest) Determinis
 			return DeterministicResult{ReasonCode: "DETERMINISTIC_ANSWER_MATCH"}
 		}
 	}
+	// A guided turn may only use numbers the question already shows.
+	if ai.CheckTutorMaterialPolicy(request.Question, request.Candidate) != nil {
+		return DeterministicResult{ReasonCode: "DETERMINISTIC_MATERIAL"}
+	}
 	return DeterministicResult{Passed: true, ReasonCode: "NONE"}
 }
 

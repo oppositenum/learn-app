@@ -16,6 +16,13 @@ const TutorMaterialPolicyVersion = "tutor-number-material-v1"
 
 var ErrTutorMaterialPolicyViolation = errors.New("Tutor output violates the number material policy")
 
+// CheckTutorMaterialPolicy lets the Tutor output audit apply the number
+// material rule before it records its verdict, so the audit row and what the
+// student receives always agree.
+func CheckTutorMaterialPolicy(question content.QuestionPublic, turn TutorTurn) error {
+	return enforceTutorMaterialPolicy(question, turn)
+}
+
 func enforceTutorMaterialPolicy(question content.QuestionPublic, turn TutorTurn) error {
 	switch turn.Action {
 	case tutor.StateProbe, tutor.StateHint, tutor.StateScaffold, tutor.StateAnalogy:

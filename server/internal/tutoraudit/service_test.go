@@ -357,3 +357,68 @@ func TestServiceRecordsEveryViolationInconsistencyAsFailClosed(t *testing.T) {
 		})
 	}
 }
+
+// The audit row must say what the child actually gets. A new number in a
+// guided turn is a rejection even when the reviewer passes it.
+func TestServiceRecordsTheMaterialRuleBeforeTheVerdict(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		action      tutor.State
+		message     string
+		reviewPass  bool
+		final       string
+		reason      string
+		regenerable bool
+		material    bool
+	}{
+		{"new number, reviewer passes", tutor.StateHint, "如果改成4杯会怎样？", true, "REJECT", "DETERMINISTIC_MATERIAL", true, true},
+		{"new number, reviewer rejects", tutor.StateProbe, "如果改成4杯会怎样？", false, "REJECT", "DETERMINISTIC_MATERIAL", true, true},
+		{"question numbers only, reviewer rejects", tutor.StateHint, "36元里包含哪些部分？", false, "REJECT", "REVIEWER_REJECTED", true, false},
+		{"question numbers only, reviewer passes", tutor.StateScaffold, "36元里包含哪些部分？", true, "PASS", "APPROVED", false, false},
+		{"explanation is outside the material rule", tutor.StateExplain, "先看一个4杯的例子。", true, "PASS", "APPROVED", false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reviewer := passingReviewer()
+			if !test.reviewPass {
+				reviewer.review = Review{Result: ReviewReject, NoAnswerLeak: false, ReasonCodes: []string{"EQUIVALENT_ANSWER"}, Violations: []Violation{{ViolationType: "EQUIVALENT_ANSWER", PayloadKind: "MESSAGE", SegmentIndex: -1}}}
+			}
+			recorder := &recorderStub{}
+			service, err := NewService("openai:generator-v1", "openai:reviewer-v1", reviewer, recorder)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := validAuditRequest(test.message)
+			request.Candidate.Action = test.action
+			err = service.AuditTutorOutput(context.Background(), request)
+			if (test.final == "PASS") != (err == nil) {
+				t.Fatalf("final=%s but err=%v", test.final, err)
+			}
+			if err != nil && (!errors.Is(err, ErrOutputRejected) || errors.Is(err, ai.ErrTutorOutputRegenerable) != test.regenerable || errors.Is(err, ai.ErrTutorMaterialPolicyViolation) != test.material) {
+				t.Fatalf("err=%v want rejected, regenerable=%t, material=%t", err, test.regenerable, test.material)
+			}
+			if reviewer.calls != 1 || len(recorder.records) != 1 {
+				t.Fatalf("reviewer=%d records=%d want 1 and 1", reviewer.calls, len(recorder.records))
+			}
+			if record := recorder.records[0]; record.FinalResult != test.final || record.ReasonCode != test.reason {
+				t.Fatalf("record final=%s reason=%s want %s %s", record.FinalResult, record.ReasonCode, test.final, test.reason)
+			}
+		})
+	}
+}
+
+func TestServiceDoesNotMarkAMissingPrivateAnswerAsRegenerable(t *testing.T) {
+	recorder := &recorderStub{}
+	service, err := NewService("openai:generator-v1", "openai:reviewer-v1", passingReviewer(), recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validAuditRequest("36元里包含哪些部分？")
+	request.PrivateAnswer = content.QuestionPrivateAnswer{}
+	err = service.AuditTutorOutput(context.Background(), request)
+	if !errors.Is(err, ErrOutputRejected) || errors.Is(err, ai.ErrTutorOutputRegenerable) {
+		t.Fatalf("err=%v want a rejection that is not regenerable", err)
+	}
+	if len(recorder.records) != 1 || recorder.records[0].ReasonCode != "PRIVATE_ANSWER_UNAVAILABLE" {
+		t.Fatal("missing private answer was not recorded as PRIVATE_ANSWER_UNAVAILABLE")
+	}
+}

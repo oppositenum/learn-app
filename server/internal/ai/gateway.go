@@ -22,6 +22,11 @@ var (
 	ErrTutorGenerationBusy          = errors.New("Tutor generation is temporarily busy")
 	ErrTutorOutputReviewUnavailable = errors.New("Tutor output review is temporarily unavailable")
 	ErrTutorOutputRephraseRequired  = errors.New("Tutor output must be rephrased before publication")
+	// ErrTutorOutputRegenerable marks a rephrase rejection of the sentence
+	// itself (a disclosure review or the number material rule), which a new
+	// sentence can fix. A missing private answer is not marked: a new sentence
+	// would be rejected the same way.
+	ErrTutorOutputRegenerable = errors.New("Tutor output was rejected and may be generated once more")
 )
 
 type TutorGenerationFailureDetails struct {

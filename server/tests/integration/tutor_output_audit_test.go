@@ -9,11 +9,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/oppositenum/ai-learning-tutor/server/internal/ai"
@@ -281,8 +283,13 @@ func TestB3BTutorOutputReviewRejectsBeforeClassroomRealtimeAndVoiceMutation(t *t
 		tutorModel: {
 			`{"answer_correct":false,"reasoning_quality":"WEAK","confidence":0.98,"error_type":"FIXED_COST_IGNORED","misconceptions":["FIXED_COST_IGNORED"],"core_ability_signals":[],"emotion_signal":"NEUTRAL","engagement":"NORMAL","recommended_action":"VOICE_EXPLAIN","safe_to_increase_difficulty":false,"weakness_layer":"L2"}`,
 			`{"message":"先把固定费用和饮料费用分开。","action":"VOICE_EXPLAIN","answer_revealed":false,"segments":[{"id":"s1","text":"先分开两类费用。"}]}`,
+			`{"message":"先把固定费用和饮料费用分开。","action":"VOICE_EXPLAIN","answer_revealed":false,"segments":[{"id":"s1","text":"先分开两类费用。"}]}`,
 		},
-		reviewerModel: {`{"result":"REJECT","no_answer_leak":false,"reason_codes":["EQUIVALENT_ANSWER"],"violations":[{"violation_type":"EQUIVALENT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`},
+		// The rejected sentence is generated once more and rejected again.
+		reviewerModel: {
+			`{"result":"REJECT","no_answer_leak":false,"reason_codes":["EQUIVALENT_ANSWER"],"violations":[{"violation_type":"EQUIVALENT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`,
+			`{"result":"REJECT","no_answer_leak":false,"reason_codes":["EQUIVALENT_ANSWER"],"violations":[{"violation_type":"EQUIVALENT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`,
+		},
 	})
 	hub := realtime.NewHub()
 	studentEvents, stop := hub.Subscribe(fixture.studentID.String(), auth.RoleStudent)
@@ -331,18 +338,18 @@ func TestB3BTutorOutputReviewRejectsBeforeClassroomRealtimeAndVoiceMutation(t *t
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ai_usage_records WHERE session_id=$1 AND purpose IN('ANSWER_ANALYSIS','EXPLANATION','TUTOR_OUTPUT_REVIEW') AND price_catalog_id IS NOT NULL`, fixture.sessionID).Scan(&usageRows); err != nil {
 		t.Fatal(err)
 	}
-	if auditRows != 1 || usageRows != 3 {
-		t.Fatalf("rejection persistence audits=%d priced_usage=%d", auditRows, usageRows)
+	if auditRows != 2 || usageRows != 5 || queue.callCount(tutorModel) != 3 || queue.callCount(reviewerModel) != 2 {
+		t.Fatalf("rejection persistence audits=%d priced_usage=%d tutor_calls=%d reviewer_calls=%d", auditRows, usageRows, queue.callCount(tutorModel), queue.callCount(reviewerModel))
 	}
 	var reviewerCost string
-	if err := pool.QueryRow(ctx, `SELECT estimated_cost_usd::text FROM ai_usage_records WHERE session_id=$1 AND purpose='TUTOR_OUTPUT_REVIEW'`, fixture.sessionID).Scan(&reviewerCost); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT DISTINCT estimated_cost_usd::text FROM ai_usage_records WHERE session_id=$1 AND purpose='TUTOR_OUTPUT_REVIEW'`, fixture.sessionID).Scan(&reviewerCost); err != nil {
 		t.Fatal(err)
 	}
 	if reviewerCost != "0.000140000" {
 		t.Fatalf("reviewer cost=%s want=0.000140000", reviewerCost)
 	}
 	var violationsJSON string
-	if err := pool.QueryRow(ctx, `SELECT violations_json::text FROM tutor_output_audits WHERE session_id=$1`, fixture.sessionID).Scan(&violationsJSON); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT DISTINCT violations_json::text FROM tutor_output_audits WHERE session_id=$1`, fixture.sessionID).Scan(&violationsJSON); err != nil {
 		t.Fatal(err)
 	}
 	assertMinimalViolationJSON(t, violationsJSON, []tutoraudit.Violation{{ViolationType: "EQUIVALENT_ANSWER", PayloadKind: "MESSAGE", SegmentIndex: -1}}, fixture.privateCanary, "wrong runtime answer", "先把固定费用和饮料费用分开")
@@ -362,8 +369,14 @@ func TestB3CReviewerRejectsSupportWithMinimal422AndNoClassroomMutation(t *testin
 	tutorModel, reviewerModel := "b3c-support-tutor", "b3c-support-reviewer"
 	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
 	queue := newResponseQueueServer(t, map[string][]string{
-		tutorModel:    {`{"message":"先观察题目里的关系。","action":"HINT","answer_revealed":false,"segments":[]}`},
-		reviewerModel: {`{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`},
+		tutorModel: {
+			`{"message":"先观察题目里的关系。","action":"HINT","answer_revealed":false,"segments":[]}`,
+			`{"message":"先观察题目里的关系。","action":"HINT","answer_revealed":false,"segments":[]}`,
+		},
+		reviewerModel: {
+			`{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`,
+			`{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`,
+		},
 	})
 	service := classroom.NewService(pool, nil, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
 	router := api.NewRouter(api.Dependencies{
@@ -392,11 +405,12 @@ func TestB3CReviewerRejectsSupportWithMinimal422AndNoClassroomMutation(t *testin
 		t.Fatalf("support rejection mutated classroom state:\nbefore=%+v\nafter=%+v", before, after)
 	}
 	var violationsJSON string
-	if err := pool.QueryRow(ctx, `SELECT violations_json::text FROM tutor_output_audits WHERE session_id=$1 AND reviewer_result='REJECT' AND final_result='REJECT' AND reason_code='REVIEWER_REJECTED'`, fixture.sessionID).Scan(&violationsJSON); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT DISTINCT violations_json::text FROM tutor_output_audits WHERE session_id=$1 AND reviewer_result='REJECT' AND final_result='REJECT' AND reason_code='REVIEWER_REJECTED'`, fixture.sessionID).Scan(&violationsJSON); err != nil {
 		t.Fatal(err)
 	}
 	assertMinimalViolationJSON(t, violationsJSON, []tutoraudit.Violation{{ViolationType: "DIRECT_ANSWER", PayloadKind: "MESSAGE", SegmentIndex: -1}}, fixture.privateCanary, "先观察题目里的关系")
-	if queue.callCount(tutorModel) != 1 || queue.callCount(reviewerModel) != 1 {
+	assertAuditRows(t, ctx, pool, fixture.sessionID, "REJECT:REVIEWER_REJECTED", "REJECT:REVIEWER_REJECTED")
+	if queue.callCount(tutorModel) != 2 || queue.callCount(reviewerModel) != 2 {
 		t.Fatalf("support rejection provider calls tutor=%d reviewer=%d", queue.callCount(tutorModel), queue.callCount(reviewerModel))
 	}
 }
@@ -444,8 +458,14 @@ func TestB3BDeterministicGateRejectsSelfReportedSafeAnswerAfterIndependentReview
 	tutorModel, reviewerModel := "b3b-leak-tutor", "b3b-leak-reviewer"
 	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
 	queue := newResponseQueueServer(t, map[string][]string{
-		tutorModel:    {`{"message":"原题答案是` + fixture.privateCanary + `。","action":"HINT","answer_revealed":false,"segments":[]}`},
-		reviewerModel: {`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`},
+		tutorModel: {
+			`{"message":"原题答案是` + fixture.privateCanary + `。","action":"HINT","answer_revealed":false,"segments":[]}`,
+			`{"message":"原题答案是` + fixture.privateCanary + `。","action":"HINT","answer_revealed":false,"segments":[]}`,
+		},
+		reviewerModel: {
+			`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`,
+			`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`,
+		},
 	})
 	hub := realtime.NewHub()
 	studentEvents, stop := hub.Subscribe(fixture.studentID.String(), auth.RoleStudent)
@@ -482,7 +502,7 @@ func TestB3BDeterministicGateRejectsSelfReportedSafeAnswerAfterIndependentReview
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='tutor_output_audits' AND column_name IN('message','candidate','student_answer','answer_text','correct_answer','full_solution','teacher_reference_answer')`).Scan(&forbiddenAuditColumns); err != nil {
 		t.Fatal(err)
 	}
-	if auditRows != 1 || usageRows != 2 || forbiddenAuditColumns != 0 || queue.callCount(reviewerModel) != 1 {
+	if auditRows != 2 || usageRows != 4 || forbiddenAuditColumns != 0 || queue.callCount(tutorModel) != 2 || queue.callCount(reviewerModel) != 2 {
 		t.Fatalf("dual-gate evidence audits=%d usage=%d forbidden_columns=%d reviewer_calls=%d", auditRows, usageRows, forbiddenAuditColumns, queue.callCount(reviewerModel))
 	}
 }
@@ -931,4 +951,120 @@ func TestB3EAnalysis429RetryExhaustionReturnsExistingMinimal503WithoutMutation(t
 	}
 	t.Log(strings.TrimSpace(logOutput.String()))
 	t.Logf("analysis_429_exhausted tutor_calls=%d reviewer_calls=%d analysis_usage=%d generation_usage=%d reviewer_usage=%d audits=%d", queue.callCount(tutorModel), queue.callCount(reviewerModel), analysisUsage, generationUsage, reviewerUsage, auditRows)
+}
+
+// assertAuditRows reads the session's audit rows in generation order as
+// FINAL_RESULT:REASON_CODE and requires exactly the wanted sequence.
+func assertAuditRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sessionID uuid.UUID, want ...string) {
+	t.Helper()
+	rows, err := pool.Query(ctx, `SELECT final_result||':'||reason_code FROM tutor_output_audits WHERE session_id=$1 ORDER BY generation_response_id`, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("audit rows=%v want %v", got, want)
+	}
+}
+
+// A rejected hint is generated and audited once more inside the same request.
+// When the second sentence passes the child gets it, and each audit row says
+// what happened to its own sentence.
+func TestRejectedSupportSentenceIsGeneratedOnceMoreAndEachAuditRowMatches(t *testing.T) {
+	pass := `{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[]}`
+	reject := `{"result":"REJECT","no_answer_leak":false,"reason_codes":["DIRECT_ANSWER"],"violations":[{"violation_type":"DIRECT_ANSWER","payload_kind":"MESSAGE","segment_index":-1}]}`
+	safe := `{"message":"先找出固定费用。","action":"HINT","answer_revealed":false,"segments":[]}`
+	for _, test := range []struct {
+		name      string
+		first     string
+		firstRow  string
+		reviews   []string
+		firstRule string
+	}{
+		{"reviewer rejection", safe, "REJECT:REVIEWER_REJECTED", []string{reject, pass}, "answer-disclosure review"},
+		// The reviewer passes the new number; the material rule still rejects
+		// it, and the row says so instead of APPROVED.
+		{"material rejection", `{"message":"如果改成987元会怎样？","action":"HINT","answer_revealed":false,"segments":[]}`, "REJECT:DETERMINISTIC_MATERIAL", []string{pass, pass}, "question material"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := isolatedPool(t, ctx, testDatabaseURL(t))
+			if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+				t.Fatal(err)
+			}
+			fixture := seedSecurityFixture(t, ctx, pool)
+			tutorModel, reviewerModel := "regenerate-tutor", "regenerate-reviewer"
+			insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
+			queue := newResponseQueueServer(t, map[string][]string{
+				tutorModel:    {test.first, safe},
+				reviewerModel: test.reviews,
+			})
+			service := classroom.NewService(pool, nil, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
+			router := api.NewRouter(api.Dependencies{
+				Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+				Classroom:    classroom.NewHandler(service, pool, parent.NewRepository(pool)),
+			})
+
+			response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/support", fixture.studentToken, map[string]any{"type": "HINT"})
+			if response.Code != http.StatusOK {
+				t.Fatalf("support response=%d want 200", response.Code)
+			}
+			if queue.callCount(tutorModel) != 2 || queue.callCount(reviewerModel) != 2 {
+				t.Fatalf("provider calls tutor=%d reviewer=%d want 2 and 2", queue.callCount(tutorModel), queue.callCount(reviewerModel))
+			}
+			assertAuditRows(t, ctx, pool, fixture.sessionID, test.firstRow, "PASS:APPROVED")
+			// The second generation is told which rule the first one broke.
+			requests := queue.requestsFor(tutorModel)
+			if instructions, _ := requests[1]["instructions"].(string); !strings.Contains(instructions, test.firstRule) {
+				t.Fatal("the second generation was not told which rule the first sentence broke")
+			}
+			var tutorTurns int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_turns WHERE session_id=$1 AND actor='TUTOR' AND action='HINT'`, fixture.sessionID).Scan(&tutorTurns); err != nil {
+				t.Fatal(err)
+			}
+			if tutorTurns != 1 {
+				t.Fatalf("hint turns=%d want 1", tutorTurns)
+			}
+		})
+	}
+}
+
+// An unavailable reviewer is not a rejection: nothing is generated again and
+// the child gets the existing 503.
+func TestUnavailableReviewerDoesNotRegenerateTheSentence(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedPool(t, ctx, testDatabaseURL(t))
+	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedSecurityFixture(t, ctx, pool)
+	tutorModel, reviewerModel := "unavailable-tutor", "unavailable-reviewer"
+	insertAuditPrices(t, ctx, pool, tutorModel, reviewerModel)
+	queue := newResponseQueueServer(t, map[string][]string{
+		tutorModel:    {`{"message":"先找出固定费用。","action":"HINT","answer_revealed":false,"segments":[]}`},
+		reviewerModel: {`{"result":"PASS","no_answer_leak":true,"reason_codes":["NONE"],"violations":[],"unexpected":true}`},
+	})
+	service := classroom.NewService(pool, nil, nil, usage.NewRecorder(pool)).WithTeachingAgent(configureAuditedCodexAgent(t, pool, queue, tutorModel, reviewerModel))
+	router := api.NewRouter(api.Dependencies{
+		Authenticate: auth.NewSessionAuthenticator(pool).Middleware,
+		Classroom:    classroom.NewHandler(service, pool, parent.NewRepository(pool)),
+	})
+
+	response := performJSON(router, http.MethodPost, "/api/v1/student/sessions/"+fixture.sessionID.String()+"/support", fixture.studentToken, map[string]any{"type": "HINT"})
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("support response=%d want 503", response.Code)
+	}
+	if queue.callCount(tutorModel) != 1 || queue.callCount(reviewerModel) != 1 {
+		t.Fatalf("provider calls tutor=%d reviewer=%d want 1 and 1", queue.callCount(tutorModel), queue.callCount(reviewerModel))
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM tutor_output_audits WHERE session_id=$1 AND final_result='REJECT' AND reviewer_result='INVALID_SCHEMA'`, fixture.sessionID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("audit rows=%d want 1", rows)
+	}
 }
