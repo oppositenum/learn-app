@@ -258,17 +258,17 @@ func blockForSubject(blocks []Block, subjectCode string) (Block, bool) {
 }
 
 func (service *Service) buildPlanWithLocked(ctx context.Context, tx pgx.Tx, studentID uuid.UUID, asOf time.Time) (Plan, map[string]candidateMetadata, error) {
-	preferences, prioritySubjects, enabledSubjects, err := service.preferences(ctx, tx, studentID)
+	preferences, prioritySubjects, enabledSubjects, priorityDomainID, err := service.preferences(ctx, tx, studentID)
 	if err != nil {
 		return Plan{}, nil, err
 	}
-	candidates, metadata, err := service.candidates(ctx, tx, studentID, asOf, prioritySubjects, enabledSubjects)
+	candidates, metadata, err := service.candidates(ctx, tx, studentID, asOf, prioritySubjects, enabledSubjects, priorityDomainID)
 	if err != nil {
 		return Plan{}, nil, err
 	}
 	plan := service.engine.Build(Input{Date: asOf, Candidates: candidates, Preferences: preferences})
 	if len(plan.Blocks) == 0 && len(enabledSubjects) > 0 {
-		allCandidates, _, candidateErr := service.candidates(ctx, tx, studentID, asOf, prioritySubjects, nil)
+		allCandidates, _, candidateErr := service.candidates(ctx, tx, studentID, asOf, prioritySubjects, nil, priorityDomainID)
 		if candidateErr != nil {
 			return Plan{}, nil, candidateErr
 		}
@@ -375,17 +375,18 @@ type candidateMetadata struct {
 	reviewQueueID               *uuid.UUID
 }
 
-func (service *Service) preferences(ctx context.Context, db queryer, studentID uuid.UUID) (Preferences, []string, []string, error) {
+func (service *Service) preferences(ctx context.Context, db queryer, studentID uuid.UUID) (Preferences, []string, []string, *uuid.UUID, error) {
 	preferences := Preferences{DailyMinutes: 30}
 	var priorities, enabledSubjects []string
-	err := db.QueryRow(ctx, `SELECT daily_minutes,review_only,reduce_intensity,priority_subject_codes,enabled_subject_codes FROM parent_preferences WHERE student_id=$1 ORDER BY updated_at DESC LIMIT 1`, studentID).Scan(&preferences.DailyMinutes, &preferences.ReviewOnly, &preferences.ReduceIntensity, &priorities, &enabledSubjects)
+	var priorityDomainID *uuid.UUID
+	err := db.QueryRow(ctx, `SELECT daily_minutes,review_only,reduce_intensity,priority_subject_codes,enabled_subject_codes,priority_domain_id FROM parent_preferences WHERE student_id=$1 ORDER BY updated_at DESC LIMIT 1`, studentID).Scan(&preferences.DailyMinutes, &preferences.ReviewOnly, &preferences.ReduceIntensity, &priorities, &enabledSubjects, &priorityDomainID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return preferences, priorities, enabledSubjects, nil
+		return preferences, priorities, enabledSubjects, nil, nil
 	}
-	return preferences, priorities, enabledSubjects, err
+	return preferences, priorities, enabledSubjects, priorityDomainID, err
 }
 
-func (service *Service) candidates(ctx context.Context, db queryer, studentID uuid.UUID, date time.Time, priorities, enabledSubjects []string) ([]Candidate, map[string]candidateMetadata, error) {
+func (service *Service) candidates(ctx context.Context, db queryer, studentID uuid.UUID, date time.Time, priorities, enabledSubjects []string, priorityDomainID *uuid.UUID) ([]Candidate, map[string]candidateMetadata, error) {
 	if enabledSubjects == nil {
 		// A nil slice reaches PostgreSQL as NULL, and cardinality(NULL) is
 		// NULL rather than 0, which would silently filter out everything.
@@ -396,7 +397,8 @@ func (service *Service) candidates(ctx context.Context, db queryer, studentID uu
 			   COALESCE(ss.score_internal,0)::float8,due_review.id,due_review.due_at,
 	       EXISTS(SELECT 1 FROM student_misconceptions sm WHERE sm.student_id=$1 AND sm.knowledge_point_id=kp.id AND sm.status='ACTIVE'),
 		   COALESCE(s.code=ANY($3::text[]),false),
-		   ss.student_id IS NOT NULL
+		   ss.student_id IS NOT NULL,
+		   COALESCE(kp.domain_id=$5::uuid,false)
 	FROM knowledge_points kp
 	JOIN subjects s ON s.id=kp.subject_id
 	JOIN students st ON st.id=$1
@@ -414,7 +416,7 @@ func (service *Service) candidates(ctx context.Context, db queryer, studentID uu
 	  AND grade_band.min_grade<=st.grade_level
   AND EXISTS (SELECT 1 FROM questions q WHERE q.knowledge_point_id=kp.id AND q.status='RELEASED')
   AND (cardinality($4::text[])=0 OR s.code=ANY($4::text[]))
-ORDER BY s.sort_order,kp.code`, studentID, date, priorities, enabledSubjects)
+ORDER BY s.sort_order,kp.code`, studentID, date, priorities, enabledSubjects, priorityDomainID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -429,13 +431,13 @@ ORDER BY s.sort_order,kp.code`, studentID, date, priorities, enabledSubjects)
 		var studentGrade, gradeBandMin, gradeBandMax int
 		var score float64
 		var due *time.Time
-		var misconception, priority, practiced bool
-		if err := rows.Scan(&subjectID, &subjectCode, &kpID, &knowledgePointCode, &focus, &studentGrade, &gradeBandMin, &gradeBandMax, &score, &reviewQueueID, &due, &misconception, &priority, &practiced); err != nil {
+		var misconception, priority, practiced, domainPriority bool
+		if err := rows.Scan(&subjectID, &subjectCode, &kpID, &knowledgePointCode, &focus, &studentGrade, &gradeBandMin, &gradeBandMax, &score, &reviewQueueID, &due, &misconception, &priority, &practiced, &domainPriority); err != nil {
 			return nil, nil, err
 		}
 		key := kpID.String()
 		indexes[key] = len(candidates)
-		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, StudentGrade: studentGrade, GradeBandMin: gradeBandMin, GradeBandMax: gradeBandMax, SkillScore: score, FoundationPriority: foundationPriority(subjectCode, knowledgePointCode), ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority, Practiced: practiced, RemoveParentheses: knowledgePointCode == "MATH-JUN-REMOVE-PARENTHESES"})
+		candidates = append(candidates, Candidate{SubjectCode: subjectCode, KnowledgePointID: key, StudentGrade: studentGrade, GradeBandMin: gradeBandMin, GradeBandMax: gradeBandMax, SkillScore: score, FoundationPriority: foundationPriority(subjectCode, knowledgePointCode), ReviewDueAt: due, ActiveMisconception: misconception, ParentPriority: priority, DomainPriority: domainPriority, Practiced: practiced, RemoveParentheses: knowledgePointCode == "MATH-JUN-REMOVE-PARENTHESES"})
 		metadata[key] = candidateMetadata{subjectID: subjectID, knowledgePointID: kpID, focus: focus, reviewQueueID: reviewQueueID}
 	}
 	if err := rows.Err(); err != nil {

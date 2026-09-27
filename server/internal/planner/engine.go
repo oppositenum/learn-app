@@ -33,9 +33,12 @@ type Candidate struct {
 	ReviewDueAt         *time.Time
 	ActiveMisconception bool
 	ParentPriority      bool
-	CrossSubjectGap     bool
-	OriginalTaskID      string
-	Practiced           bool
+	// DomainPriority marks a knowledge point in the domain the parent asked
+	// the plan to lean toward.
+	DomainPriority  bool
+	CrossSubjectGap bool
+	OriginalTaskID  string
+	Practiced       bool
 	// RemoveParentheses is MATH-JUN-REMOVE-PARENTHESES. While it is still
 	// unpracticed it outranks the ticket equation, including when that
 	// equation carries an active misconception or an overdue review.
@@ -197,6 +200,9 @@ func candidateRank(candidate Candidate, now time.Time, reviewOnly bool) int {
 	}
 	if candidate.ParentPriority {
 		score += 30
+	}
+	if candidate.DomainPriority {
+		score += 40
 	}
 	if candidate.FoundationPriority > 0 {
 		score += candidate.FoundationPriority

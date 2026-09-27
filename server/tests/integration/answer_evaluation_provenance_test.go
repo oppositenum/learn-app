@@ -448,6 +448,10 @@ func assertLegacySchemaUnchanged(t *testing.T, ctx context.Context, pool *pgxpoo
 		// stay unchanged.
 		"learning_sessions.backtrack_origin_question_id",
 		"learning_sessions.backtrack_origin_evidence_form",
+		// Added by 000044 as a nullable column naming the knowledge domain a
+		// parent wants the plan to lean toward; the rest of
+		// parent_preferences must stay unchanged.
+		"parent_preferences.priority_domain_id",
 	})
 	if after != before {
 		t.Fatal("additive provenance migration changed a legacy table definition")

@@ -241,3 +241,27 @@ func TestPlanDateUsesShanghaiLearningDay(t *testing.T) {
 		t.Fatalf("learning day=%s location=%s", got.Format(time.RFC3339), got.Location())
 	}
 }
+
+func TestBuildLeansTowardTheParentPriorityDomainWithinASubject(t *testing.T) {
+	now := time.Date(2026, 9, 27, 9, 0, 0, 0, time.UTC)
+	candidates := []Candidate{
+		juniorCandidate(Candidate{SubjectCode: "MATH", KnowledgePointID: "weaker", SkillScore: 10}),
+		juniorCandidate(Candidate{SubjectCode: "MATH", KnowledgePointID: "in-domain", SkillScore: 50}),
+	}
+	plan := (Engine{}).Build(Input{Date: now, Preferences: Preferences{DailyMinutes: 30}, Candidates: candidates})
+	if len(plan.Blocks) != 1 || plan.Blocks[0].KnowledgePointID != "weaker" {
+		t.Fatalf("without a priority domain the weaker point leads: %+v", plan.Blocks)
+	}
+	candidates[1].DomainPriority = true
+	plan = (Engine{}).Build(Input{Date: now, Preferences: Preferences{DailyMinutes: 30}, Candidates: candidates})
+	if len(plan.Blocks) != 1 || plan.Blocks[0].KnowledgePointID != "in-domain" {
+		t.Fatalf("priority domain did not lead: %+v", plan.Blocks)
+	}
+	// A due review still outranks the domain lean.
+	due := now.Add(-time.Hour)
+	candidates[0].ReviewDueAt = &due
+	plan = (Engine{}).Build(Input{Date: now, Preferences: Preferences{DailyMinutes: 30}, Candidates: candidates})
+	if len(plan.Blocks) != 1 || plan.Blocks[0].KnowledgePointID != "weaker" {
+		t.Fatalf("due review lost to the priority domain: %+v", plan.Blocks)
+	}
+}

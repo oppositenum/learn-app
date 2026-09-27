@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -473,10 +474,22 @@ func (handler *Handler) ParentPreferences(writer http.ResponseWriter, request *h
 		ReviewOnly       bool      `json:"review_only"`
 		ReduceIntensity  bool      `json:"reduce_intensity"`
 		EnabledSubjects  *[]string `json:"enabled_subject_codes"`
+		PriorityDomainID *string   `json:"priority_domain_id"`
+		// StateNotGood is not stored on its own: it records reduce_intensity
+		// and review_only together, and the plan follows those two.
+		StateNotGood bool `json:"state_not_good"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 32<<10)).Decode(&body); err != nil {
+	// Preferences shape a plan only. A field naming a question, an answer or
+	// a submission is refused rather than silently dropped.
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 32<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil || decoder.More() {
 		http.Error(writer, "invalid preferences", 400)
 		return
+	}
+	if body.StateNotGood {
+		body.ReviewOnly = true
+		body.ReduceIntensity = true
 	}
 	if body.DailyMinutes < 15 || body.DailyMinutes > 60 {
 		http.Error(writer, "daily_minutes must be between 15 and 60", 400)
@@ -502,12 +515,34 @@ func (handler *Handler) ParentPreferences(writer http.ResponseWriter, request *h
 			return
 		}
 	}
+	var priorityDomainID *uuid.UUID
+	if body.PriorityDomainID != nil && strings.TrimSpace(*body.PriorityDomainID) != "" {
+		domainID, err := uuid.Parse(strings.TrimSpace(*body.PriorityDomainID))
+		if err != nil {
+			http.Error(writer, "priority_domain_id must be a knowledge domain", 400)
+			return
+		}
+		var domainSubject string
+		err = handler.pool.QueryRow(request.Context(), `SELECT s.code FROM domains d JOIN subjects s ON s.id=d.subject_id WHERE d.id=$1`, domainID).Scan(&domainSubject)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(writer, "priority_domain_id must be a knowledge domain", 400)
+			return
+		} else if err != nil {
+			http.Error(writer, "preferences unavailable", 500)
+			return
+		}
+		if len(enabledSubjects) > 0 && !slices.Contains(enabledSubjects, domainSubject) {
+			http.Error(writer, "priority_domain_id must belong to an enabled subject", 400)
+			return
+		}
+		priorityDomainID = &domainID
+	}
 	err = pgx.BeginFunc(request.Context(), handler.pool, func(tx pgx.Tx) error {
 		var lockedStudentID uuid.UUID
 		if err := tx.QueryRow(request.Context(), `SELECT id FROM students WHERE id=$1 FOR NO KEY UPDATE`, studentID).Scan(&lockedStudentID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(request.Context(), `INSERT INTO parent_preferences(parent_user_id,student_id,daily_minutes,priority_subject_codes,review_only,reduce_intensity,enabled_subject_codes) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(parent_user_id,student_id) DO UPDATE SET daily_minutes=EXCLUDED.daily_minutes,priority_subject_codes=EXCLUDED.priority_subject_codes,review_only=EXCLUDED.review_only,reduce_intensity=EXCLUDED.reduce_intensity,enabled_subject_codes=EXCLUDED.enabled_subject_codes,updated_at=now()`, parentID, studentID, body.DailyMinutes, body.PrioritySubjects, body.ReviewOnly, body.ReduceIntensity, enabledSubjects)
+		_, err := tx.Exec(request.Context(), `INSERT INTO parent_preferences(parent_user_id,student_id,daily_minutes,priority_subject_codes,review_only,reduce_intensity,enabled_subject_codes,priority_domain_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(parent_user_id,student_id) DO UPDATE SET daily_minutes=EXCLUDED.daily_minutes,priority_subject_codes=EXCLUDED.priority_subject_codes,review_only=EXCLUDED.review_only,reduce_intensity=EXCLUDED.reduce_intensity,enabled_subject_codes=EXCLUDED.enabled_subject_codes,priority_domain_id=EXCLUDED.priority_domain_id,updated_at=now()`, parentID, studentID, body.DailyMinutes, body.PrioritySubjects, body.ReviewOnly, body.ReduceIntensity, enabledSubjects, priorityDomainID)
 		return err
 	})
 	if err != nil {
@@ -571,7 +606,8 @@ func (handler *Handler) GetParentPreferences(writer http.ResponseWriter, request
 	priorities := []string{}
 	reviewOnly, reduceIntensity, configured := false, false, true
 	enabledSubjects := []string{}
-	err = handler.pool.QueryRow(request.Context(), `SELECT daily_minutes,priority_subject_codes,review_only,reduce_intensity,enabled_subject_codes FROM parent_preferences WHERE student_id=$1 ORDER BY updated_at DESC LIMIT 1`, studentID).Scan(&dailyMinutes, &priorities, &reviewOnly, &reduceIntensity, &enabledSubjects)
+	var priorityDomainID *uuid.UUID
+	err = handler.pool.QueryRow(request.Context(), `SELECT daily_minutes,priority_subject_codes,review_only,reduce_intensity,enabled_subject_codes,priority_domain_id FROM parent_preferences WHERE student_id=$1 ORDER BY updated_at DESC LIMIT 1`, studentID).Scan(&dailyMinutes, &priorities, &reviewOnly, &reduceIntensity, &enabledSubjects, &priorityDomainID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		configured = false
 	} else if err != nil {
@@ -581,12 +617,41 @@ func (handler *Handler) GetParentPreferences(writer http.ResponseWriter, request
 	if len(enabledSubjects) == 0 {
 		enabledSubjects = allSubjectCodes
 	}
+	// Domain choices for every subject; the page narrows them to the
+	// subjects the parent has ticked.
+	type domainOption struct {
+		ID          string `json:"id"`
+		SubjectCode string `json:"subject_code"`
+		Name        string `json:"name"`
+	}
+	domainOptions := []domainOption{}
+	rows, err := handler.pool.Query(request.Context(), `SELECT d.id::text,s.code,d.name FROM domains d JOIN subjects s ON s.id=d.subject_id ORDER BY s.sort_order,d.sort_order,d.code`)
+	if err != nil {
+		http.Error(writer, "preferences unavailable", 500)
+		return
+	}
+	for rows.Next() {
+		var option domainOption
+		if err := rows.Scan(&option.ID, &option.SubjectCode, &option.Name); err != nil {
+			rows.Close()
+			http.Error(writer, "preferences unavailable", 500)
+			return
+		}
+		domainOptions = append(domainOptions, option)
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		http.Error(writer, "preferences unavailable", 500)
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"daily_minutes":          dailyMinutes,
 		"priority_subject_codes": priorities,
 		"review_only":            reviewOnly,
 		"reduce_intensity":       reduceIntensity,
 		"enabled_subject_codes":  enabledSubjects,
+		"priority_domain_id":     priorityDomainID,
+		"domain_options":         domainOptions,
 		"configured":             configured,
 	})
 }
